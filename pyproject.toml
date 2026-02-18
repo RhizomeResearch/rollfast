@@ -1,0 +1,43 @@
+[project]
+name = "rollfast"
+version = "0.1.0"
+description = "JAX implementation of experimental optimizers and schedulers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "clementpoiret", email = "clement@linux.com" }
+]
+keywords = [
+    "jax",
+    "optax",
+    "optimizer",
+    "psgd",
+    "deep-learning",
+    "second-order-optimization",
+    "preconditioning"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "jax>=0.6.2",
+    "optax>=0.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/clementpoiret/rollfast"
+Repository = "https://github.com/clementpoiret/rollfast"
+Issues = "https://github.com/clementpoiret/rollfast/issues"
+
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
