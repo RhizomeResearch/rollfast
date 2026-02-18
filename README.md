@@ -151,15 +151,49 @@ ______________________________________________________________________
 
 ## Configuration
 
-### PRISM Hyperparameters
+### Stability & Clipping Parameters
 
-| Parameter        | Default | Description                                                                                           |
-| :--------------- | :------ | :---------------------------------------------------------------------------------------------------- |
-| `ns_iters`       | `5`     | Number of Newton-Schulz iterations. Higher values provide better orthogonality but cost more compute. |
-| `gamma`          | `1.0`   | Damping coefficient for the innovation term. Controls the "anisotropy" of spectral shaping.           |
-| `shape_nesterov` | `True`  | If True, applies spectral shaping to Nesterov momentum; otherwise shapes raw momentum.                |
+These parameters ensure robustness against gradient spikes and numerical
+instability, critical for training at scale.
 
-### PSGD Modes
+| Parameter                     | Default       | Description                                                                                                                                                |
+| :---------------------------- | :------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `raw_global_grad_clip`        | `None`        | If set, computes the global L2 norm of gradients *before* the optimizer step. If the norm exceeds this threshold, the update is either clipped or skipped. |
+| `permissive_spike_protection` | `True`        | Controls behavior when `raw_global_grad_clip` is triggered. `True` clips the gradient and proceeds; `False` strictly skips the update (zeroing the step).  |
+| `grad_clip_max_amps`          | `(2.0, 10.0)` | Post-processing clipping. Clips individual tensors by RMS (`2.0`) and absolute value (`10.0`) to prevent heavy tails in the update distribution.           |
+
+### Schedule-Free Hyperparameters
+
+When using `schedule_free_*` optimizers, these arguments control the underlying
+WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
+
+| Parameter         | Default     | Description                                                                                                       |
+| :---------------- | :---------- | :---------------------------------------------------------------------------------------------------------------- |
+| `warmup_fraction` | `0.1`       | Fraction of `total_steps` used for linear warmup.                                                                 |
+| `decay_fraction`  | `0.1`       | Fraction of `total_steps` used for linear decay (cooldown) at the end of training.                                |
+| `weighting_mode`  | `SCHEDULET` | Strategy for $c_t$ calculation: `THEORETICAL` ($1/t$), `PRACTICAL` ($\\gamma_t^2$), or `SCHEDULET` ($\\gamma_t$). |
+
+### PRISM Specifics
+
+| Parameter            | Default | Description                                                                                 |
+| :------------------- | :------ | :------------------------------------------------------------------------------------------ |
+| `ns_iters`           | `5`     | Newton-Schulz iterations. Higher values provide better orthogonality but cost more compute. |
+| `gamma`              | `1.0`   | Damping coefficient for the innovation term. Controls the "anisotropy" of spectral shaping. |
+| `shape_nesterov`     | `True`  | If True, shapes Nesterov momentum; otherwise shapes raw momentum.                           |
+| `adam_learning_rate` | `None`  | Optional override for the Adam branch learning rate. Defaults to `learning_rate` if None.   |
+
+### PSGD Specifics
+
+| Parameter                   | Default | Description                                                                                                                                                 |
+| :-------------------------- | :------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `track_lipschitz`           | `True`  | Enables adaptive step sizes for the preconditioner $Q$ by tracking the Lipschitz constant of the gradient.                                                  |
+| `max_skew_triangular`       | `1.0`   | Threshold for diagonal approximation. If a dimension's aspect ratio squared exceeds this relative to total numel, it is treated as diagonal to save memory. |
+| `preconditioner_init_scale` | `None`  | Initial scale for $Q$. If `None`, it is estimated on the first step using gradient statistics.                                                              |
+
+#### Preconditioner Modes
+
+The geometry of the preconditioner update $dQ$ is controlled via
+`preconditioner_mode`.
 
 | Mode        | Formula                             | Description                                                                                                                       |
 | :---------- | :---------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
