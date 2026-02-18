@@ -547,6 +547,8 @@ def _update_precond_generic(
     keys = jax.random.split(key, len(Q))
 
     for i, q in enumerate(Q):
+        dtype_in = q.dtype
+
         l = L[i] if L is not None else None
 
         # Term 1 is always X @ X^H (Gram matrix of inputs)
@@ -637,37 +639,38 @@ def _update_precond_generic(
                 elif mode == "EXP":
                     # Matrix Exponential
                     G_sym = (term1_reg + jnp.conj(term1_reg.T)) / 2.0 - term2 * jnp.eye(
-                        d, dtype=dtype
+                        d, dtype=jnp.float32
                     )
                     new_q = q @ jax.scipy.linalg.expm(-lr_scaled * G_sym)
                     new_q = (new_q + jnp.conj(new_q.T)) / 2.0
                 elif mode == "TAYLOR2":
                     # Second-Order Taylor Expansion of Geodesic Flow
                     G_sym = (term1_reg + jnp.conj(term1_reg.T)) / 2.0 - term2 * jnp.eye(
-                        d, dtype=dtype
+                        d, dtype=jnp.float32
                     )
                     # Limit step size to trust region of Taylor expansion
                     safe_lr = jnp.minimum(lr_scaled, 0.5 / add_tiny(ell - term2))
                     H = safe_lr * G_sym
-                    update_mat = jnp.eye(d, dtype=dtype) - H @ (
-                        jnp.eye(d, dtype=dtype) - 0.5 * H
+                    update_mat = jnp.eye(d, dtype=jnp.float32) - H @ (
+                        jnp.eye(d, dtype=jnp.float32) - 0.5 * H
                     )
                     new_q = q @ update_mat
                     new_q = (new_q + jnp.conj(new_q.T)) / 2.0
                 elif mode == "HYPER":
                     # Hyperbolic/Multiplicative
                     G_sym = (term1_reg + jnp.conj(term1_reg.T)) / 2.0 - term2 * jnp.eye(
-                        d, dtype=dtype
+                        d, dtype=jnp.float32
                     )
                     safe_lr = jnp.minimum(lr_scaled, 0.9 / add_tiny(ell - term2))
-                    update_mat = jnp.eye(d, dtype=dtype) - safe_lr * G_sym
+                    update_mat = jnp.eye(d, dtype=jnp.float32) - safe_lr * G_sym
                     new_q = q @ update_mat
                     new_q = (new_q + jnp.conj(new_q.T)) / 2.0
                 else:  # Q0.5EQ1.5
                     new_q = q - step
                     new_q = _procrustes_step2(new_q, geom_key)
 
-        new_Qs.append(new_q)
+        new_Qs.append(new_q.astype(dtype_in))
+
         if new_Ls is not None:
             new_Ls.append(new_l)
 
