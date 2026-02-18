@@ -206,7 +206,7 @@ def schedule_free_prism(
     # Schedule Config
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
-    weighting_mode: Union[str, WeightingMode] = WeightingMode.SCHEDULET,
+    weighting_mode: Union[str, WeightingMode] = WeightingMode.PRACTICAL,
     # Schedule-Free Config
     sf_b1: float = 0.90,
     state_dtype: Optional[jax.typing.DTypeLike] = None,
@@ -364,7 +364,7 @@ def schedule_free_kron(
     # Schedule Config
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
-    weighting_mode: Union[str, WeightingMode] = WeightingMode.SCHEDULET,
+    weighting_mode: Union[str, WeightingMode] = WeightingMode.PRACTICAL,
     # Schedule-Free Config
     sf_b1: float = 0.9,
     state_dtype: Optional[jax.typing.DTypeLike] = None,
