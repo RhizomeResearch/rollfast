@@ -68,6 +68,7 @@ class KronState(NamedTuple):
     Qs_preconditioners: Any
     Ls_lipschitz: Optional[Any]
     needs_scale_init: jax.Array
+    magma_s: Optional[Any]
     key: jax.Array
 
 
@@ -744,6 +745,8 @@ def scale_by_kron(
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -780,6 +783,13 @@ def scale_by_kron(
         raw_global_grad_clip: Threshold for global gradient norm clipping (spike protection).
         permissive_spike_protection: If True, allows updates during spikes if prob=1.0.
         newton_schulz_iters: Iterations for NS mode (default 5).
+        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+            WARNING: Magma introduces intentional update bias (damping). At an
+            equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
+            50% of steps are masked. This yields an expected magnitude attenuation
+            of ~0.25x. You may need to scale the global learning rate by ~4x to
+            maintain the original update volume.
+        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) reduction.
         key: PRNG key for stochastic elements.
 
@@ -907,12 +917,19 @@ def scale_by_kron(
                     f"PSGD Momentum size: {mu_n_elements} elements, {mu_size_MB:.2f} MB"
                 )
 
+        magma_s = (
+            jax.tree.map(lambda x: jnp.zeros([], jnp.float32), params)
+            if use_magma
+            else None
+        )
+
         return KronState(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
             Qs_preconditioners=Qs,
             Ls_lipschitz=Ls,
             needs_scale_init=jnp.array(lazy_init, dtype=jnp.bool_),
+            magma_s=magma_s,
             key=key,
         )
 
@@ -929,6 +946,8 @@ def scale_by_kron(
                 is_spike, raw_global_grad_clip / add_tiny(g_norm), 1.0
             )
             updates = jax.tree.map(lambda g: g * clip_scale, updates)
+
+        post_clip_raw_gradients = updates
 
         scanned_layers_ = scanned_layers
         if scanned_layers is None:
@@ -1207,6 +1226,52 @@ def scale_by_kron(
             raise ValueError(f"Unknown gradient clipping mode: {grad_clip_mode}")
 
         updates = grads_structure.unflatten(precond_gs)
+
+        # NOTE: Magma masking is applied at the PyTree leaf level,
+        # not the Kronecker sub-block level, treating each block as a distinct parameter unit.
+        if use_magma:
+            if state.mu is None:
+                raise ValueError(
+                    "Anti-Pattern: Magma strictly requires tracking momentum (b1 > 0)."
+                )
+
+            leaves_delta, treedef = jax.tree.flatten(updates)
+            leaves_g = jax.tree.leaves(post_clip_raw_gradients)
+            leaves_mu = jax.tree.leaves(mu)
+            leaves_s = jax.tree.leaves(state.magma_s)
+
+            # Advance the active PRNG stream; never re-split state.key to prevent
+            # cryptographic correlation with preconditioner noise injections.
+            magma_key, key_next = jax.random.split(key_next)
+            subkeys = jax.random.split(magma_key, len(leaves_delta))
+
+            new_leaves_delta, new_leaves_s = [], []
+            for d, g, m_u, s_old, k_leaf in zip(
+                leaves_delta, leaves_g, leaves_mu, leaves_s, subkeys
+            ):
+                g_f32 = g.astype(jnp.float32)
+                m_f32 = m_u.astype(jnp.float32)
+
+                dot = dist_reduce(jnp.sum(g_f32 * m_f32), axis_name, "sum")
+                norm_g_sq = dist_reduce(jnp.sum(g_f32**2), axis_name, "sum")
+                norm_mu_sq = dist_reduce(jnp.sum(m_f32**2), axis_name, "sum")
+
+                cossim = dot / jnp.maximum(
+                    jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-9
+                )
+                s_tilde = jax.nn.sigmoid(cossim / magma_tau)
+                s_new = 0.9 * s_old + 0.1 * s_tilde
+
+                m_mask = jax.random.bernoulli(k_leaf, 0.5).astype(jnp.float32)
+
+                new_leaves_delta.append(d * jnp.array(s_new * m_mask, dtype=d.dtype))
+                new_leaves_s.append(s_new)
+
+            updates = treedef.unflatten(new_leaves_delta)
+            magma_s_to_save = treedef.unflatten(new_leaves_s)
+        else:
+            magma_s_to_save = state.magma_s
+
         Qs_to_save = grads_structure.unflatten(Qs_next)
         Qs_to_save = otu.tree_cast(Qs_to_save, precond_dtype)
         Ls_to_save = grads_structure.unflatten(Ls_next) if Ls_next else None
@@ -1218,6 +1283,7 @@ def scale_by_kron(
             Qs_preconditioners=Qs_to_save,
             Ls_lipschitz=Ls_to_save,
             needs_scale_init=needs_scale_init,
+            magma_s=magma_s_to_save,
             key=key_next,
         )
 
@@ -1258,6 +1324,8 @@ def kron(
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -1294,6 +1362,8 @@ def kron(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
+            use_magma=use_magma,
+            magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,
         )

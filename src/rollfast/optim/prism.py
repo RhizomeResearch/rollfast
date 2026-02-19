@@ -472,6 +472,8 @@ class ScaleByPrismState(NamedTuple):
 
     count: jax.Array
     mu: base.Updates
+    magma_s: Optional[base.Updates]  # Tracks alignment EMA per parameter block
+    key: Optional[jax.Array]  # Stateful PRNG for Bernoulli masking
 
 
 def scale_by_prism(
@@ -485,8 +487,11 @@ def scale_by_prism(
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    axis_name: Optional[str] = None,
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
+    axis_name: Optional[str] = None,
+    key: int = 42,
 ) -> base.GradientTransformation:
     """The core PRISM gradient transformation.
 
@@ -509,9 +514,17 @@ def scale_by_prism(
             `raw_global_grad_clip` is triggered. If True, clips and proceeds.
         grad_clip_max_amps: Configuration for post-shaping clipping. Can be a float
             (max RMS) or a tuple (max RMS, max Abs).
-        axis_name: Axis name for distributed (SPMD) global norm reduction.
         weight_dimension_numbers: Specification for reshaping tensors. If provided,
             `params` must be passed to `update`.
+        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+            WARNING: Magma introduces intentional update bias (damping). At an
+            equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
+            50% of steps are masked. This yields an expected magnitude attenuation
+            of ~0.25x. You may need to scale the global learning rate by ~4x to
+            maintain the original update volume.
+        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
+        axis_name: Axis name for distributed (SPMD) global norm reduction.
+        key: Initial PRNG key for Magma's Bernoulli sampling.
 
     Returns:
         An `optax.GradientTransformation`.
@@ -520,7 +533,31 @@ def scale_by_prism(
 
     def init_fn(params):
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)
-        return ScaleByPrismState(count=jnp.zeros([], jnp.int32), mu=mu)
+
+        def _init_s(x):
+            if x is None:
+                return None
+            # Enforce topological isomorphism for XLA compiler
+            if isinstance(x, _masking.MaskedNode):
+                return _masking.MaskedNode()
+            return jnp.zeros([], jnp.float32)
+
+        magma_s = (
+            jax.tree.map(
+                _init_s,
+                params,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            )
+            if use_magma
+            else None
+        )
+
+        return ScaleByPrismState(
+            count=jnp.zeros([], jnp.int32),
+            mu=mu,
+            magma_s=magma_s,
+            key=jax.random.PRNGKey(key) if use_magma else None,
+        )
 
     def update_fn(updates, state, params=None):
         # Strict requirement for params if dimension numbers are used
@@ -630,8 +667,65 @@ def scale_by_prism(
             new_updates,
         )
 
+        # NOTE: Alignment \tilde{s}_t is computed using post-Newton-Schulz
+        # updates (effective_updates) to ensure alignment reflects PRISM's spectrally shaped geometry.
+        if use_magma:
+
+            def _compute_magma_state(g, m_u, s_old):
+                if g is None or isinstance(g, _masking.MaskedNode):
+                    return g
+
+                # Upcast to prevent underflow during inner product
+                g_f32 = g.astype(jnp.float32)
+                m_f32 = m_u.astype(jnp.float32)
+
+                # dist_reduce enforces correct global collective operations under GSPMD
+                dot = dist_reduce(jnp.sum(g_f32 * m_f32), axis_name, "sum")
+                norm_g_sq = dist_reduce(jnp.sum(g_f32**2), axis_name, "sum")
+                norm_mu_sq = dist_reduce(jnp.sum(m_f32**2), axis_name, "sum")
+
+                # Hard-clamp denominator to prevent NaN injection on vanishing gradients
+                cossim = dot / jnp.maximum(
+                    jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-9
+                )
+                s_tilde = jax.nn.sigmoid(cossim / magma_tau)
+                return 0.9 * s_old + 0.1 * s_tilde
+
+            new_magma_s = jax.tree.map(
+                _compute_magma_state,
+                effective_updates,
+                mu,
+                state.magma_s,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
+            )
+
+            leaves_delta, treedef = jax.tree.flatten(new_updates)
+            key, subkey = jax.random.split(state.key)
+            subkeys = jax.random.split(subkey, len(leaves_delta))
+            keys_tree = jax.tree.unflatten(treedef, subkeys)
+
+            def _apply_mask(delta, s_new, k_leaf):
+                if delta is None or isinstance(delta, _masking.MaskedNode):
+                    return delta
+                m_mask = jax.random.bernoulli(k_leaf, 0.5).astype(jnp.float32)
+                return delta * jnp.array(s_new * m_mask, dtype=delta.dtype)
+
+            new_updates = jax.tree.map(
+                _apply_mask,
+                new_updates,
+                new_magma_s,
+                keys_tree,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
+            )
+        else:
+            new_magma_s = state.magma_s
+            key = state.key
+
         return new_updates, ScaleByPrismState(
-            count=count_inc, mu=optax.tree.cast(mu, mu_dtype)
+            count=count_inc,
+            mu=optax.tree.cast(mu, mu_dtype),
+            magma_s=new_magma_s,
+            key=key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)
@@ -651,6 +745,9 @@ def prism(
     permissive_spike_protection: bool = True,
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     axis_name: Optional[str] = None,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
+    key: int = 42,
     # Partitioning Arguments
     adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
     adam_b1: float = 0.9,
@@ -677,7 +774,15 @@ def prism(
         raw_global_grad_clip: Global gradient norm clipping threshold.
         permissive_spike_protection: Behavior when global clip is triggered (Clip vs Skip).
         mu_dtype: Dtype for momentum accumulators.
-        axis_name: Axis name for distributed global norm reduction.
+        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+            WARNING: Magma introduces intentional update bias (damping). At an
+            equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
+            50% of steps are masked. This yields an expected magnitude attenuation
+            of ~0.25x. You may need to scale the global learning rate by ~4x to
+            maintain the original update volume.
+        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
+        axis_name: Axis name for distributed (SPMD) global norm reduction.
+        key: Initial PRNG key for Magma's Bernoulli sampling.
         adam_learning_rate: Learning rate for the Adam branch. Defaults to `learning_rate`.
         adam_b1: Beta1 for Adam.
         adam_b2: Beta2 for Adam.
@@ -726,8 +831,11 @@ def prism(
                     raw_global_grad_clip=raw_global_grad_clip,
                     permissive_spike_protection=permissive_spike_protection,
                     grad_clip_max_amps=grad_clip_max_amps,
-                    axis_name=axis_name,
                     weight_dimension_numbers=prism_weight_dim_nums_fn,
+                    use_magma=use_magma,
+                    magma_tau=magma_tau,
+                    axis_name=axis_name,
+                    key=key,
                 ),
                 transform.add_decayed_weights(weight_decay),
                 transform.scale_by_learning_rate(learning_rate),
