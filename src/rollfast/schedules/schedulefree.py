@@ -310,6 +310,7 @@ def schedule_free_prism(
                     ns_iters=ns_iters,
                     nesterov=False,
                     shape_nesterov=shape_nesterov,
+                    use_magma=False,
                     # bias_correction=False,  # SF handles bias correction implicitly
                     mu_dtype=mu_dtype,
                     raw_global_grad_clip=raw_global_grad_clip,
@@ -476,6 +477,7 @@ def schedule_free_kron(
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
             axis_name=axis_name,
+            use_magma=False,
             key=key,
         )
     ]

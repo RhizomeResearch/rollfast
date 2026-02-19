@@ -50,6 +50,20 @@ base optimizer) and an averaged sequence $x$ (used for evaluation).
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
+### 4. Magma (Momentum-Aligned Gradient Masking)
+
+While training large language models (LLMs) typically relies almost exclusively
+on dense adaptive optimizers, `rollfast` implements a stochastic masking
+intervention that proves randomly masking parameter updates can be highly
+effective.
+
+- **Mechanism**: Random masking induces a curvature-dependent geometric
+  regularization that smooths the optimization trajectory.
+- **Alignment**: Momentum-aligned gradient masking (Magma) modulates the masked
+  updates using momentum-gradient alignment.
+- **Integration**: It acts as a simple drop-in replacement for adaptive
+  optimizers with consistent gains and negligible computational overhead.
+
 ______________________________________________________________________
 
 ## Installation
@@ -190,6 +204,22 @@ WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
 | `max_skew_triangular`       | `1.0`   | Threshold for diagonal approximation. If a dimension's aspect ratio squared exceeds this relative to total numel, it is treated as diagonal to save memory. |
 | `preconditioner_init_scale` | `None`  | Initial scale for $Q$. If `None`, it is estimated on the first step using gradient statistics.                                                              |
 
+### Magma Specifics
+
+Magma acts as an intervention layer applicable to both PRISM and PSGD optimizers
+by passing `use_magma=True`.
+
+**Architectural Warning:** Magma introduces intentional update bias (damping)
+that scales down the expected update magnitude. At equilibrium, you may need to
+scale your global learning rate by ~4x to maintain the original update volume
+and prevent vanishing progress.
+
+| Parameter   | Default | Description                                                                                                                                                                                                                                                            |
+| :---------- | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_magma` | `False` | Enables Momentum-aligned gradient masking. Operates at the PyTree leaf level to ensure strict cryptographic PRNG independence and JAX topological isomorphism.                                                                                                         |
+| `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\\sigma(\\text{cossim} / \\tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
+| `key`       | `42`    | Stateful PRNG seed initialized for Magma's Bernoulli sampling. `rollfast` dynamically cycles this key across shards and layers to prevent cryptographic correlation and ensure statistical independence from the base optimizer's noise injections (e.g., Procrustes). |
+
 #### Preconditioner Modes
 
 The geometry of the preconditioner update $dQ$ is controlled via
@@ -248,5 +278,16 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
   author={Li, Xi-Lin},
   journal={arXiv preprint arXiv:2402.11858},
   year={2024}
+}
+```
+
+**Magma:**
+
+```bibtex
+@misc{2602.15322,
+  Author = {Taejong Joo and Wenhan Xia and Cheolmin Kim and Ming Zhang and Eugene Ie},
+  Title = {On Surprising Effectiveness of Masking Updates in Adaptive Optimizers},
+  Year = {2026},
+  Eprint = {arXiv:2602.15322},
 }
 ```
