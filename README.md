@@ -185,7 +185,7 @@ WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
 | :---------------- | :---------- | :---------------------------------------------------------------------------------------------------------------- |
 | `warmup_fraction` | `0.1`       | Fraction of `total_steps` used for linear warmup.                                                                 |
 | `decay_fraction`  | `0.1`       | Fraction of `total_steps` used for linear decay (cooldown) at the end of training.                                |
-| `weighting_mode`  | `SCHEDULET` | Strategy for $c_t$ calculation: `THEORETICAL` ($1/t$), `PRACTICAL` ($\\gamma_t^2$), or `SCHEDULET` ($\\gamma_t$). |
+| `weighting_mode`  | `PRACTICAL` | Strategy for $c_t$ calculation: `THEORETICAL` ($1/t$), `PRACTICAL` ($\gamma_t^2$), or `SCHEDULET` ($\gamma_t$). |
 
 ### PRISM Specifics
 
@@ -217,7 +217,7 @@ and prevent vanishing progress.
 | Parameter   | Default | Description                                                                                                                                                                                                                                                            |
 | :---------- | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `use_magma` | `False` | Enables Momentum-aligned gradient masking. Operates at the PyTree leaf level to ensure strict cryptographic PRNG independence and JAX topological isomorphism.                                                                                                         |
-| `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\\sigma(\\text{cossim} / \\tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
+| `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\sigma(\text{cossim} / \tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
 | `key`       | `42`    | Stateful PRNG seed initialized for Magma's Bernoulli sampling. `rollfast` dynamically cycles this key across shards and layers to prevent cryptographic correlation and ensure statistical independence from the base optimizer's noise injections (e.g., Procrustes). |
 
 #### Preconditioner Modes
@@ -227,8 +227,8 @@ The geometry of the preconditioner update $dQ$ is controlled via
 
 | Mode        | Formula                             | Description                                                                                                                       |
 | :---------- | :---------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
-| `Q0.5EQ1.5` | $dQ = Q^{0.5} \\mathcal{E} Q^{1.5}$ | **Recommended**. Uses an online orthogonal Procrustes solver to keep $Q$ approximately SPD. Numerically stable for low precision. |
-| `EQ`        | $dQ = \\mathcal{E} Q$               | The original triangular update. Requires triangular solves. Only mode compatible with triangular $Q$.                             |
+| `Q0.5EQ1.5` | $dQ = Q^{0.5} \mathcal{E} Q^{1.5}$ | **Recommended**. Uses an online orthogonal Procrustes solver to keep $Q$ approximately SPD. Numerically stable for low precision. |
+| `EQ`        | $dQ = \mathcal{E} Q$               | The original triangular update. Requires triangular solves. Only mode compatible with triangular $Q$.                             |
 | `QUAD`      | Quadratic Form                      | Ensures $Q$ remains symmetric positive definite via quadratic form updates.                                                       |
 | `NS`        | Newton-Schulz                       | Iteratively projects $Q$ onto the SPD manifold using Newton-Schulz iterations. Exact but more expensive.                          |
 | `EXP`       | Matrix Exponential                  | Geodesic update on the SPD manifold. Uses matrix exponential.                                                                     |
