@@ -220,6 +220,7 @@ def schedule_free_prism(
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    fft_size: Optional[int] = None,
     axis_name: Optional[str] = None,
     # Partitioning Arguments
     adam_learning_rate: Optional[float] = None,
@@ -313,6 +314,7 @@ def schedule_free_prism(
                     use_magma=False,
                     # bias_correction=False,  # SF handles bias correction implicitly
                     mu_dtype=mu_dtype,
+                    fft_size=fft_size,
                     raw_global_grad_clip=raw_global_grad_clip,
                     permissive_spike_protection=permissive_spike_protection,
                     grad_clip_max_amps=grad_clip_max_amps,
