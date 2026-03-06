@@ -547,7 +547,8 @@ def _freq_prism_ortho_step(
 
     # Innovation-Augmentation split into Re/Im
     D_hat = G_hat - M_raw_hat
-    aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-2)
+    aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-1)
+    # aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-2)
 
     Xre = jnp.real(aug_hat)
     Xim = jnp.imag(aug_hat)
@@ -556,9 +557,9 @@ def _freq_prism_ortho_step(
     Ore_aug, Oim_aug = _zeropower_ns5_split_complex(Xre, Xim, steps=ns_iters, eps=1e-8)
 
     # Block Extraction
-    Cout = M_tgt_hat.shape[-2]
-    Ore = Ore_aug[..., :Cout, :]
-    Oim = Oim_aug[..., :Cout, :]
+    Cin = M_tgt_hat.shape[-1]
+    Ore = Ore_aug[..., :Cin]
+    Oim = Oim_aug[..., :Cin]
 
     # Exact Hermitian Projection
     Ore, Oim = _project_hermitian_symmetry(Ore, Oim, M)
