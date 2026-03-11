@@ -212,12 +212,7 @@ def apply_updates(
         keys_tree = jax.tree.unflatten(treedef, [None] * len(leaves))
 
     def _apply_leaf(p, u, k):
-        if (
-            p is None
-            or u is None
-            or isinstance(u, _masking.MaskedNode)
-            or isinstance(p, _masking.MaskedNode)
-        ):
+        if p is None or isinstance(p, _masking.MaskedNode):
             return p
 
         p_arr = jnp.asarray(p)
@@ -238,3 +233,51 @@ def apply_updates(
         keys_tree,
         is_leaf=is_leaf_fn,
     )
+
+
+def apply_updates_prefix(
+    model: base.Params,
+    updates: base.Updates,
+    key: jax.Array,
+    stochastic: bool = True,
+) -> base.Params:
+    """Equinox-compatible apply_updates: `updates` may be a prefix of `model`.
+
+    Semantics:
+    - None / MaskedNode update: corresponding model subtree returned unchanged.
+    - Otherwise: model + update, with stochastic rounding for bfloat16 leaves.
+
+    `updates` is the first tree passed to `jax.tree.map`, so its structure
+    is the reference. `flatten_up_to` extracts entire model subtrees at
+    positions where updates is a leaf (None), preserving non-differentiable
+    Equinox leaves (Callables, static fields) without any cast attempt.
+    """
+    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+
+    update_leaves, update_treedef = jax.tree.flatten(updates, is_leaf=is_leaf_fn)
+
+    if stochastic:
+        keys = jax.random.split(key, len(update_leaves))
+        keys_tree = jax.tree.unflatten(update_treedef, list(keys))
+    else:
+        keys_tree = jax.tree.unflatten(update_treedef, [None] * len(update_leaves))
+
+    def _apply_update(u, p, k):
+        if u is None or isinstance(u, _masking.MaskedNode):
+            return p
+        if p is None or isinstance(p, _masking.MaskedNode):
+            return p
+        # Non-array leaves (e.g. Equinox Callables) should never receive a
+        # non-None update; surface the error immediately rather than masking it.
+        p_arr = jnp.asarray(p)
+        u_arr = jnp.asarray(u)
+
+        if p_arr.dtype == jnp.bfloat16:
+            sum_f32 = p_arr.astype(jnp.float32) + u_arr.astype(jnp.float32)
+            if stochastic:
+                return _stochastic_round_bf16(sum_f32, k)
+            return sum_f32.astype(jnp.bfloat16)
+
+        return jnp.asarray(p_arr + u_arr).astype(p_arr.dtype)
+
+    return jax.tree.map(_apply_update, updates, model, keys_tree, is_leaf=is_leaf_fn)
