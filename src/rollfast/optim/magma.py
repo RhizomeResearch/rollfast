@@ -11,6 +11,7 @@ def apply_magma_internal(
     base_updates,
     magma_s_prev,
     key,
+    p=0.5,
     tau=2.0,
     axis_name=None,
 ):
@@ -89,7 +90,7 @@ def apply_magma_internal(
         s_new = 0.9 * s_prev + 0.1 * s_tilde
 
         # Singular block-wise Bernoulli scalar
-        m_mask = jax.random.bernoulli(block_key, 0.5).astype(delta.dtype)
+        m_mask = jax.random.bernoulli(block_key, p).astype(delta.dtype)
 
         # delta_magma = jnp.where(
         #     m_mask, s_new.astype(delta.dtype) * delta, jnp.zeros_like(delta)

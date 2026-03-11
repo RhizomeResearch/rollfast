@@ -746,6 +746,7 @@ def scale_by_kron(
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
+    magma_p: float = 0.5,
     magma_tau: float = 2.0,
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
@@ -786,6 +787,11 @@ def scale_by_kron(
         permissive_spike_protection: If True, allows updates during spikes if prob=1.0.
         newton_schulz_iters: Iterations for NS mode (default 5).
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+        magma_p: Survival probability for the block-wise Bernoulli masking.
+            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            survives at a given step. A value of 1.0 effectively bypasses stochastic
+            dropping (though Magma EMA damping still applies). The default of 0.5 was
+            empirically validated as optimal for transformer pre-training.
         magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         weight_decay: Weight decay to apply.
         weight_decay_mask: Optional mask for weight decay.
@@ -1390,6 +1396,7 @@ def scale_by_kron(
                 base_updates=updates,
                 magma_s_prev=state.magma_s,
                 key=magma_key,
+                p=magma_p,
                 tau=magma_tau,
                 axis_name=axis_name,
             )
@@ -1465,6 +1472,7 @@ def kron(
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
+    magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
@@ -1511,6 +1519,7 @@ def kron(
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
             use_magma=use_magma,
+            magma_p=magma_p,
             magma_tau=magma_tau,
             weight_decay=weight_decay if use_magma else 0.0,
             weight_decay_mask=weight_decay_mask if use_magma else None,

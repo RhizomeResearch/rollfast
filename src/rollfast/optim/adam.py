@@ -40,6 +40,7 @@ def scale_by_adam(
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     nesterov: bool = False,
     use_magma: bool = False,
+    magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
@@ -64,6 +65,11 @@ def scale_by_adam(
         nesterov: Whether to use Nesterov momentum. The variant of Adam with
             Nesterov momentum is described in [Dozat 2016]
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+        magma_p: Survival probability for the block-wise Bernoulli masking.
+            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            survives at a given step. A value of 1.0 effectively bypasses stochastic
+            dropping (though Magma EMA damping still applies). The default of 0.5 was
+            empirically validated as optimal for transformer pre-training.
         magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) global norm reduction.
         key: Initial PRNG seed for Magma's Bernoulli sampling.
@@ -211,6 +217,7 @@ def scale_by_adam(
                 base_updates=adam_updates,
                 magma_s_prev=state.magma_s,
                 key=magma_key,
+                p=magma_p,
                 tau=magma_tau,
                 axis_name=axis_name,
             )
@@ -249,6 +256,7 @@ def adamw(
     *,
     nesterov: bool = False,
     use_magma: bool = False,
+    magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
@@ -329,6 +337,11 @@ def adamw(
             50% of steps are masked. This yields an expected magnitude attenuation
             of ~0.25x. You may need to scale the global learning rate by ~4x to
             maintain the original update volume.
+        magma_p: Survival probability for the block-wise Bernoulli masking.
+            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            survives at a given step. A value of 1.0 effectively bypasses stochastic
+            dropping (though Magma EMA damping still applies). The default of 0.5 was
+            empirically validated as optimal for transformer pre-training.
         magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) global norm reduction.
         key: Initial PRNG seed for Magma's Bernoulli sampling.
@@ -384,6 +397,7 @@ def adamw(
             weight_decay_mask=weight_decay_mask if use_magma else None,
             nesterov=nesterov,
             use_magma=use_magma,
+            magma_p=magma_p,
             magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,

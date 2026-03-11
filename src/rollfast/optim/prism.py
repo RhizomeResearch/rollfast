@@ -715,6 +715,7 @@ def scale_by_prism(
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     use_magma: bool = False,
+    magma_p: float = 0.5,
     magma_tau: float = 2.0,
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable]] = None,
@@ -755,6 +756,11 @@ def scale_by_prism(
         weight_dimension_numbers: Specification for reshaping tensors. If provided,
             `params` must be passed to `update`.
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+        magma_p: Survival probability for the block-wise Bernoulli masking.
+            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            survives at a given step. A value of 1.0 effectively bypasses stochastic
+            dropping (though Magma EMA damping still applies). The default of 0.5 was
+            empirically validated as optimal for transformer pre-training.
         magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         weight_decay: Weight decay applied to PRISM.
         weight_decay_mask: A mask for weight decay.
@@ -1007,6 +1013,7 @@ def scale_by_prism(
                 base_updates=new_updates,
                 magma_s_prev=state.magma_s,
                 key=magma_key,
+                p=magma_p,
                 tau=magma_tau,
                 axis_name=axis_name,
             )
@@ -1055,6 +1062,7 @@ def prism(
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     axis_name: Optional[str] = None,
     use_magma: bool = False,
+    magma_p: float = 0.5,
     magma_tau: float = 2.0,
     key: jax.Array = jax.random.PRNGKey(42),
     # Partitioning Arguments
@@ -1102,6 +1110,11 @@ def prism(
             50% of steps are masked. This yields an expected magnitude attenuation
             of ~0.25x. You may need to scale the global learning rate by ~4x to
             maintain the original update volume.
+        magma_p: Survival probability for the block-wise Bernoulli masking.
+            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            survives at a given step. A value of 1.0 effectively bypasses stochastic
+            dropping (though Magma EMA damping still applies). The default of 0.5 was
+            empirically validated as optimal for transformer pre-training.
         magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         key: Initial PRNG key for Magma's Bernoulli sampling.
         adam_learning_rate: Learning rate for the Adam branch. Defaults to `learning_rate`.
@@ -1170,6 +1183,7 @@ def prism(
             grad_clip_max_amps=grad_clip_max_amps,
             weight_dimension_numbers=prism_weight_dim_nums_fn,
             use_magma=use_magma,
+            magma_p=magma_p,
             magma_tau=magma_tau,
             weight_decay=weight_decay if use_magma else 0.0,
             weight_decay_mask=weight_decay_mask if use_magma else None,
@@ -1200,6 +1214,7 @@ def prism(
                 weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
                 use_magma=use_magma,
+                magma_p=magma_p,
                 magma_tau=magma_tau,
                 axis_name=axis_name,
                 key=key_adam,
