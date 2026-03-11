@@ -1,5 +1,7 @@
 # This code is coming mostly from Optax itself.
 # I just modified it to add support for Magma
+# and stochastic rounding
+from rollfast.optim.magma import apply_magma_mask
 
 from collections.abc import Callable
 from typing import Any, NamedTuple, Optional, Union
@@ -11,7 +13,12 @@ import optax.tree
 from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
-from rollfast.utils import dist_reduce
+from rollfast.utils import (
+    _tree_update_moment_f32,
+    _tree_update_moment_sq_f32,
+    dist_reduce,
+    _safe_bias_correction,
+)
 
 
 class ScaleByAdamState(NamedTuple):
@@ -20,8 +27,7 @@ class ScaleByAdamState(NamedTuple):
     count: jax.typing.ArrayLike  # shape=(), dtype=jnp.int32.
     mu: base.Updates
     nu: base.Updates
-    magma_s: Optional[base.Updates]  # Tracks alignment EMA per parameter block
-    key: Optional[jax.Array]  # Stateful PRNG for Bernoulli masking
+    key: Optional[jax.Array]
 
 
 def scale_by_adam(
@@ -32,8 +38,6 @@ def scale_by_adam(
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     *,
     nesterov: bool = False,
-    use_magma: bool = False,
-    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: int = 42,
 ) -> base.GradientTransformation:
@@ -51,13 +55,6 @@ def scale_by_adam(
             `None` then the `dtype` is inferred from `params` and `updates`.
         nesterov: Whether to use Nesterov momentum. The variant of Adam with
             Nesterov momentum is described in [Dozat 2016]
-        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
-            WARNING: Magma introduces intentional update bias (damping). At an
-            equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
-            50% of steps are masked. This yields an expected magnitude attenuation
-            of ~0.25x. You may need to scale the global learning rate by ~4x to
-            maintain the original update volume.
-        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) global norm reduction.
         key: Initial PRNG seed for Magma's Bernoulli sampling.
 
@@ -79,103 +76,77 @@ def scale_by_adam(
                 return _masking.MaskedNode()
             return jnp.zeros([], jnp.float32)
 
-        magma_s = (
-            jax.tree.map(
-                _init_s,
-                params,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
-            if use_magma
-            else None
-        )
-
         return ScaleByAdamState(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
             nu=nu,
-            magma_s=magma_s,
-            key=jax.random.PRNGKey(key) if use_magma else None,
+            key=jax.random.PRNGKey(key),
         )
 
     def update_fn(updates, state, params=None):
         del params
         raw_gradients = updates
 
-        mu = optax.tree.update_moment(updates, state.mu, b1, 1)
-        nu = optax.tree.update_moment_per_elem_norm(updates, state.nu, b2, 2)
+        next_state_key, magma_key = jax.random.split(state.key, 2)
+
+        mu_f32 = _tree_update_moment_f32(updates, state.mu, b1)
+        nu_f32 = _tree_update_moment_sq_f32(updates, state.nu, b2)
         count_inc = numerics.safe_increment(state.count)
+
+        mu_bc_factor = 1.0 - b1**count_inc
+        nu_bc_factor = 1.0 - b2**count_inc
+
         if nesterov:
+            mu_bc_factor_next = 1.0 - b1 ** numerics.safe_increment(count_inc)
+            mu_bc = _safe_bias_correction(mu_f32, mu_bc_factor_next)
+
+            # Explicitly bypass MaskedNodes. Attempting .astype() on a MaskedNode
+            # triggers an AttributeError during partitioned gradient routing.
+            updates_f32 = jax.tree.map(
+                lambda x: (
+                    x
+                    if isinstance(x, _masking.MaskedNode)
+                    else (x.astype(jnp.float32) if x is not None else None)
+                ),
+                updates,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            )
+            g_bc = _safe_bias_correction(updates_f32, mu_bc_factor)
+
+            # MaskedNodes cannot be mathematically multiplied or added.
             mu_hat = jax.tree.map(
-                lambda m, g: b1 * m + (1 - b1) * g,
-                optax.tree.bias_correction(mu, b1, numerics.safe_increment(count_inc)),
-                optax.tree.bias_correction(updates, b1, count_inc),
+                lambda m, g: (
+                    m
+                    if isinstance(m, _masking.MaskedNode)
+                    else (b1 * m + (1.0 - b1) * g if m is not None else None)
+                ),
+                mu_bc,
+                g_bc,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
             )
         else:
-            mu_hat = optax.tree.bias_correction(mu, b1, count_inc)
+            mu_hat = _safe_bias_correction(mu_f32, mu_bc_factor)
+
         # Dozat 2016 https://openreview.net/pdf?id=OM0jvwB8jIp57ZJjtNEZ
         # Algorithm 2 further multiplies Adam's standard nu_hat by b2. It is
         # unclear why. Other Nadam implementations also omit the extra b2 factor.
-        nu_hat = optax.tree.bias_correction(nu, b2, count_inc)
+        nu_hat = _safe_bias_correction(nu_f32, nu_bc_factor)
         updates = jax.tree.map(
-            lambda m, v: None if m is None else m / (jnp.sqrt(v + eps_root) + eps),
+            lambda m, v: (
+                m
+                if isinstance(m, _masking.MaskedNode)
+                else (None if m is None else m / (jnp.sqrt(v + eps_root) + eps))
+            ),
             mu_hat,
             nu_hat,
-            is_leaf=lambda x: x is None,
+            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
-        mu = optax.tree.cast(mu, mu_dtype)
-        nu = optax.tree.cast_like(nu, state.nu)
-
-        if use_magma:
-
-            def _compute_magma_state(g, m_u, s_old):
-                if g is None or isinstance(g, _masking.MaskedNode):
-                    return g
-
-                g_f32 = g.astype(jnp.float32)
-                m_f32 = m_u.astype(jnp.float32)
-
-                dot = dist_reduce(jnp.sum(g_f32 * m_f32), axis_name, "sum")
-                norm_g_sq = dist_reduce(jnp.sum(g_f32**2), axis_name, "sum")
-                norm_mu_sq = dist_reduce(jnp.sum(m_f32**2), axis_name, "sum")
-
-                cossim = dot / jnp.maximum(
-                    jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-9
-                )
-                s_tilde = jax.nn.sigmoid(cossim / magma_tau)
-                return 0.9 * s_old + 0.1 * s_tilde
-
-            new_magma_s = jax.tree.map(
-                _compute_magma_state,
-                raw_gradients,
-                mu,
-                state.magma_s,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
-            )
-
-            leaves_delta, treedef = jax.tree.flatten(updates)
-            magma_key, key_next = jax.random.split(state.key)
-            subkeys = jax.random.split(magma_key, len(leaves_delta))
-            keys_tree = jax.tree.unflatten(treedef, subkeys)
-
-            def _apply_mask(delta, s_new, k_leaf):
-                if delta is None or isinstance(delta, _masking.MaskedNode):
-                    return delta
-                m_mask = jax.random.bernoulli(k_leaf, 0.5).astype(jnp.float32)
-                return delta * jnp.array(s_new * m_mask, dtype=delta.dtype)
-
-            updates = jax.tree.map(
-                _apply_mask,
-                updates,
-                new_magma_s,
-                keys_tree,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
-            )
-        else:
-            new_magma_s = state.magma_s
-            key_next = state.key
 
         return updates, ScaleByAdamState(
-            count=count_inc, mu=mu, nu=nu, magma_s=new_magma_s, key=key_next
+            count=count_inc,
+            mu=mu_f32,
+            nu=nu_f32,
+            key=next_state_key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)
@@ -311,8 +282,9 @@ def adamw(
     .. seealso::
         See the related functions :func:`optax.adam`, :func:`optax.nadamw`, as well
         as the example :doc:`../_collections/examples/nanolm` for a use case.
-  """
-    return combine.chain(
+    """
+
+    components = [
         scale_by_adam(
             b1=b1,
             b2=b2,
@@ -320,11 +292,17 @@ def adamw(
             eps_root=eps_root,
             mu_dtype=mu_dtype,
             nesterov=nesterov,
-            use_magma=use_magma,
-            magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,
         ),
         transform.add_decayed_weights(weight_decay, mask),
-        transform.scale_by_learning_rate(learning_rate),
-    )
+    ]
+
+    if use_magma:
+        components.append(
+            apply_magma_mask(magma_tau=magma_tau, axis_name=axis_name, key=key)
+        )
+
+    components.append(transform.scale_by_learning_rate(learning_rate))
+
+    return combine.chain(*components)

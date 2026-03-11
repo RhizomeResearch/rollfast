@@ -13,7 +13,13 @@ from optax._src.combine import chain
 from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
 
-from rollfast.utils import add_tiny, dist_reduce
+from rollfast.optim.magma import apply_magma_mask
+from rollfast.utils import (
+    _tree_stochastic_cast,
+    _tree_update_moment_f32,
+    add_tiny,
+    dist_reduce,
+)
 
 
 class PreconditionerMode(str, Enum):
@@ -68,7 +74,6 @@ class KronState(NamedTuple):
     Qs_preconditioners: Any
     Ls_lipschitz: Optional[Any]
     needs_scale_init: jax.Array
-    magma_s: Optional[Any]
     key: jax.Array
 
 
@@ -76,21 +81,16 @@ def _compute_global_norm(
     grads: Any,
     axis_name: Optional[str] = None,
 ) -> jax.Array:
-    """Computes the global L2 norm of gradients, handling distributed reduction.
+    _is_leaf = lambda x: (
+        hasattr(x, "__class__") and x.__class__.__name__ == "MaskedNode" or x is None
+    )
+    leaves = [x for x in jax.tree.leaves(grads, is_leaf=_is_leaf) if not _is_leaf(x)]
 
-    Used for detecting spikes in raw gradients before preconditioning.
-    """
-    leaves = jax.tree.leaves(grads)
     if not leaves:
         return jnp.array(0.0)
 
-    # Calculate sum of squares locally
-    # Cast to float32 to ensure stability if input is float16/bfloat16
     local_sq = sum(jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves)
-
-    # Sum across devices
     total_sq = dist_reduce(local_sq, axis_name, "sum")
-
     return jnp.sqrt(total_sq)
 
 
@@ -99,18 +99,18 @@ def _compute_global_rms_scale(
     max_rms: float,
     axis_name: Optional[str] = None,
 ) -> jax.Array:
-    """Computes scaling factor for global RMS constraint.
+    """Computes scaling factor for global RMS constraint."""
+    _is_leaf = lambda x: (
+        hasattr(x, "__class__") and x.__class__.__name__ == "MaskedNode" or x is None
+    )
+    valid_pgs = [pg for pg in precond_grads if not _is_leaf(pg)]
 
-    Calculates sqrt(sum(g^2) / total_numel) globally and determines scaling
-    to keep it under max_rms. This is invariant to model size.
+    if not valid_pgs:
+        return jnp.array(1.0, dtype=jnp.float32)
 
-    Returns:
-        Scalar scaling factor in (0, 1].
-    """
-    local_sq = sum(jnp.sum(numerics.abs_sq(pg)) for pg in precond_grads)
-    local_numel = sum(pg.size for pg in precond_grads)
+    local_sq = sum(jnp.sum(numerics.abs_sq(pg)) for pg in valid_pgs)
+    local_numel = sum(pg.size for pg in valid_pgs)
 
-    # Sum squares and numel across all devices
     total_sq = dist_reduce(local_sq, axis_name, "sum")
     total_numel = dist_reduce(
         jnp.array(local_numel, dtype=jnp.float32), axis_name, "sum"
@@ -745,8 +745,6 @@ def scale_by_kron(
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
-    use_magma: bool = False,
-    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -783,13 +781,6 @@ def scale_by_kron(
         raw_global_grad_clip: Threshold for global gradient norm clipping (spike protection).
         permissive_spike_protection: If True, allows updates during spikes if prob=1.0.
         newton_schulz_iters: Iterations for NS mode (default 5).
-        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
-            WARNING: Magma introduces intentional update bias (damping). At an
-            equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
-            50% of steps are masked. This yields an expected magnitude attenuation
-            of ~0.25x. You may need to scale the global learning rate by ~4x to
-            maintain the original update volume.
-        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) reduction.
         key: PRNG key for stochastic elements.
 
@@ -843,26 +834,41 @@ def scale_by_kron(
             return fn(*args)
 
     def init_fn(params):
+        _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+
         scanned_layers_ = scanned_layers
         if scanned_layers is None:
-            scanned_layers_ = jax.tree.map(lambda _: False, params)
+            scanned_layers_ = jax.tree.map(
+                lambda _: False, params, is_leaf=_is_psgd_leaf
+            )
 
         mu = None
         if b1 > 0:
-            mu = jax.tree.map(lambda x: jnp.zeros_like(x, dtype=mu_dtype), params)
+            mu = jax.tree.map(
+                lambda x: x if _is_psgd_leaf(x) else jnp.zeros_like(x, dtype=mu_dtype),
+                params,
+                is_leaf=_is_psgd_leaf,
+            )
 
-        Qs = [
-            _init_Q_exprs(
-                t[0] if s else t,
-                _init_scale,
-                max_size_triangular,
-                max_skew_triangular,
-                min_ndim_triangular,
-                memory_save_mode,
-                precond_dtype,
-            )[0]
-            for t, s in zip(jax.tree.leaves(params), jax.tree.leaves(scanned_layers_))
-        ]
+        leaves_params, treedef = jax.tree.flatten(params, is_leaf=_is_psgd_leaf)
+        leaves_scanned, _ = jax.tree.flatten(scanned_layers_, is_leaf=_is_psgd_leaf)
+
+        Qs = []
+        for t, s in zip(leaves_params, leaves_scanned):
+            if _is_psgd_leaf(t):
+                Qs.append(t)
+            else:
+                Qs.append(
+                    _init_Q_exprs(
+                        t[0] if s else t,
+                        _init_scale,
+                        max_size_triangular,
+                        max_skew_triangular,
+                        min_ndim_triangular,
+                        memory_save_mode,
+                        precond_dtype,
+                    )[0]
+                )
 
         Qs = [
             (
@@ -872,56 +878,62 @@ def scale_by_kron(
                 if s
                 else q
             )
-            for q, t, s in zip(
-                Qs, jax.tree.leaves(params), jax.tree.leaves(scanned_layers_)
-            )
+            if not _is_psgd_leaf(t)
+            else q
+            for q, t, s in zip(Qs, leaves_params, leaves_scanned)
         ]
 
         Ls = None
         if track_lipschitz:
-            Ls = [[jnp.zeros([], dtype=jnp.float32) for _ in q] for q in Qs]
+            Ls = [
+                (
+                    [jnp.zeros([], dtype=jnp.float32) for _ in q]
+                    if not _is_psgd_leaf(q)
+                    else q
+                )
+                for q in Qs
+            ]
             Ls = [
                 (
                     [jnp.repeat(jnp.expand_dims(l, 0), t.shape[0], axis=0) for l in ls]
                     if s
                     else ls
                 )
-                for ls, t, s in zip(
-                    Ls, jax.tree.leaves(params), jax.tree.leaves(scanned_layers_)
-                )
+                if not _is_psgd_leaf(t)
+                else ls
+                for ls, t, s in zip(Ls, leaves_params, leaves_scanned)
             ]
-            Ls = jax.tree.structure(params).unflatten(Ls)
+            Ls = treedef.unflatten(Ls)
 
-        Qs = jax.tree.structure(params).unflatten(Qs)
+        Qs = treedef.unflatten(Qs)
 
-        Qs_n_elements = sum([q.size for q in jax.tree.leaves(Qs)])
-        Qs_size_MB = sum(
-            [q.size * q.dtype.itemsize / (2**20) for q in jax.tree.leaves(Qs)]
-        )
+        valid_Qs = [
+            q
+            for q in jax.tree.leaves(Qs, is_leaf=_is_psgd_leaf)
+            if not _is_psgd_leaf(q)
+        ]
+        Qs_n_elements = sum([q.size for q in valid_Qs])
+        Qs_size_MB = sum([q.size * q.dtype.itemsize / (2**20) for q in valid_Qs])
         if jax.process_index() == 0:
             init_msg = "on-the-fly" if lazy_init else f"{_init_scale}"
             mode_info = preconditioner_mode.value
             if preconditioner_mode == PreconditionerMode.NS:
                 mode_info += f", {newton_schulz_iters} iters"
             print(
-                f"PSGD Preconditioners ({mode_info}, init_scale={init_msg}): "
-                f"{Qs_n_elements} elements, {Qs_size_MB:.2f} MB"
+                f"PSGD Preconditioners ({mode_info}, init_scale={init_msg}): {Qs_n_elements} elements, {Qs_size_MB:.2f} MB"
             )
         if mu is not None:
-            mu_n_elements = sum([p.size for p in jax.tree.leaves(mu)])
-            mu_size_MB = sum(
-                [p.size * p.dtype.itemsize / (2**20) for p in jax.tree.leaves(mu)]
-            )
+            valid_mu = [
+                p
+                for p in jax.tree.leaves(mu, is_leaf=_is_psgd_leaf)
+                if not _is_psgd_leaf(p)
+            ]
+            mu_n_elements = sum([p.size for p in valid_mu])
+            mu_size_MB = sum([p.size * p.dtype.itemsize / (2**20) for p in valid_mu])
             if jax.process_index() == 0:
                 print(
                     f"PSGD Momentum size: {mu_n_elements} elements, {mu_size_MB:.2f} MB"
                 )
-
-        magma_s = (
-            jax.tree.map(lambda x: jnp.zeros([], jnp.float32), params)
-            if use_magma
-            else None
-        )
 
         return KronState(
             count=jnp.zeros([], jnp.int32),
@@ -929,7 +941,6 @@ def scale_by_kron(
             Qs_preconditioners=Qs,
             Ls_lipschitz=Ls,
             needs_scale_init=jnp.array(lazy_init, dtype=jnp.bool_),
-            magma_s=magma_s,
             key=key,
         )
 
@@ -957,22 +968,27 @@ def scale_by_kron(
         if isinstance(preconditioner_update_probability, Callable):
             update_prob_in = preconditioner_update_probability(count_inc)
 
-        mu = None
+        mu_to_save = None
         momentum_updates = updates
         if state.mu is not None:
+            key, sr_key = jax.random.split(key)
             beta = jnp.minimum(
                 state.count.astype(jnp.float32)
                 / (1.0 + state.count.astype(jnp.float32)),
                 b1,
             )
-            mu = jax.tree.map(
-                lambda m, g: beta * m + (1.0 - beta) * g,
-                state.mu,
-                updates,
-            )
-            momentum_updates = mu
+            # Enforce strict FP32 momentum accumulation to prevent truncation
+            mu_f32 = _tree_update_moment_f32(updates, state.mu, beta)
+            momentum_updates = mu_f32
 
-        updates_flat, grads_structure = jax.tree.flatten(updates)
+            if mu_dtype == jnp.bfloat16:
+                mu_to_save = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key)
+            else:
+                mu_to_save = otu.tree_cast(mu_f32, mu_dtype)
+
+        _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+
+        updates_flat, grads_structure = jax.tree.flatten(updates, is_leaf=_is_psgd_leaf)
         momentum_updates_flat = grads_structure.flatten_up_to(momentum_updates)
         Qs_flat = grads_structure.flatten_up_to(state.Qs_preconditioners)
         scanned_layers_flat = grads_structure.flatten_up_to(scanned_layers_)
@@ -983,21 +999,30 @@ def scale_by_kron(
 
         def apply_init_scale(Qs_in):
             grads_for_scale = [
-                g[0] if s else g for g, s in zip(updates_flat, scanned_layers_flat)
+                (g[0] if s else g)
+                for g, s in zip(updates_flat, scanned_layers_flat)
+                if not _is_psgd_leaf(
+                    g
+                )  # Drop masked nodes for global scale calculation
             ]
+            if not grads_for_scale:
+                return Qs_in
+
             computed_scale = _compute_init_scale_from_grads(
                 grads_for_scale, damping, precond_dtype or jnp.float32
             )
             computed_scale = dist_reduce(computed_scale, axis_name, "mean")
 
             def scale_q_list(q_list, grad, is_scanned):
+                if _is_psgd_leaf(grad):
+                    return q_list
                 grad_shape = grad[0].shape if is_scanned else grad.shape
                 ndim = len(grad_shape)
-                if ndim == 0:
-                    factor_scale = computed_scale
-                else:
-                    factor_scale = jnp.power(computed_scale, 1.0 / ndim)
-
+                factor_scale = (
+                    computed_scale
+                    if ndim == 0
+                    else jnp.power(computed_scale, 1.0 / ndim)
+                )
                 return [q * factor_scale.astype(q.dtype) for q in q_list]
 
             return [
@@ -1034,16 +1059,30 @@ def scale_by_kron(
                 Vs_keys = jax.random.split(key_noise, len(precond_updates_in))
                 Vs = [
                     jax.random.normal(k, shape=g.shape, dtype=g.dtype)
+                    if not _is_psgd_leaf(g)
+                    else g
                     for k, g in zip(Vs_keys, precond_updates_in)
                 ]
                 eps = jnp.finfo(precond_updates_in[0].dtype).eps
                 precond_updates_in = [
-                    g + (damping + eps * jnp.abs(g)) * v
+                    (g + (damping + eps * jnp.abs(g)) * v)
+                    if not _is_psgd_leaf(g)
+                    else g
                     for g, v in zip(precond_updates_in, Vs)
                 ]
 
                 key, key_updates = jax.random.split(key)
                 layer_keys = jax.random.split(key_updates, len(Qs))
+
+                def safe_vector_eq(s, exprs, Q, g):
+                    if _is_psgd_leaf(g):
+                        return g
+                    return map_fn(s, partial(_precond_grad_eq, exprs=exprs), Q, g)
+
+                def safe_vector_dense(s, exprs, Q, g):
+                    if _is_psgd_leaf(g):
+                        return g
+                    return map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
 
                 if preconditioner_mode in [
                     PreconditionerMode.EQ,
@@ -1051,7 +1090,7 @@ def scale_by_kron(
                 ]:
                     # For EQ mode: Vector = Q * G (Whitened Gradient, 'A')
                     Vectors = [
-                        map_fn(s, partial(_precond_grad_eq, exprs=exprs), Q, g)
+                        safe_vector_eq(s, exprs, Q, g)
                         for s, exprs, Q, g in zip(
                             scanned_layers_flat, expressions, Qs, precond_updates_in
                         )
@@ -1059,7 +1098,7 @@ def scale_by_kron(
                 else:
                     # For Dense modes: Vector = Q^H * Q * G (Natural Gradient, 'Pg')
                     Vectors = [
-                        map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
+                        safe_vector_dense(s, exprs, Q, g)
                         for s, exprs, Q, g in zip(
                             scanned_layers_flat, expressions, Qs, precond_updates_in
                         )
@@ -1068,7 +1107,7 @@ def scale_by_kron(
                 # Determine if we need conjB (Only EQ Mode uses it for A'A - B'B)
                 if preconditioner_mode == PreconditionerMode.EQ:
                     conjBs = [
-                        map_fn(s, _conjB, Q, g, v)
+                        map_fn(s, _conjB, Q, g, v) if not _is_psgd_leaf(g) else g
                         for s, Q, g, v in zip(
                             scanned_layers_flat, Qs, precond_updates_in, Vs
                         )
@@ -1084,6 +1123,8 @@ def scale_by_kron(
                 )
 
                 def _update_wrapper(Q, L, Vector, conjB, total_numel, exprs, layer_key):
+                    if _is_psgd_leaf(Q):
+                        return Q, L
                     return _update_precond_generic(
                         Q,
                         L,
@@ -1126,17 +1167,25 @@ def scale_by_kron(
                     )
                 ]
 
+                key, key_balance, key_sr_q = jax.random.split(key, 3)
+
                 new_Qs = [r[0] for r in results]
                 new_Ls = [r[1] for r in results] if track_lipschitz else None
-                new_Qs = otu.tree_cast(new_Qs, precond_dtype)
 
-                key, key_balance = jax.random.split(key)
+                if precond_dtype == jnp.bfloat16:
+                    new_Qs = _tree_stochastic_cast(new_Qs, precond_dtype, key_sr_q)
+                else:
+                    new_Qs = otu.tree_cast(new_Qs, precond_dtype)
 
                 def balance_Qs(Qs_in):
                     return [
-                        map_fn(s, partial(_balance_Q, axis_name=axis_name), Q)
-                        if len(Q) > 1
-                        else Q
+                        Q
+                        if _is_psgd_leaf(Q)
+                        else (
+                            map_fn(s, partial(_balance_Q, axis_name=axis_name), Q)
+                            if len(Q) > 1
+                            else Q
+                        )
                         for Q, s in zip(Qs_in, scanned_layers_flat)
                     ]
 
@@ -1179,8 +1228,14 @@ def scale_by_kron(
         )
 
         with jax.default_matmul_precision(precond_grads_precision):
+
+            def safe_precond(s, exprs, Q, g):
+                if _is_psgd_leaf(g):
+                    return g
+                return map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
+
             precond_gs = [
-                map_fn(s, partial(_precond_grad, exprs=exprs), Q, g)
+                safe_precond(s, exprs, Q, g)
                 for s, exprs, Q, g in zip(
                     scanned_layers_flat, expressions, Qs_for_grad, momentum_updates_flat
                 )
@@ -1200,7 +1255,9 @@ def scale_by_kron(
             clip_scale = _compute_global_rms_scale(
                 precond_gs, max_amp, axis_name=axis_name
             )
-            precond_gs = [pg * clip_scale for pg in precond_gs]
+            precond_gs = [
+                (pg * clip_scale if not _is_psgd_leaf(pg) else pg) for pg in precond_gs
+            ]
 
         elif clip_mode == GradClipMode.PER_TENSOR_RMS:
             if isinstance(grad_clip_max_amps, (float, int)):
@@ -1209,6 +1266,9 @@ def scale_by_kron(
                 max_rms_amp, max_element_amp = grad_clip_max_amps
 
             def _clip_fn(u):
+                # REQUIRED PATCH: Shield clipping logic
+                if _is_psgd_leaf(u):
+                    return u
                 rms = jnp.sqrt(jnp.mean(numerics.abs_sq(u)))
                 scale_factor = jnp.minimum(1.0, max_rms_amp / add_tiny(rms))
                 u = u * scale_factor
@@ -1227,63 +1287,21 @@ def scale_by_kron(
 
         updates = grads_structure.unflatten(precond_gs)
 
-        # NOTE: Magma masking is applied at the PyTree leaf level,
-        # not the Kronecker sub-block level, treating each block as a distinct parameter unit.
-        if use_magma:
-            if state.mu is None:
-                raise ValueError(
-                    "Anti-Pattern: Magma strictly requires tracking momentum (b1 > 0)."
-                )
-
-            leaves_delta, treedef = jax.tree.flatten(updates)
-            leaves_g = jax.tree.leaves(post_clip_raw_gradients)
-            leaves_mu = jax.tree.leaves(mu)
-            leaves_s = jax.tree.leaves(state.magma_s)
-
-            # Advance the active PRNG stream; never re-split state.key to prevent
-            # cryptographic correlation with preconditioner noise injections.
-            magma_key, key_next = jax.random.split(key_next)
-            subkeys = jax.random.split(magma_key, len(leaves_delta))
-
-            new_leaves_delta, new_leaves_s = [], []
-            for d, g, m_u, s_old, k_leaf in zip(
-                leaves_delta, leaves_g, leaves_mu, leaves_s, subkeys
-            ):
-                g_f32 = g.astype(jnp.float32)
-                m_f32 = m_u.astype(jnp.float32)
-
-                dot = dist_reduce(jnp.sum(g_f32 * m_f32), axis_name, "sum")
-                norm_g_sq = dist_reduce(jnp.sum(g_f32**2), axis_name, "sum")
-                norm_mu_sq = dist_reduce(jnp.sum(m_f32**2), axis_name, "sum")
-
-                cossim = dot / jnp.maximum(
-                    jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-9
-                )
-                s_tilde = jax.nn.sigmoid(cossim / magma_tau)
-                s_new = 0.9 * s_old + 0.1 * s_tilde
-
-                m_mask = jax.random.bernoulli(k_leaf, 0.5).astype(jnp.float32)
-
-                new_leaves_delta.append(d * jnp.array(s_new * m_mask, dtype=d.dtype))
-                new_leaves_s.append(s_new)
-
-            updates = treedef.unflatten(new_leaves_delta)
-            magma_s_to_save = treedef.unflatten(new_leaves_s)
-        else:
-            magma_s_to_save = state.magma_s
+        key_next, key_save_q = jax.random.split(key_next)
 
         Qs_to_save = grads_structure.unflatten(Qs_next)
-        Qs_to_save = otu.tree_cast(Qs_to_save, precond_dtype)
+        if precond_dtype == jnp.bfloat16:
+            Qs_to_save = _tree_stochastic_cast(Qs_to_save, precond_dtype, key_save_q)
+        else:
+            Qs_to_save = otu.tree_cast(Qs_to_save, precond_dtype)
         Ls_to_save = grads_structure.unflatten(Ls_next) if Ls_next else None
-        mu = otu.tree_cast(mu, mu_dtype)
 
         new_state = KronState(
             count=count_inc,
-            mu=mu,
+            mu=mu_to_save,
             Qs_preconditioners=Qs_to_save,
             Ls_lipschitz=Ls_to_save,
             needs_scale_init=needs_scale_init,
-            magma_s=magma_s_to_save,
             key=key_next,
         )
 
@@ -1362,13 +1380,17 @@ def kron(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
-            use_magma=use_magma,
-            magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,
         )
     ]
     if weight_decay > 0.0:
         optimizer.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+
+    if use_magma:
+        optimizer.append(
+            apply_magma_mask(magma_tau=magma_tau, axis_name=axis_name, key=key)
+        )
+
     optimizer.append(transform.scale_by_learning_rate(learning_rate))
     return chain(*optimizer)

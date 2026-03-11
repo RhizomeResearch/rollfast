@@ -4,14 +4,17 @@ from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import optax
-from optax._src import alias, base, combine, numerics, transform, utils
+from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
+from rollfast.optim.adam import adamw
+from rollfast.optim.magma import apply_magma_mask
 from rollfast.utils import (
+    _safe_bias_correction,
+    _tree_stochastic_cast,
+    _tree_update_moment_f32,
     add_tiny,
     dist_reduce,
-    _tree_stochastic_cast,
-    _compute_ema_f32,
 )
 
 try:
@@ -388,6 +391,104 @@ def _quintic_newton_schulz(
     return x_f32.astype(x.dtype)
 
 
+def _zeropower_ns5_split_complex(
+    Xre: jax.Array, Xim: jax.Array, steps: int, eps: float
+) -> Tuple[jax.Array, jax.Array]:
+    """
+    Computes complex Newton-Schulz via explicit real arithmetic to maximize
+    systolic array utilization and avoid XLA complex-GEMM lowering overhead.
+    """
+    a, b, c = 3.4445, -4.7750, 2.0315
+
+    # FP32 Frobenius normalization
+    denom = jnp.sqrt(
+        jnp.sum(Xre**2, axis=(-2, -1), keepdims=True)
+        + jnp.sum(Xim**2, axis=(-2, -1), keepdims=True)
+    )
+    denom = jnp.maximum(denom, eps)
+    Xre = Xre / denom
+    Xim = Xim / denom
+
+    m, n = Xre.shape[-2], Xre.shape[-1]
+    transposed = False
+    if m > n:
+        Xre = jnp.swapaxes(Xre, -1, -2)
+        Xim = jnp.swapaxes(Xim, -1, -2)
+        transposed = True
+
+    # Statically unrolled for optimal SPMD collective communication scheduling
+    for _ in range(steps):
+        Xt_re_T = jnp.swapaxes(Xre, -1, -2)
+        Xt_im_T = jnp.swapaxes(Xim, -1, -2)
+
+        # A = X X^H
+        Ar = (Xre @ Xt_re_T) + (Xim @ Xt_im_T)
+        Ai = (Xim @ Xt_re_T) - (Xre @ Xt_im_T)
+
+        # A^2
+        Ar2 = (Ar @ Ar) - (Ai @ Ai)
+        Ai2 = (Ar @ Ai) + (Ai @ Ar)
+
+        # B = bA + cA^2
+        Br = b * Ar + c * Ar2
+        Bi = b * Ai + c * Ai2
+
+        # B @ X
+        Yre = (Br @ Xre) - (Bi @ Xim)
+        Yim = (Br @ Xim) + (Bi @ Xre)
+
+        Xre = a * Xre + Yre
+        Xim = a * Xim + Yim
+
+    if transposed:
+        Xre = jnp.swapaxes(Xre, -1, -2)
+        Xim = jnp.swapaxes(Xim, -1, -2)
+
+    return Xre, Xim
+
+
+def _project_hermitian_symmetry(
+    Xre: jax.Array, Xim: jax.Array, M: int
+) -> Tuple[jax.Array, jax.Array]:
+    """
+    Strictly enforces Hermitian symmetry on the rfft2 boundaries.
+    Inputs are shape (M, M//2 + 1, Cout, Cin).
+    """
+    half = M // 2
+
+    # Force strictly real invariants at (u, v) across ALL channels
+    Xim = Xim.at[0, 0].set(0.0)
+    if M % 2 == 0:
+        Xim = Xim.at[half, 0].set(0.0)
+        Xim = Xim.at[0, half].set(0.0)
+        Xim = Xim.at[half, half].set(0.0)
+
+    # Average conjugate pairs along v=0
+    u_idx = jnp.arange(1, half + (0 if M % 2 == 0 else 1))
+    mu_idx = M - u_idx
+
+    # Dimension 0 is u, Dimension 1 is v=0. Broadcasts over Cout, Cin.
+    avg_re_0 = 0.5 * (Xre[u_idx, 0] + Xre[mu_idx, 0])
+    avg_im_0 = 0.5 * (Xim[u_idx, 0] - Xim[mu_idx, 0])
+
+    Xre = Xre.at[u_idx, 0].set(avg_re_0)
+    Xre = Xre.at[mu_idx, 0].set(avg_re_0)
+    Xim = Xim.at[u_idx, 0].set(avg_im_0)
+    Xim = Xim.at[mu_idx, 0].set(-avg_im_0)
+
+    # Average conjugate pairs along v=M/2
+    if M % 2 == 0:
+        avg_re_half = 0.5 * (Xre[u_idx, half] + Xre[mu_idx, half])
+        avg_im_half = 0.5 * (Xim[u_idx, half] - Xim[mu_idx, half])
+
+        Xre = Xre.at[u_idx, half].set(avg_re_half)
+        Xre = Xre.at[mu_idx, half].set(avg_re_half)
+        Xim = Xim.at[u_idx, half].set(avg_im_half)
+        Xim = Xim.at[mu_idx, half].set(-avg_im_half)
+
+    return Xre, Xim
+
+
 def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
     """Core PRISM mathematical operation: Innovation -> Augmentation -> Orthogonalization.
 
@@ -419,6 +520,66 @@ def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
     return augmented_O[..., : m_raw.shape[-2], :]
 
 
+def _freq_prism_ortho_step(
+    updates: jax.Array,
+    mu_raw: jax.Array,
+    gamma: float,
+    ns_iters: int,
+    fft_size: int,
+    mu_nest: Optional[jax.Array] = None,
+) -> jax.Array:
+    m_target = mu_nest if mu_nest is not None else mu_raw
+    kH, kW = updates.shape[-2:]
+    M = fft_size
+
+    # Cast to FP32 immediately to prevent underflow in spectral density
+    g_pad = jnp.pad(
+        updates.astype(jnp.float32), ((0, 0), (0, 0), (0, M - kH), (0, M - kW))
+    )
+    m_raw_pad = jnp.pad(
+        mu_raw.astype(jnp.float32), ((0, 0), (0, 0), (0, M - kH), (0, M - kW))
+    )
+    m_tgt_pad = jnp.pad(
+        m_target.astype(jnp.float32), ((0, 0), (0, 0), (0, M - kH), (0, M - kW))
+    )
+
+    # Extract frequencies
+    G_hat = jnp.fft.rfft2(g_pad, norm="ortho")
+    M_raw_hat = jnp.fft.rfft2(m_raw_pad, norm="ortho")
+    M_tgt_hat = jnp.fft.rfft2(m_tgt_pad, norm="ortho")
+
+    # Transpose to (M, M//2+1, Cout, Cin)
+    G_hat = jnp.moveaxis(G_hat, (0, 1), (-2, -1))
+    M_raw_hat = jnp.moveaxis(M_raw_hat, (0, 1), (-2, -1))
+    M_tgt_hat = jnp.moveaxis(M_tgt_hat, (0, 1), (-2, -1))
+
+    # Innovation-Augmentation split into Re/Im
+    D_hat = G_hat - M_raw_hat
+    aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-1)
+    # aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-2)
+
+    Xre = jnp.real(aug_hat)
+    Xim = jnp.imag(aug_hat)
+
+    # Fast Split-Real Orthogonalization
+    Ore_aug, Oim_aug = _zeropower_ns5_split_complex(Xre, Xim, steps=ns_iters, eps=1e-8)
+
+    # Block Extraction
+    Cin = M_tgt_hat.shape[-1]
+    Ore = Ore_aug[..., :Cin]
+    Oim = Oim_aug[..., :Cin]
+
+    # Exact Hermitian Projection
+    Ore, Oim = _project_hermitian_symmetry(Ore, Oim, M)
+
+    # Inverse Transform
+    O_hat = Ore + 1j * Oim
+    O_hat = jnp.moveaxis(O_hat, (-2, -1), (0, 1))
+    upd_pad = jnp.fft.irfft2(O_hat, s=(M, M), norm="ortho")
+
+    return upd_pad[..., :kH, :kW].astype(updates.dtype)
+
+
 def _prism_ortho_step(
     updates: jax.Array,
     mu_raw: jax.Array,
@@ -426,6 +587,7 @@ def _prism_ortho_step(
     ns_iters: int,
     mu_nest: Optional[jax.Array] = None,
     dim_nums: Optional[PrismDimensionNumbers] = None,
+    fft_size: Optional[int] = None,
 ) -> jax.Array:
     """Orchestrates the PRISM spectral shaping step, handling reshaping and batching.
 
@@ -450,6 +612,11 @@ def _prism_ortho_step(
         return mu_nest if mu_nest is not None else mu_raw
 
     m_target_eff = mu_nest if mu_nest is not None else mu_raw
+
+    if updates.ndim == 4 and fft_size is not None:
+        return _freq_prism_ortho_step(
+            updates, mu_raw, gamma, ns_iters, fft_size, mu_nest
+        )
 
     # Fast Path: Standard 2D Matrix
     # Avoids overhead of reshape + vmap for the most common case
@@ -477,8 +644,7 @@ class ScaleByPrismState(NamedTuple):
 
     count: jax.Array
     mu: base.Updates
-    magma_s: Optional[base.Updates]  # Tracks alignment EMA per parameter block
-    key: Optional[jax.Array]  # Stateful PRNG for Bernoulli masking
+    key: Optional[jax.Array]
 
 
 def scale_by_prism(
@@ -493,9 +659,8 @@ def scale_by_prism(
     permissive_spike_protection: bool = True,
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    use_magma: bool = False,
-    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
+    fft_size: Optional[int] = None,
     key: int = 42,
 ) -> base.GradientTransformation:
     """The core PRISM gradient transformation.
@@ -521,46 +686,23 @@ def scale_by_prism(
             (max RMS) or a tuple (max RMS, max Abs).
         weight_dimension_numbers: Specification for reshaping tensors. If provided,
             `params` must be passed to `update`.
-        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
-            WARNING: Magma introduces intentional update bias (damping). At an
-            equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
-            50% of steps are masked. This yields an expected magnitude attenuation
-            of ~0.25x. You may need to scale the global learning rate by ~4x to
-            maintain the original update volume.
-        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) global norm reduction.
-        key: Initial PRNG key for Magma's Bernoulli sampling.
+        key: Initial PRNG key.
 
     Returns:
         An `optax.GradientTransformation`.
     """
-    mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    if mu_dtype is None:
+        mu_dtype = jnp.float32
+    else:
+        mu_dtype = utils.canonicalize_dtype(mu_dtype)
 
     def init_fn(params):
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)
 
-        def _init_s(x):
-            if x is None:
-                return None
-            # Enforce topological isomorphism for XLA compiler
-            if isinstance(x, _masking.MaskedNode):
-                return _masking.MaskedNode()
-            return jnp.zeros([], jnp.float32)
-
-        magma_s = (
-            jax.tree.map(
-                _init_s,
-                params,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
-            if use_magma
-            else None
-        )
-
         return ScaleByPrismState(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
-            magma_s=magma_s,
             key=jax.random.PRNGKey(key),
         )
 
@@ -592,14 +734,10 @@ def scale_by_prism(
             )
             updates = jax.tree.map(lambda g: g * clip_scale, updates)
 
-        # Permissive Spike Protection Logic
-        #   - If permissive=True: We clipped above, so we DO NOT skip.
-        #   - If permissive=False: We Strict Skip on spikes.
         should_skip = jnp.logical_and(
             is_spike, jnp.logical_not(permissive_spike_protection)
         )
 
-        # Update Momentum
         effective_updates = jax.lax.cond(
             should_skip,
             lambda u: jax.tree.map(
@@ -608,50 +746,61 @@ def scale_by_prism(
             lambda u: u,
             updates,
         )
-        mu = optax.tree.update_moment(effective_updates, state.mu, b1, 1)
 
-        mu_f32 = jax.tree.map(
-            _compute_ema_f32,
-            state.mu,
-            effective_updates,
-            b1,
-            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-        )
+        # Enforce unified FP32 tracking to prevent accumulator vanishing
+        mu_f32 = _tree_update_moment_f32(effective_updates, state.mu, b1)
 
         # Nesterov / Bias Correction (Strictly FP32)
         mu_nest_f32 = mu_f32
         if nesterov:
             if bias_correction:
-                mu_bc_f32 = optax.tree.bias_correction(
-                    mu_f32, b1, numerics.safe_increment(count_inc)
-                )
+                mu_bc_factor = 1.0 - b1**count_inc
+                mu_bc_factor_next = 1.0 - b1 ** numerics.safe_increment(count_inc)
 
-                # Upcast updates for exact bias correction
+                mu_bc_f32 = _safe_bias_correction(mu_f32, mu_bc_factor_next)
+
+                # Explicitly bypass MaskedNodes for safe partitioned bias correction
                 updates_f32 = jax.tree.map(
-                    lambda x: x.astype(jnp.float32) if x is not None else None,
+                    lambda x: (
+                        x
+                        if isinstance(x, _masking.MaskedNode)
+                        else (x.astype(jnp.float32) if x is not None else None)
+                    ),
                     effective_updates,
                     is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
                 )
-                g_bc_f32 = optax.tree.bias_correction(updates_f32, b1, count_inc)
+                g_bc_f32 = _safe_bias_correction(updates_f32, mu_bc_factor)
 
                 mu_nest_f32 = jax.tree.map(
-                    lambda m, g: b1 * m + (1.0 - b1) * g if m is not None else None,
+                    lambda m, g: (
+                        m
+                        if isinstance(m, _masking.MaskedNode)
+                        else (b1 * m + (1.0 - b1) * g if m is not None else None)
+                    ),
                     mu_bc_f32,
                     g_bc_f32,
+                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
                 )
             else:
                 mu_nest_f32 = jax.tree.map(
                     lambda m, g: (
-                        b1 * m
-                        + (1.0 - b1) * (g.astype(jnp.float32) if g is not None else 0.0)
-                        if m is not None
-                        else None
+                        m
+                        if isinstance(m, _masking.MaskedNode)
+                        else (
+                            b1 * m
+                            + (1.0 - b1)
+                            * (g.astype(jnp.float32) if g is not None else 0.0)
+                            if m is not None
+                            else None
+                        )
                     ),
                     mu_f32,
                     effective_updates,
+                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
                 )
         elif bias_correction:
-            mu_nest_f32 = optax.tree.bias_correction(mu_f32, b1, count_inc)
+            mu_bc_factor = 1.0 - b1**count_inc
+            mu_nest_f32 = _safe_bias_correction(mu_f32, mu_bc_factor)
 
         if mu_dtype == jnp.bfloat16:
             mu_cast = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key1)
@@ -660,16 +809,20 @@ def scale_by_prism(
             mu_cast = optax.tree.cast(mu_f32, mu_dtype)
             mu_nest_cast = optax.tree.cast(mu_nest_f32, mu_dtype)
 
-        # Ensure target_for_ortho matches structure of updates
         if shape_nesterov:
             target_for_ortho = mu_nest_cast
         else:
-            # Create a PyTree of None with the same structure as effective_updates
             target_for_ortho = jax.tree.map(lambda _: None, effective_updates)
 
         prism_out = jax.tree.map(
             lambda g, m, target, dims: _prism_ortho_step(
-                g, m, gamma, ns_iters, mu_nest=target, dim_nums=dims
+                g,
+                m,
+                gamma,
+                ns_iters,
+                mu_nest=target,
+                dim_nums=dims,
+                fft_size=fft_size,
             ),
             effective_updates,
             mu_cast,
@@ -679,14 +832,12 @@ def scale_by_prism(
         )
 
         if nesterov and not shape_nesterov:
-            # Strict Paper Mode: Update = beta * O_t + (1-beta) * G_t
             new_updates = jax.tree.map(
                 lambda o, g: b1 * o + (1 - b1) * g, prism_out, effective_updates
             )
         else:
             new_updates = prism_out
 
-        # Post-Preconditioning Clipping (Per-Tensor)
         if grad_clip_max_amps is not None:
             max_rms, max_val = (
                 grad_clip_max_amps
@@ -697,7 +848,6 @@ def scale_by_prism(
                 lambda u: _clip_per_tensor_rms(u, max_rms, max_val), new_updates
             )
 
-        # (Technically redundant if M_t froze and G_t is zero, but safe)
         new_updates = jax.lax.cond(
             should_skip,
             lambda u: jax.tree.map(jnp.zeros_like, u),
@@ -705,64 +855,11 @@ def scale_by_prism(
             new_updates,
         )
 
-        # NOTE: Alignment \tilde{s}_t is computed using post-Newton-Schulz
-        # updates (effective_updates) to ensure alignment reflects PRISM's spectrally shaped geometry.
-        if use_magma:
-            next_state_key, subkey = jax.random.split(next_state_key)
-
-            def _compute_magma_state(g, m_u, s_old):
-                if g is None or isinstance(g, _masking.MaskedNode):
-                    return g
-
-                # Upcast to prevent underflow during inner product
-                g_f32 = g.astype(jnp.float32)
-                m_f32 = m_u.astype(jnp.float32)
-
-                # dist_reduce enforces correct global collective operations under GSPMD
-                dot = dist_reduce(jnp.sum(g_f32 * m_f32), axis_name, "sum")
-                norm_g_sq = dist_reduce(jnp.sum(g_f32**2), axis_name, "sum")
-                norm_mu_sq = dist_reduce(jnp.sum(m_f32**2), axis_name, "sum")
-
-                # Hard-clamp denominator to prevent NaN injection on vanishing gradients
-                cossim = dot / jnp.maximum(
-                    jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-9
-                )
-                s_tilde = jax.nn.sigmoid(cossim / magma_tau)
-                return 0.9 * s_old + 0.1 * s_tilde
-
-            new_magma_s = jax.tree.map(
-                _compute_magma_state,
-                effective_updates,
-                mu,
-                state.magma_s,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
-            )
-
-            leaves_delta, treedef = jax.tree.flatten(new_updates)
-            subkeys = jax.random.split(subkey, len(leaves_delta))
-            keys_tree = jax.tree.unflatten(treedef, subkeys)
-
-            def _apply_mask(delta, s_new, k_leaf):
-                if delta is None or isinstance(delta, _masking.MaskedNode):
-                    return delta
-                m_mask = jax.random.bernoulli(k_leaf, 0.5).astype(jnp.float32)
-                return delta * jnp.array(s_new * m_mask, dtype=delta.dtype)
-
-            new_updates = jax.tree.map(
-                _apply_mask,
-                new_updates,
-                new_magma_s,
-                keys_tree,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
-            )
-        else:
-            new_magma_s = state.magma_s
-            key = state.key
-
         return new_updates, ScaleByPrismState(
             count=count_inc,
-            mu=mu_cast if mu_dtype == jnp.bfloat16 else optax.tree.cast(mu, mu_dtype),
-            magma_s=new_magma_s,
+            mu=mu_cast
+            if mu_dtype == jnp.bfloat16
+            else optax.tree.cast(mu_f32, mu_dtype),
             key=next_state_key,
         )
 
@@ -785,6 +882,7 @@ def prism(
     axis_name: Optional[str] = None,
     use_magma: bool = False,
     magma_tau: float = 2.0,
+    fft_size: Optional[int] = None,
     key: int = 42,
     # Partitioning Arguments
     adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
@@ -855,36 +953,47 @@ def prism(
         dim_nums = get_resolved_dim_nums(params)
         return _mask_dimension_numbers(dim_nums)
 
+    prism_components = [
+        scale_by_prism(
+            b1=b1,
+            gamma=gamma,
+            ns_iters=ns_iters,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            bias_correction=bias_correction,
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            weight_dimension_numbers=prism_weight_dim_nums_fn,
+            fft_size=fft_size,
+            axis_name=axis_name,
+            key=key,
+        ),
+        transform.add_decayed_weights(weight_decay),
+    ]
+
+    if use_magma:
+        prism_components.append(
+            apply_magma_mask(magma_tau=magma_tau, axis_name=axis_name, key=key)
+        )
+
+    prism_components.append(transform.scale_by_learning_rate(learning_rate))
+
     return combine.partition(
         transforms={
-            "prism": combine.chain(
-                scale_by_prism(
-                    b1=b1,
-                    gamma=gamma,
-                    ns_iters=ns_iters,
-                    nesterov=nesterov,
-                    shape_nesterov=shape_nesterov,
-                    bias_correction=bias_correction,
-                    mu_dtype=mu_dtype,
-                    raw_global_grad_clip=raw_global_grad_clip,
-                    permissive_spike_protection=permissive_spike_protection,
-                    grad_clip_max_amps=grad_clip_max_amps,
-                    weight_dimension_numbers=prism_weight_dim_nums_fn,
-                    use_magma=use_magma,
-                    magma_tau=magma_tau,
-                    axis_name=axis_name,
-                    key=key,
-                ),
-                transform.add_decayed_weights(weight_decay),
-                transform.scale_by_learning_rate(learning_rate),
-            ),
-            "adam": alias.adamw(
+            "prism": combine.chain(*prism_components),
+            "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,
                 b2=adam_b2,
                 eps=adam_eps,
                 weight_decay=weight_decay,
                 mu_dtype=mu_dtype,
+                use_magma=use_magma,
+                magma_tau=magma_tau,
+                axis_name=axis_name,
+                key=key,
             ),
         },
         param_labels=param_labels,
