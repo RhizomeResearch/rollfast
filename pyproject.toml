@@ -1,6 +1,6 @@
 [project]
 name = "rollfast"
-version = "0.1.2"
+version = "0.2.0"
 description = "JAX implementation of experimental optimizers and schedulers."
 readme = "README.md"
 requires-python = ">=3.11"

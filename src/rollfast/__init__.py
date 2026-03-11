@@ -10,5 +10,9 @@ from .schedules.schedulefree import (
     schedule_free_prism as schedule_free_prism,
 )
 from .schedules.wsd import wsd_schedule as wsd_schedule
+from .utils import (
+    apply_updates as apply_updates,
+    apply_updates_prefix as apply_updates_prefix,
+)
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
