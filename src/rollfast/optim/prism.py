@@ -462,6 +462,17 @@ def _sym(M: jax.Array) -> jax.Array:
     return 0.5 * (M + M.mT)
 
 
+def _safe_mm(A: jax.Array, B: jax.Array) -> jax.Array:
+    """Forces Exact FP32 Matrix Multiplication.
+
+    Bypasses XLA's default aggressive downcasting to BF16/TF32
+    on modern hardware. For eigenvalue-sensitive polynomial iterations, maintaining
+    a 23-bit mantissa is strictly required to preserve the Symmetric Positive Definite
+    (SPD) property and remain within the convergence radius.
+    """
+    return jnp.matmul(A, B, precision=jax.lax.Precision.HIGHEST)
+
+
 def _matmul_invroot(
     G: jax.Array,
     P: jax.Array,
@@ -556,8 +567,8 @@ def _double_sided_matmul_invroot(
     P = P / tP_safe + eps * I_n
 
     for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
-        WQ = a * I_m + b * Q + c * (Q @ Q)
-        WP = a * I_n + b * P + c * (P @ P)
+        WQ = _sym(a * I_m + b * Q + c * _sym(_safe_mm(Q, Q)))
+        WP = _sym(a * I_n + b * P + c * _sym(_safe_mm(P, P)))
         # WQ1 = jnp.linalg.matrix_power(WQ, s)
         # WQ2 = jnp.linalg.matrix_power(WQ, r)
         # WP1 = jnp.linalg.matrix_power(WP, s)
@@ -569,16 +580,17 @@ def _double_sided_matmul_invroot(
         if r == 1:
             WQ2, WP2 = WQ, WP
         elif r == 2:
-            WQ2, WP2 = WQ @ WQ, WP @ WP
+            WQ2, WP2 = _sym(_safe_mm(WQ, WQ)), _sym(_safe_mm(WP, WP))
         elif r == 4:
-            WQ2_sq, WP2_sq = WQ @ WQ, WP @ WP
-            WQ2, WP2 = WQ2_sq @ WQ2_sq, WP2_sq @ WP2_sq
+            WQ2_sq, WP2_sq = _sym(_safe_mm(WQ, WQ)), _sym(_safe_mm(WP, WP))
+            WQ2, WP2 = _sym(_safe_mm(WQ2_sq, WQ2_sq)), _sym(_safe_mm(WP2_sq, WP2_sq))
         else:
             WQ2 = jnp.linalg.matrix_power(WQ, r)
             WP2 = jnp.linalg.matrix_power(WP, r)
-        Q = _sym(Q @ WQ2)
-        G = WQ1 @ G @ WP1
-        P = _sym(P @ WP2)
+
+        Q = _sym(_safe_mm(Q, WQ2))
+        G = _safe_mm(_safe_mm(WQ1, G), WP1)
+        P = _sym(_safe_mm(P, WP2))
 
     # return G * tQ ** (-s / r) * tP ** (-s / r)
     return G * tQ_safe ** (-s / r) * tP_safe ** (-s / r)
@@ -716,16 +728,15 @@ def _shampoo_prism_math(
     m_target_norm = m_target / scale
     D_norm = D / scale
 
-    H_L = (
-        m_target_norm @ m_target_norm.mT
-        + gamma_l**2 * (D_norm @ D_norm.mT)
-        + eps_gram * jnp.eye(m, dtype=jnp.float32)
-    )
-    H_R = (
-        m_target_norm.mT @ m_target_norm
-        + gamma_r**2 * (D_norm.mT @ D_norm)
-        + eps_gram * jnp.eye(n, dtype=jnp.float32)
-    )
+    H_L = _sym(
+        _safe_mm(m_target_norm, m_target_norm.mT)
+        + gamma_l**2 * _safe_mm(D_norm, D_norm.mT)
+    ) + eps_gram * jnp.eye(m, dtype=jnp.float32)
+
+    H_R = _sym(
+        _safe_mm(m_target_norm.mT, m_target_norm)
+        + gamma_r**2 * _safe_mm(D_norm.mT, D_norm)
+    ) + eps_gram * jnp.eye(n, dtype=jnp.float32)
     return _double_sided_matmul_invroot(
         H_L,
         m_target_norm,
