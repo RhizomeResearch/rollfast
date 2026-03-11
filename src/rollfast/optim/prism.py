@@ -848,7 +848,7 @@ def prism(
     Returns:
         A `optax.GradientTransformation` that handles the partitioned optimization.
     """
-    key_prism, key_adam = jax.random.split(key, 2)
+    key_prism, key_adam = jax.random.split(jax.random.PRNGKey(key), 2)
 
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate

@@ -199,6 +199,11 @@ def apply_updates(
     2. Overrides the deterministic RNE cast ONLY for bfloat16 parameters, preventing
        sub-representable update signals from collapsing to zero.
     """
+    if stochastic and key is None:
+        raise ValueError(
+            "apply_updates requires a PRNG `key` when stochastic=True. "
+            "Pass stochastic=False for deterministic rounding."
+        )
 
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves, treedef = jax.tree.flatten(params, is_leaf=is_leaf_fn)
@@ -252,6 +257,12 @@ def apply_updates_prefix(
     positions where updates is a leaf (None), preserving non-differentiable
     Equinox leaves (Callables, static fields) without any cast attempt.
     """
+    if stochastic and key is None:
+        raise ValueError(
+            "apply_updates requires a PRNG `key` when stochastic=True. "
+            "Pass stochastic=False for deterministic rounding."
+        )
+
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
 
     update_leaves, update_treedef = jax.tree.flatten(updates, is_leaf=is_leaf_fn)
