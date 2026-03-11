@@ -3,6 +3,6 @@ stages:
 
 test:
   stage: test
-  image: cachix/devenv:latest
+  image: ghcr.io/cachix/devenv/devenv:latest
   script:
     - devenv test
