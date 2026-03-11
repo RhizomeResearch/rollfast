@@ -91,9 +91,10 @@ def apply_magma_internal(
         # Singular block-wise Bernoulli scalar
         m_mask = jax.random.bernoulli(block_key, 0.5).astype(delta.dtype)
 
-        delta_magma = jnp.where(
-            m_mask, s_new.astype(delta.dtype) * delta, jnp.zeros_like(delta)
-        )
+        # delta_magma = jnp.where(
+        #     m_mask, s_new.astype(delta.dtype) * delta, jnp.zeros_like(delta)
+        # )
+        delta_magma = m_mask * s_new.astype(delta.dtype) * delta
 
         new_delta_leaves.append(delta_magma)
         new_s_leaves.append(s_new)
