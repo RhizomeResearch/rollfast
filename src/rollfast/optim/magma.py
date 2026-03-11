@@ -25,6 +25,14 @@ def apply_magma_internal(
     leaves_delta, _ = jax.tree.flatten(base_updates, is_leaf=is_leaf_fn)
     leaves_s, _ = jax.tree.flatten(magma_s_prev, is_leaf=is_leaf_fn)
 
+    if axis_name is not None:
+        # Synchronize PRNG key across all devices so Bernoulli masks are identical.
+        # pmin over raw key bits is a single O(log D) collective that deterministically
+        # selects the same canonical key on every device.
+        key_bits = jax.random.key_data(key)
+        key_bits = jax.lax.pmin(key_bits, axis_name=axis_name)
+        key = jax.random.wrap_key_data(key_bits)
+
     subkeys = jax.random.split(key, len(leaves_g))
 
     new_delta_leaves = []
