@@ -8,7 +8,7 @@ from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
-from rollfast.optim.magma import apply_magma_mask
+from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     _safe_bias_correction,
     _tree_stochastic_cast,
@@ -644,6 +644,7 @@ class ScaleByPrismState(NamedTuple):
 
     count: jax.Array
     mu: base.Updates
+    magma_s: Any
     key: Optional[jax.Array]
 
 
@@ -659,8 +660,10 @@ def scale_by_prism(
     permissive_spike_protection: bool = True,
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    axis_name: Optional[str] = None,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
     fft_size: Optional[int] = None,
+    axis_name: Optional[str] = None,
     key: int = 42,
 ) -> base.GradientTransformation:
     """The core PRISM gradient transformation.
@@ -700,14 +703,38 @@ def scale_by_prism(
     def init_fn(params):
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)
 
+        if use_magma:
+
+            def _init_s(x):
+                if x is None:
+                    return None
+                if isinstance(x, _masking.MaskedNode):
+                    return _masking.MaskedNode()
+                return jnp.zeros([], jnp.float32)
+
+            magma_s = jax.tree.map(
+                _init_s,
+                params,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            )
+        else:
+            magma_s = ()
+
         return ScaleByPrismState(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
+            magma_s=magma_s,
             key=jax.random.PRNGKey(key),
         )
 
     def update_fn(updates, state, params=None):
-        next_state_key, sr_key1, sr_key2 = jax.random.split(state.key, 3)
+        raw_gradients = updates
+
+        if use_magma:
+            next_state_key, sr_key1, sr_key2, magma_key = jax.random.split(state.key, 4)
+        else:
+            next_state_key, sr_key1, sr_key2 = jax.random.split(state.key, 3)
+            magma_key = None
 
         # Strict requirement for params if dimension numbers are used
         if params is None:
@@ -855,11 +882,26 @@ def scale_by_prism(
             new_updates,
         )
 
-        return new_updates, ScaleByPrismState(
+        if use_magma:
+            final_updates, new_magma_s = apply_magma_internal(
+                raw_gradients=raw_gradients,
+                first_moments=mu_f32,
+                base_updates=new_updates,
+                magma_s_prev=state.magma_s,
+                key=magma_key,
+                tau=magma_tau,
+                axis_name=axis_name,
+            )
+        else:
+            final_updates = new_updates
+            new_magma_s = state.magma_s
+
+        return final_updates, ScaleByPrismState(
             count=count_inc,
             mu=mu_cast
             if mu_dtype == jnp.bfloat16
             else optax.tree.cast(mu_f32, mu_dtype),
+            magma_s=new_magma_s,
             key=next_state_key,
         )
 
@@ -966,19 +1008,15 @@ def prism(
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
             weight_dimension_numbers=prism_weight_dim_nums_fn,
+            use_magma=use_magma,
+            magma_tau=magma_tau,
             fft_size=fft_size,
             axis_name=axis_name,
             key=key,
         ),
         transform.add_decayed_weights(weight_decay),
+        transform.scale_by_learning_rate(learning_rate),
     ]
-
-    if use_magma:
-        prism_components.append(
-            apply_magma_mask(magma_tau=magma_tau, axis_name=axis_name, key=key)
-        )
-
-    prism_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={

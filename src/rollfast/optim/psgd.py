@@ -12,8 +12,9 @@ from optax._src import base, numerics, transform
 from optax._src.combine import chain
 from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
+from optax.transforms import _masking
 
-from rollfast.optim.magma import apply_magma_mask
+from rollfast.optim.magma import apply_magma_mask, apply_magma_internal
 from rollfast.utils import (
     _tree_stochastic_cast,
     _tree_update_moment_f32,
@@ -74,6 +75,7 @@ class KronState(NamedTuple):
     Qs_preconditioners: Any
     Ls_lipschitz: Optional[Any]
     needs_scale_init: jax.Array
+    magma_s: Any
     key: jax.Array
 
 
@@ -745,6 +747,8 @@ def scale_by_kron(
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -935,19 +939,44 @@ def scale_by_kron(
                     f"PSGD Momentum size: {mu_n_elements} elements, {mu_size_MB:.2f} MB"
                 )
 
+        if use_magma:
+
+            def _init_s(x):
+                if x is None:
+                    return None
+                if isinstance(x, _masking.MaskedNode):
+                    return _masking.MaskedNode()
+                return jnp.zeros([], jnp.float32)
+
+            magma_s = jax.tree.map(
+                _init_s,
+                params,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            )
+        else:
+            magma_s = ()
+
         return KronState(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
             Qs_preconditioners=Qs,
             Ls_lipschitz=Ls,
             needs_scale_init=jnp.array(lazy_init, dtype=jnp.bool_),
+            magma_s=magma_s,
             key=key,
         )
 
     def update_fn(updates: base.Updates, state: KronState, params: base.Params = None):
         del params
+        raw_gradients = updates
+
         count_inc = safe_int32_increment(state.count)
-        key, key_next = jax.random.split(state.key)
+
+        if use_magma:
+            key, key_next, magma_key = jax.random.split(state.key, 3)
+        else:
+            key, key_next = jax.random.split(state.key, 2)
+            magma_key = None
 
         is_spike = jnp.array(False, dtype=jnp.bool_)
         if raw_global_grad_clip is not None:
@@ -1287,6 +1316,20 @@ def scale_by_kron(
 
         updates = grads_structure.unflatten(precond_gs)
 
+        if use_magma:
+            final_updates, new_magma_s = apply_magma_internal(
+                raw_gradients=raw_gradients,
+                first_moments=mu_f32,
+                base_updates=updates,
+                magma_s_prev=state.magma_s,
+                key=magma_key,
+                tau=magma_tau,
+                axis_name=axis_name,
+            )
+        else:
+            final_updates = updates
+            new_magma_s = state.magma_s
+
         key_next, key_save_q = jax.random.split(key_next)
 
         Qs_to_save = grads_structure.unflatten(Qs_next)
@@ -1302,10 +1345,11 @@ def scale_by_kron(
             Qs_preconditioners=Qs_to_save,
             Ls_lipschitz=Ls_to_save,
             needs_scale_init=needs_scale_init,
+            magma_s=new_magma_s,
             key=key_next,
         )
 
-        return updates, new_state
+        return final_updates, new_state
 
     return base.GradientTransformationExtraArgs(init_fn, update_fn)
 
@@ -1380,17 +1424,14 @@ def kron(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
+            use_magma=use_magma,
+            magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,
         )
     ]
     if weight_decay > 0.0:
         optimizer.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
-
-    if use_magma:
-        optimizer.append(
-            apply_magma_mask(magma_tau=magma_tau, axis_name=axis_name, key=key)
-        )
 
     optimizer.append(transform.scale_by_learning_rate(learning_rate))
     return chain(*optimizer)

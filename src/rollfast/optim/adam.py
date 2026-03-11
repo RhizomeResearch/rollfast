@@ -1,10 +1,7 @@
 # This code is coming mostly from Optax itself.
 # I just modified it to add support for Magma
 # and stochastic rounding
-from rollfast.optim.magma import apply_magma_mask
-
-from collections.abc import Callable
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -13,11 +10,11 @@ import optax.tree
 from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
+from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
+    _safe_bias_correction,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
-    dist_reduce,
-    _safe_bias_correction,
 )
 
 
@@ -27,6 +24,7 @@ class ScaleByAdamState(NamedTuple):
     count: jax.typing.ArrayLike  # shape=(), dtype=jnp.int32.
     mu: base.Updates
     nu: base.Updates
+    magma_s: Any
     key: Optional[jax.Array]
 
 
@@ -38,6 +36,8 @@ def scale_by_adam(
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     *,
     nesterov: bool = False,
+    use_magma: bool = False,
+    magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
     key: int = 42,
 ) -> base.GradientTransformation:
@@ -68,26 +68,42 @@ def scale_by_adam(
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # First moment
         nu = optax.tree.zeros_like(params)  # Second moment
 
-        def _init_s(x):
-            if x is None:
-                return None
-            # Enforce topological isomorphism for XLA compiler partitioning
-            if isinstance(x, _masking.MaskedNode):
-                return _masking.MaskedNode()
-            return jnp.zeros([], jnp.float32)
+        if use_magma:
+
+            def _init_s(x):
+                if x is None:
+                    return None
+                if isinstance(x, _masking.MaskedNode):
+                    return _masking.MaskedNode()
+                return jnp.zeros([], jnp.float32)
+
+            magma_s = jax.tree.map(
+                _init_s,
+                params,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            )
+        else:
+            magma_s = ()
 
         return ScaleByAdamState(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
             nu=nu,
-            key=jax.random.PRNGKey(key),
+            magma_s=magma_s,
+            key=jax.random.PRNGKey(key) if use_magma else None,
         )
 
     def update_fn(updates, state, params=None):
         del params
+
+        # Preserve raw stochastic gradients (g_t) for Magma alignment
         raw_gradients = updates
 
-        next_state_key, magma_key = jax.random.split(state.key, 2)
+        if use_magma:
+            next_state_key, magma_key = jax.random.split(state.key, 2)
+        else:
+            next_state_key = state.key
+            magma_key = None
 
         mu_f32 = _tree_update_moment_f32(updates, state.mu, b1)
         nu_f32 = _tree_update_moment_sq_f32(updates, state.nu, b2)
@@ -131,7 +147,8 @@ def scale_by_adam(
         # Algorithm 2 further multiplies Adam's standard nu_hat by b2. It is
         # unclear why. Other Nadam implementations also omit the extra b2 factor.
         nu_hat = _safe_bias_correction(nu_f32, nu_bc_factor)
-        updates = jax.tree.map(
+
+        adam_updates = jax.tree.map(
             lambda m, v: (
                 m
                 if isinstance(m, _masking.MaskedNode)
@@ -142,10 +159,26 @@ def scale_by_adam(
             is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
 
-        return updates, ScaleByAdamState(
+        # Intercept and mathematically project Delta_t through Magma logic
+        if use_magma:
+            final_updates, new_magma_s = apply_magma_internal(
+                raw_gradients=raw_gradients,
+                first_moments=mu_f32,
+                base_updates=adam_updates,
+                magma_s_prev=state.magma_s,
+                key=magma_key,
+                tau=magma_tau,
+                axis_name=axis_name,
+            )
+        else:
+            final_updates = adam_updates
+            new_magma_s = state.magma_s
+
+        return final_updates, ScaleByAdamState(
             count=count_inc,
             mu=mu_f32,
             nu=nu_f32,
+            magma_s=new_magma_s,
             key=next_state_key,
         )
 
@@ -292,17 +325,13 @@ def adamw(
             eps_root=eps_root,
             mu_dtype=mu_dtype,
             nesterov=nesterov,
+            use_magma=use_magma,
+            magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,
         ),
         transform.add_decayed_weights(weight_decay, mask),
+        transform.scale_by_learning_rate(learning_rate),
     ]
-
-    if use_magma:
-        components.append(
-            apply_magma_mask(magma_tau=magma_tau, axis_name=axis_name, key=key)
-        )
-
-    components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.chain(*components)
