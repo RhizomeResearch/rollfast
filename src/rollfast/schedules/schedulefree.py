@@ -20,6 +20,7 @@ from rollfast.optim.psgd import (
     scale_by_kron,
 )
 from rollfast.schedules.wsd import wsd_schedule
+from rollfast.utils import _stochastic_round_bf16
 
 
 class WeightingMode(str, Enum):
@@ -42,6 +43,7 @@ class ScheduleFreeState(NamedTuple):
     step_count: jax.Array
     base_state: base.OptState
     z: base.Params
+    key: jax.Array
 
 
 def schedule_free(
@@ -50,6 +52,7 @@ def schedule_free(
     b1: float = 0.9,
     weighting_mode: Union[str, WeightingMode] = WeightingMode.SCHEDULET,
     state_dtype: Optional[jax.typing.DTypeLike] = None,
+    key: int = 42,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free Wrapper supporting Schedulet, Practical, and Theoretical modes.
 
@@ -80,13 +83,8 @@ def schedule_free(
             else optax.tree.dtype(params, "lowest")
         )
         z = optax.tree.cast(params, dtype=dtype)
-        # Deep copy z to ensure distinct buffer
         z = jax.tree.map(lambda t: jnp.array(t, copy=True), z)
 
-        # Initialize weight_sum as a PyTree of zeros matching params
-        # This is O(N) memory but required for exact mathematical correctness
-        # with partitioned schedules.
-        # weight_sum = jax.tree.map(lambda x: jnp.zeros([], dtype=jnp.float32), params)
         weight_sum = jax.tree.map(
             lambda x: jnp.zeros([], dtype=jnp.float32) if x is not None else None,
             params,
@@ -95,11 +93,142 @@ def schedule_free(
         return ScheduleFreeState(
             b1=jnp.array(b1, dtype=jnp.float32),
             weight_sum=weight_sum,
-            # weight_sum=jnp.zeros([], dtype=jnp.float32),
             step_count=jnp.zeros([], dtype=jnp.int32),
             base_state=base_optimizer.init(params),
             z=z,
+            key=jax.random.PRNGKey(key),
         )
+
+    def update_fn(updates, state, params=None, **extra_args):
+        next_state_key, sr_key = jax.random.split(state.key, 2)
+
+        if callable(learning_rate):
+            try:
+                lr_tree = learning_rate(state.step_count, params)
+            except TypeError:
+                lr_tree = learning_rate(state.step_count)
+        else:
+            lr_tree = learning_rate
+
+        lr_tree = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), lr_tree)
+
+        # Compute Base Optimizer Update (Preconditioned Gradient)
+        # Note: base_optimizer should output the update step d = -lr * P * g
+        # We must handle the LR scaling carefully. Standard SF assumes base_opt
+        # returns (D^-1 g).
+        base_updates, new_base_state = base_optimizer.update(
+            updates, state.base_state, params, **extra_args
+        )
+
+        if weighting_mode == WeightingMode.SCHEDULET:
+            weight_tree = lr_tree
+        elif weighting_mode == WeightingMode.PRACTICAL:
+            weight_tree = jax.tree.map(
+                lambda x: jnp.square(x) if x is not None else None, lr_tree
+            )
+        else:  # THEORETICAL
+            weight_tree = jax.tree.map(
+                lambda x: jnp.ones_like(x) if x is not None else None, lr_tree
+            )
+
+        # Accumulate weights: W_t = W_{t-1} + w_t
+        # new_weight_sum = jax.tree.map(
+        #     lambda acc, w: acc + w, state.weight_sum, weight_tree
+        # )
+        new_weight_sum = jax.tree.map(
+            lambda acc, w: (acc + w) if (acc is not None and w is not None) else None,
+            state.weight_sum,
+            weight_tree,
+        )
+
+        # c_t = w_t / W_t
+        # Safety: avoid division by zero
+        ck_tree = jax.tree.map(
+            lambda w, sum_w: (
+                jnp.where(sum_w > 0, w / sum_w, 0.0)
+                if (w is not None and sum_w is not None)
+                else None
+            ),
+            weight_tree,
+            new_weight_sum,
+        )
+
+        # Protect against b1 -> 0
+        b1_safe = jnp.maximum(state.b1, 1e-8)
+
+        # Schedule-Free Update Dynamics
+        # y_t = params (input)
+        # z_t = z_{t-1} - gamma * (Base Update)
+        # Note: 'base_updates' from chain usually includes LR scaling.
+        # If base_optimizer includes scale_by_learning_rate, base_updates is actual step.
+        leaves, treedef = jax.tree.flatten(state.z, is_leaf=lambda x: x is None)
+        subkeys = jax.random.split(sr_key, len(leaves))
+        keys_tree = jax.tree.unflatten(treedef, list(subkeys))
+
+        def _safe_z_update(z_old, u, k):
+            if z_old is None or u is None:
+                return z_old
+            # Prevent silent truncation before addition
+            sum_f32 = z_old.astype(jnp.float32) + u.astype(jnp.float32)
+            if getattr(z_old, "dtype", None) == jnp.bfloat16:
+                return _stochastic_round_bf16(sum_f32, k)
+            return sum_f32.astype(z_old.dtype)
+
+        z_next = jax.tree.map(
+            _safe_z_update,
+            state.z,
+            base_updates,
+            keys_tree,
+            is_leaf=lambda x: x is None,
+        )
+
+        # This collapses x_curr and x_next calculation to strictly bound memory allocation to O(N).
+        def _sf_interpolate_y(y, z_old, z_new, ck):
+            if y is None or z_old is None or z_new is None:
+                return None
+            y_f32 = y.astype(jnp.float32)
+            z_old_f32 = z_old.astype(jnp.float32)
+            z_new_f32 = z_new.astype(jnp.float32)
+
+            if ck is None:
+                return y_f32
+
+            term1 = (1.0 - ck) * y_f32
+            term2 = (1.0 - ck) * (1.0 - b1_safe) * z_old_f32
+            term3 = (b1_safe * ck + 1.0 - b1_safe) * z_new_f32
+
+            return term1 - term2 + term3
+
+        y_next = jax.tree.map(
+            _sf_interpolate_y,
+            params,
+            state.z,
+            z_next,
+            ck_tree,
+            is_leaf=lambda x: x is None,
+        )
+
+        final_updates = jax.tree.map(
+            lambda y_n, p: (
+                (y_n - p.astype(jnp.float32)).astype(p.dtype) if p is not None else None
+            ),
+            y_next,
+            params,
+            is_leaf=lambda x: x is None,
+        )
+
+        new_state = ScheduleFreeState(
+            b1=state.b1,
+            weight_sum=new_weight_sum,
+            step_count=numerics.safe_increment(state.step_count),
+            base_state=new_base_state,
+            z=z_next,
+            key=next_state_key,
+        )
+
+        return final_updates, new_state
+
+    return base.GradientTransformationExtraArgs(init_fn, update_fn)
 
     def update_fn(updates, state, params=None, **extra_args):
         if callable(learning_rate):
@@ -310,7 +439,6 @@ def schedule_free_prism(
                     ns_iters=ns_iters,
                     nesterov=False,
                     shape_nesterov=shape_nesterov,
-                    use_magma=False,
                     # bias_correction=False,  # SF handles bias correction implicitly
                     mu_dtype=mu_dtype,
                     raw_global_grad_clip=raw_global_grad_clip,
@@ -477,7 +605,6 @@ def schedule_free_kron(
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
             axis_name=axis_name,
-            use_magma=False,
             key=key,
         )
     ]
