@@ -7,7 +7,12 @@ import optax
 from optax._src import alias, base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
-from rollfast.utils import add_tiny, dist_reduce
+from rollfast.utils import (
+    add_tiny,
+    dist_reduce,
+    _tree_stochastic_cast,
+    _compute_ema_f32,
+)
 
 try:
     import equinox as eqx
@@ -556,10 +561,12 @@ def scale_by_prism(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
             magma_s=magma_s,
-            key=jax.random.PRNGKey(key) if use_magma else None,
+            key=jax.random.PRNGKey(key),
         )
 
     def update_fn(updates, state, params=None):
+        next_state_key, sr_key1, sr_key2 = jax.random.split(state.key, 3)
+
         # Strict requirement for params if dimension numbers are used
         if params is None:
             if weight_dimension_numbers is not None:
@@ -603,24 +610,55 @@ def scale_by_prism(
         )
         mu = optax.tree.update_moment(effective_updates, state.mu, b1, 1)
 
-        # Nesterov / Bias Correction
-        mu_nest = mu
+        mu_f32 = jax.tree.map(
+            _compute_ema_f32,
+            state.mu,
+            effective_updates,
+            b1,
+            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+        )
+
+        # Nesterov / Bias Correction (Strictly FP32)
+        mu_nest_f32 = mu_f32
         if nesterov:
             if bias_correction:
-                mu_bc = optax.tree.bias_correction(
-                    mu, b1, numerics.safe_increment(count_inc)
+                mu_bc_f32 = optax.tree.bias_correction(
+                    mu_f32, b1, numerics.safe_increment(count_inc)
                 )
-                g_bc = optax.tree.bias_correction(effective_updates, b1, count_inc)
-                mu_nest = jax.tree.map(lambda m, g: b1 * m + (1 - b1) * g, mu_bc, g_bc)
+
+                # Upcast updates for exact bias correction
+                updates_f32 = jax.tree.map(
+                    lambda x: x.astype(jnp.float32) if x is not None else None,
+                    effective_updates,
+                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                )
+                g_bc_f32 = optax.tree.bias_correction(updates_f32, b1, count_inc)
+
+                mu_nest_f32 = jax.tree.map(
+                    lambda m, g: b1 * m + (1.0 - b1) * g if m is not None else None,
+                    mu_bc_f32,
+                    g_bc_f32,
+                )
             else:
-                mu_nest = jax.tree.map(
-                    lambda m, g: b1 * m + (1 - b1) * g, mu, effective_updates
+                mu_nest_f32 = jax.tree.map(
+                    lambda m, g: (
+                        b1 * m
+                        + (1.0 - b1) * (g.astype(jnp.float32) if g is not None else 0.0)
+                        if m is not None
+                        else None
+                    ),
+                    mu_f32,
+                    effective_updates,
                 )
         elif bias_correction:
-            mu_nest = optax.tree.bias_correction(mu, b1, count_inc)
+            mu_nest_f32 = optax.tree.bias_correction(mu_f32, b1, count_inc)
 
-        mu_cast = optax.tree.cast(mu, mu_dtype)
-        mu_nest_cast = optax.tree.cast(mu_nest, mu_dtype)
+        if mu_dtype == jnp.bfloat16:
+            mu_cast = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key1)
+            mu_nest_cast = _tree_stochastic_cast(mu_nest_f32, mu_dtype, sr_key2)
+        else:
+            mu_cast = optax.tree.cast(mu_f32, mu_dtype)
+            mu_nest_cast = optax.tree.cast(mu_nest_f32, mu_dtype)
 
         # Ensure target_for_ortho matches structure of updates
         if shape_nesterov:
@@ -670,6 +708,7 @@ def scale_by_prism(
         # NOTE: Alignment \tilde{s}_t is computed using post-Newton-Schulz
         # updates (effective_updates) to ensure alignment reflects PRISM's spectrally shaped geometry.
         if use_magma:
+            next_state_key, subkey = jax.random.split(next_state_key)
 
             def _compute_magma_state(g, m_u, s_old):
                 if g is None or isinstance(g, _masking.MaskedNode):
@@ -700,7 +739,6 @@ def scale_by_prism(
             )
 
             leaves_delta, treedef = jax.tree.flatten(new_updates)
-            key, subkey = jax.random.split(state.key)
             subkeys = jax.random.split(subkey, len(leaves_delta))
             keys_tree = jax.tree.unflatten(treedef, subkeys)
 
@@ -723,9 +761,9 @@ def scale_by_prism(
 
         return new_updates, ScaleByPrismState(
             count=count_inc,
-            mu=optax.tree.cast(mu, mu_dtype),
+            mu=mu_cast if mu_dtype == jnp.bfloat16 else optax.tree.cast(mu, mu_dtype),
             magma_s=new_magma_s,
-            key=key,
+            key=next_state_key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)
