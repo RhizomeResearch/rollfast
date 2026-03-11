@@ -1,0 +1,8 @@
+stages:
+  - test
+
+test:
+  stage: test
+  image: cachix/devenv:latest
+  script:
+    - devenv test
