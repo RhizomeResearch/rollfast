@@ -24,11 +24,12 @@ weight matrices directly.
 - **Mechanism**: Decomposes updates using Newton-Schulz iterations to
   approximate SVD, applying "innovation" updates to the singular vectors while
   damping singular values.
+- **Modes**: Supports `original` (Newton-Schulz iterations on an augmented matrix) and `bidirectional` (Shampoo-style bilateral shaping of both left and right singular-vector spaces).
 - **Partitioning**: Automatically partitions parameters. High-rank tensors
   (Linear/Conv weights) are optimized via PRISM; vectors (biases, layernorms) are
   optimized via AdamW.
 - **Reference**: *PRISM: Structured Optimization via Anisotropic Spectral
-  Shaping* (Yang, 2026).
+  Shaping* (Yang, 2026) and *Bidirectional-PRISM: Kronecker-Factored Optimization via Anisotropic Spectral Shaping* (Cesista, 2026).
 
 ### 2. PSGD Kron (Lie Group Preconditioning)
 
@@ -44,9 +45,9 @@ using multiplicative updates that avoid explicit matrix inversion.
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
-base optimizer) and an averaged sequence $x$ (used for evaluation).
+base optimizer) and an averaged sequence $x$ (used for evaluation). Available for PRISM, PSGD Kron, and Adam.
 
-- **Features**: Supports "Practical" and "Schedulet" weighting modes for
+- **Features**: Supports "Practical", "Schedulet", and "Theoretical" weighting modes for
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
@@ -82,7 +83,7 @@ learning rate and structural hyperparameters.
 ```python
 import jax
 import jax.numpy as jnp
-from rollfast import prism
+from rollfast import prism, get_equinox_prism_spec
 
 # Define parameters
 params = {
@@ -94,22 +95,34 @@ params = {
 # 'b' will be optimized by AdamW
 optimizer = prism(
     learning_rate=1e-3,
-    ns_iters=5,          # Newton-Schulz iterations for orthogonalization
-    gamma=1.0,           # Innovation damping
+    mode='bidirectional', # or 'original'
+    ns_iters=5,           # Newton-Schulz iterations (for 'original' mode)
+    inv_steps=8,          # Polynomial iterations (for 'bidirectional' mode)
+    gamma=1.0,            # Innovation damping
     weight_decay=0.01
 )
 
 opt_state = optimizer.init(params)
 ```
 
-### 2. Schedule-Free PRISM
-
-The `schedule_free_prism` function wraps the PRISM optimizer with the
-Schedule-Free logic and the WSD (Warmup-Stable-Decay) scheduler for the internal
-step size.
+**Equinox Integration:** `rollfast` natively supports Equinox. You can use `get_equinox_prism_spec` to automatically construct the exact dimension specification PyTree matching your model.
 
 ```python
-from rollfast.optim import schedule_free_prism
+import equinox as eqx
+
+model = ... # Your Equinox model
+optimizer = prism(
+    learning_rate=1e-3,
+    prism_weight_dimension_numbers=get_equinox_prism_spec
+)
+```
+
+### 2. Schedule-Free Optimization
+
+The `schedule_free_*` functions wrap base optimizers with the Schedule-Free logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
+
+```python
+from rollfast import schedule_free_prism, schedule_free_eval_params
 
 optimizer = schedule_free_prism(
     learning_rate=1.0,   # Peak LR for internal steps
@@ -120,16 +133,19 @@ optimizer = schedule_free_prism(
     gamma=0.8,           # PRISM specific arg
 )
 
-# Note: In Schedule-Free, you must compute gradients at the averaged location 'x'
-# but apply updates to the state 'z'.
+# In Schedule-Free, updates are applied to the z-sequence parameters.
+# For evaluation/validation, use the averaged x-sequence parameters:
+eval_params = schedule_free_eval_params(opt_state, params)
 ```
+
+*Note: We also provide `schedule_free_kron` and `schedule_free_adam`.*
 
 ### 3. PSGD Kron
 
 The classic Kronecker-factored PSGD optimizer.
 
 ```python
-from rollfast.optim import kron
+from rollfast import kron
 
 optimizer = kron(
     learning_rate=1e-3,
@@ -148,7 +164,7 @@ computation graphs.
 
 ```python
 import jax
-from rollfast.optim import kron
+from rollfast import kron
 
 # Boolean pytree mask where True indicates a scanned parameter
 scanned_layers_mask = ... 
@@ -161,6 +177,30 @@ optimizer = kron(
 )
 ```
 
+### Advanced: Stochastic Rounding (Low Precision)
+
+Stochastic Rounding is best used when applying updates to the model's parameters rather than for tracking optimizer moments. It's recommended to keep `mu_dtype` as `FP32` in the optimizer and apply stochastic rounding manually within your training step using the provided `apply_updates_prefix` function.
+
+```python
+import jax
+from rollfast.utils import apply_updates_prefix
+
+# ... inside your step function ...
+def step(model, opt_state, batch, key):
+    fwd_key, sr_key = jax.random.split(key)
+    
+    # Compute gradients
+    (loss, aux), grads = compute_loss_and_grads(model, batch, fwd_key)
+    
+    # Update optimizer state
+    updates, new_opt_state = optimizer.update(grads, opt_state, model)
+    
+    # Apply updates with stochastic rounding enabled for low precision
+    new_model = apply_updates_prefix(model, updates, sr_key, stochastic=True)
+    
+    return new_model, new_opt_state, loss
+```
+
 ______________________________________________________________________
 
 ## Configuration
@@ -170,11 +210,12 @@ ______________________________________________________________________
 These parameters ensure robustness against gradient spikes and numerical
 instability, critical for training at scale.
 
-| Parameter                     | Default       | Description                                                                                                                                                |
-| :---------------------------- | :------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `raw_global_grad_clip`        | `None`        | If set, computes the global L2 norm of gradients *before* the optimizer step. If the norm exceeds this threshold, the update is either clipped or skipped. |
-| `permissive_spike_protection` | `True`        | Controls behavior when `raw_global_grad_clip` is triggered. `True` clips the gradient and proceeds; `False` strictly skips the update (zeroing the step).  |
-| `grad_clip_max_amps`          | `(2.0, 10.0)` | Post-processing clipping. Clips individual tensors by RMS (`2.0`) and absolute value (`10.0`) to prevent heavy tails in the update distribution.           |
+| Parameter                     | Default          | Description                                                                                                                                                |
+| :---------------------------- | :--------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `raw_global_grad_clip`        | `None`           | If set, computes the global L2 norm of gradients *before* the optimizer step. If the norm exceeds this threshold, the update is either clipped or skipped. |
+| `permissive_spike_protection` | `True`           | Controls behavior when `raw_global_grad_clip` is triggered. `True` clips the gradient and proceeds; `False` strictly skips the update (zeroing the step).  |
+| `grad_clip_mode`              | `per_tensor_rms` | Strategy for clipping gradients (`per_tensor_rms` or `global_rms`). Used by PSGD.                                                                          |
+| `grad_clip_max_amps`          | `(2.0, 10.0)`    | Post-processing clipping. Clips individual tensors by RMS (`2.0`) and absolute value (`10.0`) to prevent heavy tails in the update distribution.           |
 
 ### Schedule-Free Hyperparameters
 
@@ -185,16 +226,18 @@ WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
 | :---------------- | :---------- | :---------------------------------------------------------------------------------------------------------------- |
 | `warmup_fraction` | `0.1`       | Fraction of `total_steps` used for linear warmup.                                                                 |
 | `decay_fraction`  | `0.1`       | Fraction of `total_steps` used for linear decay (cooldown) at the end of training.                                |
-| `weighting_mode`  | `PRACTICAL` | Strategy for $c_t$ calculation: `THEORETICAL` ($1/t$), `PRACTICAL` ($\gamma_t^2$), or `SCHEDULET` ($\gamma_t$). |
+| `weighting_mode`  | `PRACTICAL` | Strategy for $c_t$ calculation: `THEORETICAL` ($1/t$), `PRACTICAL` ($\\gamma_t^2$), or `SCHEDULET` ($\\gamma_t$). |
 
 ### PRISM Specifics
 
-| Parameter            | Default | Description                                                                                 |
-| :------------------- | :------ | :------------------------------------------------------------------------------------------ |
-| `ns_iters`           | `5`     | Newton-Schulz iterations. Higher values provide better orthogonality but cost more compute. |
-| `gamma`              | `1.0`   | Damping coefficient for the innovation term. Controls the "anisotropy" of spectral shaping. |
-| `shape_nesterov`     | `True`  | If True, shapes Nesterov momentum; otherwise shapes raw momentum.                           |
-| `adam_learning_rate` | `None`  | Optional override for the Adam branch learning rate. Defaults to `learning_rate` if None.   |
+| Parameter            | Default    | Description                                                                                 |
+| :------------------- | :--------- | :------------------------------------------------------------------------------------------ |
+| `mode`               | `original` | `original` (Newton-Schulz augmented) or `bidirectional` (Shampoo-style bilateral shaping).  |
+| `ns_iters`           | `5`        | Newton-Schulz iterations. Higher values provide better orthogonality but cost more compute. |
+| `inv_steps`          | `8`        | Polynomial iterations for mode `bidirectional`.                                             |
+| `gamma`              | `1.0`      | Damping coefficient for the innovation term. Controls the "anisotropy" of spectral shaping. |
+| `shape_nesterov`     | `True`     | If True, shapes Nesterov momentum; otherwise shapes raw momentum.                           |
+| `adam_learning_rate` | `None`     | Optional override for the Adam branch learning rate. Defaults to `learning_rate` if None.   |
 
 ### PSGD Specifics
 
@@ -217,7 +260,7 @@ and prevent vanishing progress.
 | Parameter   | Default | Description                                                                                                                                                                                                                                                            |
 | :---------- | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `use_magma` | `False` | Enables Momentum-aligned gradient masking. Operates at the PyTree leaf level to ensure strict cryptographic PRNG independence and JAX topological isomorphism.                                                                                                         |
-| `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\sigma(\text{cossim} / \tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
+| `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\\sigma(\\text{cossim} / \\tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
 | `key`       | `42`    | Stateful PRNG seed initialized for Magma's Bernoulli sampling. `rollfast` dynamically cycles this key across shards and layers to prevent cryptographic correlation and ensure statistical independence from the base optimizer's noise injections (e.g., Procrustes). |
 
 #### Preconditioner Modes
@@ -227,8 +270,8 @@ The geometry of the preconditioner update $dQ$ is controlled via
 
 | Mode        | Formula                             | Description                                                                                                                       |
 | :---------- | :---------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
-| `Q0.5EQ1.5` | $dQ = Q^{0.5} \mathcal{E} Q^{1.5}$ | **Recommended**. Uses an online orthogonal Procrustes solver to keep $Q$ approximately SPD. Numerically stable for low precision. |
-| `EQ`        | $dQ = \mathcal{E} Q$               | The original triangular update. Requires triangular solves. Only mode compatible with triangular $Q$.                             |
+| `Q0.5EQ1.5` | $dQ = Q^{0.5} \\mathcal{E} Q^{1.5}$ | **Recommended**. Uses an online orthogonal Procrustes solver to keep $Q$ approximately SPD. Numerically stable for low precision. |
+| `EQ`        | $dQ = \\mathcal{E} Q$               | The original triangular update. Requires triangular solves. Only mode compatible with triangular $Q$.                             |
 | `QUAD`      | Quadratic Form                      | Ensures $Q$ remains symmetric positive definite via quadratic form updates.                                                       |
 | `NS`        | Newton-Schulz                       | Iteratively projects $Q$ onto the SPD manifold using Newton-Schulz iterations. Exact but more expensive.                          |
 | `EXP`       | Matrix Exponential                  | Geodesic update on the SPD manifold. Uses matrix exponential.                                                                     |
@@ -244,25 +287,32 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
 **PRISM:**
 
 ```bibtex
-@misc{2602.03096,
+@misc{yang2026prism,
   Author = {Yujie Yang},
   Title = {PRISM: Structured Optimization via Anisotropic Spectral Shaping},
   Year = {2026},
   Eprint = {arXiv:2602.03096},
+}
+
+@misc{cesista2026bidirectional,
+  Author = {Ferth Louie Cesista},
+  Title = {Bidirectional-PRISM: Kronecker-Factored Optimization via Anisotropic Spectral Shaping},
+  Year = {2026},
+  Url = {https://leloykun.github.io/ponder/shampoo-prism/},
 }
 ```
 
 **Schedule-Free:**
 
 ```bibtex
-@misc{2405.15682,
+@misc{defazio2024road,
   Author = {Aaron Defazio and Xingyu Alice Yang and Harsh Mehta and Konstantin Mishchenko and Ahmed Khaled and Ashok Cutkosky},
   Title = {The Road Less Scheduled},
   Year = {2024},
   Eprint = {arXiv:2405.15682},
 }
 
-@misc{2511.07767,
+@misc{pun2025schedulers,
   Author = {Yuen-Man Pun and Matthew Buchholz and Robert M. Gower},
   Title = {Schedulers for Schedule-free: Theoretically inspired hyperparameters},
   Year = {2025},
@@ -284,7 +334,7 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
 **Magma:**
 
 ```bibtex
-@misc{2602.15322,
+@misc{joo2026surprising,
   Author = {Taejong Joo and Wenhan Xia and Cheolmin Kim and Ming Zhang and Eugene Ie},
   Title = {On Surprising Effectiveness of Masking Updates in Adaptive Optimizers},
   Year = {2026},

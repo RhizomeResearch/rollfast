@@ -4,7 +4,7 @@ from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import optax
-from optax._src import alias, base, combine, numerics, transform
+from optax._src import base, combine, numerics, transform
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.prism import (
@@ -358,12 +358,13 @@ def schedule_free_prism(
     gamma: float = 1.0,
     ns_iters: int = 5,
     mode: str = "original",
-    inv_steps: int = 8,
+    inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
     gamma_l: Optional[float] = None,
     gamma_r: Optional[float] = None,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     shape_nesterov: bool = True,
     weight_decay: float = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
@@ -476,6 +477,7 @@ def schedule_free_prism(
             eps_gram=eps_gram,
             gamma_l=gamma_l,
             gamma_r=gamma_r,
+            precision=precision,
             nesterov=False,
             shape_nesterov=shape_nesterov,
             # bias_correction=False,  # SF handles bias correction implicitly
@@ -496,7 +498,9 @@ def schedule_free_prism(
         weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
     )
     if _wd_is_nonzero:
-        prism_components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+        prism_components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
 
     prism_components.append(transform.scale_by_learning_rate(prism_schedule))
 
@@ -744,7 +748,7 @@ def schedule_free_adam(
         mu_dtype: Momentum dtype.
         axis_name: Distributed axis name.
         key: PRNG key.
-        
+
     Returns:
         A Schedule-Free gradient transformation.
 

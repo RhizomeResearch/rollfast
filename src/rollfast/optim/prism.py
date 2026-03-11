@@ -38,13 +38,6 @@ except ImportError:
 
 _DEFAULT_NS_COEFFS = (3.4445, -4.7750, 2.0315)
 _INVROOT_COEFFS: dict[int, list[tuple[float, float, float]]] = {
-    2: [  # P^{-1/2}  (used by Optimized PRISM v2)
-        (7.42487, -18.3958, 12.8967),
-        (3.48773, -2.33004, 0.440469),
-        (2.77661, -2.07064, 0.463023),
-        (1.99131, -1.37394, 0.387593),
-        (15 / 8, -5 / 4, 3 / 8),
-    ],
     4: [  # P^{-1/4}  (used by Bidirectional-PRISM)
         (3.85003, -10.8539, 8.61893),
         (1.80992, -0.587778, 0.0647852),
@@ -462,65 +455,20 @@ def _sym(M: jax.Array) -> jax.Array:
     return 0.5 * (M + M.mT)
 
 
-def _safe_mm(A: jax.Array, B: jax.Array) -> jax.Array:
-    """Forces Exact FP32 Matrix Multiplication.
+def _safe_mm(
+    A: jax.Array,
+    B: jax.Array,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
+) -> jax.Array:
+    """Computes matrix multiplication with specified precision.
 
     Bypasses XLA's default aggressive downcasting to BF16/TF32
-    on modern hardware. For eigenvalue-sensitive polynomial iterations, maintaining
-    a 23-bit mantissa is strictly required to preserve the Symmetric Positive Definite
-    (SPD) property and remain within the convergence radius.
+    on modern hardware when HIGHEST is specified. For eigenvalue-sensitive
+    polynomial iterations, maintaining a 23-bit mantissa is strictly required
+    to preserve the Symmetric Positive Definite (SPD) property and remain
+    within the convergence radius.
     """
-    return jnp.matmul(A, B, precision=jax.lax.Precision.HIGHEST)
-
-
-def _matmul_invroot(
-    G: jax.Array,
-    P: jax.Array,
-    r: int,
-    s: int = 1,
-    steps: Optional[int] = None,
-    eps: float = 1e-5,
-    scale: float = 1.001,
-) -> jax.Array:
-    r"""Compute $G \, P^{-s/r}$ via iterative polynomial approximation.
-
-    Uses only matmul + add + scalar ops — fully GPU/TPU friendly.
-
-    Time:  O(steps * (n^3 + m*n^2))   for G:(m,n), P:(n,n).
-    Space: O(n^2) working memory beyond inputs.
-    """
-    n = P.shape[-1]
-    I = jnp.eye(n, dtype=P.dtype)
-    # Frobenius-norm pre-scaling → eigenvalues of P/t are O(1)
-    # t = jnp.sqrt(jnp.sum(P * P.mT))
-    # jnp.square guarantees non-negative summands, preventing NaN from
-    # asymmetric FP drift in nominally-SPD gram matrices.
-    # t = jnp.sqrt(jnp.sum(jnp.square(P)))
-    # NOTE: eps_gram is applied to the gram *before* this function is called,
-    # and `eps * I` is applied here *after* Frobenius normalization. This
-    # constitutes a double spectral shift. Both are safe (additive positive
-    # semidefinite), but in FP16/BF16 regimes the combined shift may over-
-    # regularize ill-conditioned subspaces, manifesting as premature
-    # conditioning plateaus. Monitor loss curves when lowering precision.
-    # P = P / (t + 1e-30) + eps * I
-    # t_safe = jnp.maximum(t, 1e-30) * 1.05
-    # P = P / t_safe + eps * I
-
-    p_max = jnp.maximum(jnp.max(jnp.abs(P)), 1e-30)
-    t = p_max * jnp.sqrt(jnp.sum(jnp.square(P / p_max)))
-    t_safe = jnp.maximum(t, 1e-30) * 1.05
-    P = P / t_safe + eps * I
-
-    for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
-        W = a * I + b * P + c * (P @ P)
-        # s and r are trace-time constants; avoid XLA power-dispatch for s=1/r=1
-        W1 = W if s == 1 else jnp.linalg.matrix_power(W, s)
-        W2 = W if r == 1 else (W @ W if r == 2 else jnp.linalg.matrix_power(W, r))
-        G = G @ W1
-        P = _sym(P @ W2)
-    # Undo the Frobenius-norm scaling
-    # return G * t ** (-s / r)
-    return G * t_safe ** (-s / r)
+    return jnp.matmul(A, B, precision=precision)
 
 
 def _double_sided_matmul_invroot(
@@ -532,28 +480,26 @@ def _double_sided_matmul_invroot(
     steps: Optional[int] = None,
     eps: float = 1e-5,
     scale: float = 1.001,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
 ) -> jax.Array:
     r"""Compute $Q^{-s/r} \, G \, P^{-s/r}$ via iterative polynomial approximation.
 
     Time:  O(steps * (m^3 + n^3 + m^2 n + m n^2))
     Space: O(m^2 + n^2) working memory beyond inputs.
+
+    Safety features for numerical precision (especially in BF16/FP16):
+    - Pre-normalizes inputs (`q_max`, `p_max`) to enforce absolute scale invariance
+      and prevent overflow/underflow before computing the Frobenius norm.
+    - Applies a 5% safety margin (`* 1.05`) to the Frobenius norm trace to strictly
+      bound the eigenvalues of the scaled gram matrices strictly below 1.0, keeping
+      the Newton-Schulz iterations well within their convergence radius.
+    - Uses exact matmuls (`precision=jax.lax.Precision.HIGHEST` by default) during
+      polynomial approximation to avoid asymmetric floating point drift that can break
+      the Symmetric Positive Definite (SPD) property.
     """
     m, n = G.shape[-2], G.shape[-1]
     I_m = jnp.eye(m, dtype=Q.dtype)
     I_n = jnp.eye(n, dtype=P.dtype)
-
-    # tQ = jnp.sqrt(jnp.sum(Q * Q.mT))
-    # tP = jnp.sqrt(jnp.sum(P * P.mT))
-    # jnp.square guarantees non-negative summands, preventing NaN from
-    # asymmetric FP drift in nominally-SPD gram matrices.
-    # tQ = jnp.sqrt(jnp.sum(jnp.square(Q)))
-    # tP = jnp.sqrt(jnp.sum(jnp.square(P)))
-    # tQ_safe = jnp.maximum(tQ, 1e-30) * 1.05
-    # tP_safe = jnp.maximum(tP, 1e-30) * 1.05
-    # Q = Q / (tQ + 1e-30) + eps * I_m
-    # P = P / (tP + 1e-30) + eps * I_n
-    # Q = Q / tQ_safe + eps * I_m
-    # P = P / tP_safe + eps * I_n
 
     q_max = jnp.maximum(jnp.max(jnp.abs(Q)), 1e-30)
     tQ = q_max * jnp.sqrt(jnp.sum(jnp.square(Q / q_max)))
@@ -567,12 +513,8 @@ def _double_sided_matmul_invroot(
     P = P / tP_safe + eps * I_n
 
     for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
-        WQ = _sym(a * I_m + b * Q + c * _sym(_safe_mm(Q, Q)))
-        WP = _sym(a * I_n + b * P + c * _sym(_safe_mm(P, P)))
-        # WQ1 = jnp.linalg.matrix_power(WQ, s)
-        # WQ2 = jnp.linalg.matrix_power(WQ, r)
-        # WP1 = jnp.linalg.matrix_power(WP, s)
-        # WP2 = jnp.linalg.matrix_power(WP, r)
+        WQ = _sym(a * I_m + b * Q + c * _sym(_safe_mm(Q, Q, precision)))
+        WP = _sym(a * I_n + b * P + c * _sym(_safe_mm(P, P, precision)))
         WQ1 = WQ if s == 1 else jnp.linalg.matrix_power(WQ, s)
         WP1 = WP if s == 1 else jnp.linalg.matrix_power(WP, s)
         # r=4 is the common path for bidirectional; explicit chain avoids
@@ -580,103 +522,28 @@ def _double_sided_matmul_invroot(
         if r == 1:
             WQ2, WP2 = WQ, WP
         elif r == 2:
-            WQ2, WP2 = _sym(_safe_mm(WQ, WQ)), _sym(_safe_mm(WP, WP))
+            WQ2, WP2 = (
+                _sym(_safe_mm(WQ, WQ, precision)),
+                _sym(_safe_mm(WP, WP, precision)),
+            )
         elif r == 4:
-            WQ2_sq, WP2_sq = _sym(_safe_mm(WQ, WQ)), _sym(_safe_mm(WP, WP))
-            WQ2, WP2 = _sym(_safe_mm(WQ2_sq, WQ2_sq)), _sym(_safe_mm(WP2_sq, WP2_sq))
+            WQ2_sq, WP2_sq = (
+                _sym(_safe_mm(WQ, WQ, precision)),
+                _sym(_safe_mm(WP, WP, precision)),
+            )
+            WQ2, WP2 = (
+                _sym(_safe_mm(WQ2_sq, WQ2_sq, precision)),
+                _sym(_safe_mm(WP2_sq, WP2_sq, precision)),
+            )
         else:
             WQ2 = jnp.linalg.matrix_power(WQ, r)
             WP2 = jnp.linalg.matrix_power(WP, r)
 
-        Q = _sym(_safe_mm(Q, WQ2))
-        G = _safe_mm(_safe_mm(WQ1, G), WP1)
-        P = _sym(_safe_mm(P, WP2))
+        Q = _sym(_safe_mm(Q, WQ2, precision))
+        G = _safe_mm(_safe_mm(WQ1, G, precision), WP1, precision)
+        P = _sym(_safe_mm(P, WP2, precision))
 
-    # return G * tQ ** (-s / r) * tP ** (-s / r)
     return G * tQ_safe ** (-s / r) * tP_safe ** (-s / r)
-
-
-def _prism_v2_math(
-    m_target: jax.Array,
-    m_raw: jax.Array,
-    g: jax.Array,
-    gamma: float,
-    inv_steps: int,
-    inv_eps: float,
-    inv_scale: float,
-    eps_gram: float,
-) -> jax.Array:
-    r"""Optimized PRISM: $M (M^\top M + \gamma^2 D^\top D + \varepsilon I)^{-1/2}$.
-
-    Adaptively selects the smaller gram to minimize workspace:
-      - When $2m \leq n$: augmented left gram $(2m \times 2m)$, via the identity
-        that the top-$m$ rows of $(\!AA^T\!)^{-1/2}\!A$ equal $M(A^T\!A)^{-1/2}$
-        (both are the polar factor of $A = [M;\,\gamma D]$).
-      - Otherwise: right gram $(n \times n)$.
-
-    Workspace: $O(\min(4m^2,\, n^2))$.
-    """
-    m_target = m_target.astype(jnp.float32)
-    m_raw = m_raw.astype(jnp.float32)
-    g = g.astype(jnp.float32)
-
-    D = g - m_raw
-    m, n = m_target.shape[-2], m_target.shape[-1]
-
-    # norm = jnp.sqrt(
-    #     jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
-    #     + gamma**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
-    # )
-    # scale = jnp.maximum(norm, 1e-30)
-
-    # m_target_norm = m_target / scale
-    # D_norm = D / scale
-
-    max_m = jnp.max(jnp.abs(m_target), axis=(-2, -1), keepdims=True)
-    max_d = jnp.max(jnp.abs(D), axis=(-2, -1), keepdims=True)
-    max_val = jnp.maximum(jnp.maximum(max_m, gamma * max_d), 1e-30)
-
-    norm = max_val * jnp.sqrt(
-        jnp.sum(jnp.square(m_target / max_val), axis=(-2, -1), keepdims=True)
-        + gamma**2 * jnp.sum(jnp.square(D / max_val), axis=(-2, -1), keepdims=True)
-    )
-    scale = jnp.maximum(norm, 1e-30)
-
-    m_target_norm = m_target / scale
-    D_norm = D / scale
-
-    if 2 * m <= n:
-        # Augmented left gram is smaller: (2m)^2 <= n^2
-        A = jnp.concatenate([m_target_norm, gamma * D_norm], axis=-2)  # (2m, n)
-        k = A.shape[-2]
-        H_L_aug = A @ A.mT + eps_gram * jnp.eye(k, dtype=jnp.float32)  # (2m, 2m)
-        # (H_L^{-1/2}) A = (_matmul_invroot(A^T, H_L, r=2))^T
-        result_T = _matmul_invroot(
-            A.mT,
-            H_L_aug,
-            r=2,
-            s=1,
-            steps=inv_steps,
-            eps=inv_eps,
-            scale=inv_scale,
-        )  # (n, 2m)
-        return result_T.mT[..., :m, :]  # (m, n)
-    else:
-        # Right gram is smaller: n^2 < (2m)^2
-        H_R = (
-            m_target_norm.mT @ m_target_norm
-            + gamma**2 * (D_norm.mT @ D_norm)
-            + eps_gram * jnp.eye(n, dtype=jnp.float32)
-        )  # (n, n)
-        return _matmul_invroot(
-            m_target_norm,
-            H_R,
-            r=2,
-            s=1,
-            steps=inv_steps,
-            eps=inv_eps,
-            scale=inv_scale,
-        )  # (m, n)
 
 
 def _shampoo_prism_math(
@@ -689,6 +556,7 @@ def _shampoo_prism_math(
     inv_eps: float,
     inv_scale: float,
     eps_gram: float,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
 ) -> jax.Array:
     r"""Bidirectional-PRISM: $\tilde{L}^{-1/4} \, M \, \tilde{R}^{-1/4}$.
 
@@ -696,6 +564,10 @@ def _shampoo_prism_math(
     The shaping coefficient $\rho_k^{bi} = \sqrt{\rho_k^{left} \cdot \rho_k^{right}}$
     is the geometric mean of one-sided PRISM coefficients, and lies in [0, 1],
     guaranteeing the spectral-norm trust-region constraint is satisfied.
+
+    Safety features for numerical precision (especially in BF16/FP16):
+    - Pre-normalizes inputs (`max_m`, `max_d`) to enforce absolute scale invariance
+      and prevent overflow/underflow when computing the gram matrices.
     """
     m_target = m_target.astype(jnp.float32)
     m_raw = m_raw.astype(jnp.float32)
@@ -703,16 +575,6 @@ def _shampoo_prism_math(
 
     D = g - m_raw
     m, n = m_target.shape[-2], m_target.shape[-1]
-
-    # gamma_max = max(gamma_l, gamma_r)
-    # norm = jnp.sqrt(
-    #     jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
-    #     + gamma_max**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
-    # )
-    # scale = jnp.maximum(norm, 1e-30)
-
-    # m_target_norm = m_target / scale
-    # D_norm = D / scale
 
     gamma_max = max(gamma_l, gamma_r)
     max_m = jnp.max(jnp.abs(m_target), axis=(-2, -1), keepdims=True)
@@ -729,14 +591,15 @@ def _shampoo_prism_math(
     D_norm = D / scale
 
     H_L = _sym(
-        _safe_mm(m_target_norm, m_target_norm.mT)
-        + gamma_l**2 * _safe_mm(D_norm, D_norm.mT)
+        _safe_mm(m_target_norm, m_target_norm.mT, precision)
+        + gamma_l**2 * _safe_mm(D_norm, D_norm.mT, precision)
     ) + eps_gram * jnp.eye(m, dtype=jnp.float32)
 
     H_R = _sym(
-        _safe_mm(m_target_norm.mT, m_target_norm)
-        + gamma_r**2 * _safe_mm(D_norm.mT, D_norm)
+        _safe_mm(m_target_norm.mT, m_target_norm, precision)
+        + gamma_r**2 * _safe_mm(D_norm.mT, D_norm, precision)
     ) + eps_gram * jnp.eye(n, dtype=jnp.float32)
+
     return _double_sided_matmul_invroot(
         H_L,
         m_target_norm,
@@ -746,6 +609,7 @@ def _shampoo_prism_math(
         steps=inv_steps,
         eps=inv_eps,
         scale=inv_scale,
+        precision=precision,
     )
 
 
@@ -757,19 +621,18 @@ def _prism_ortho_step(
     mu_nest: Optional[jax.Array] = None,
     dim_nums: Optional[PrismDimensionNumbers] = None,
     mode: str = "original",
-    inv_steps: int = 8,
+    inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
     gamma_l: Optional[float] = None,
     gamma_r: Optional[float] = None,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
 ) -> jax.Array:
     """Orchestrates PRISM spectral shaping with mode selection.
 
     Modes:
         'original':      Newton-Schulz on augmented [M; γD].  Uses `ns_iters`.
-        'v2':            M H_R^{-1/2} via matmul-invroot.     Uses `inv_steps`.
-                         ~2× faster, ~8× less memory for 4n*n matrices.
         'bidirectional': H_L^{-1/4} M H_R^{-1/4} (Shampoo-style).  Uses `inv_steps`.
                          Shapes both left and right singular-vector spaces.
     """
@@ -790,28 +653,6 @@ def _prism_ortho_step(
         )
         return inverse_fn(O_flat)
 
-    # V2, Optimized right-side matmul-invroot
-    if mode == "v2":
-        _fn = lambda g, m, t: _prism_v2_math(
-            t,
-            m,
-            g,
-            gamma,
-            inv_steps,
-            inv_eps,
-            inv_scale,
-            eps_gram,
-        )
-        if is_fast_2d:
-            return _fn(updates, mu_raw, m_target_eff)
-        reshape_fn, inverse_fn = _compute_prism_reshape(updates, dim_nums)
-        O_flat = jax.vmap(_fn)(
-            reshape_fn(updates),
-            reshape_fn(mu_raw),
-            reshape_fn(m_target_eff),
-        )
-        return inverse_fn(O_flat)
-
     # Bidirectional: Shampoo-style double-sided matmul-invroot
     if mode == "bidirectional":
         # Fall back to `gamma` when per-side gammas are not specified
@@ -827,6 +668,7 @@ def _prism_ortho_step(
             inv_eps,
             inv_scale,
             eps_gram,
+            precision,
         )
         if is_fast_2d:
             return _fn(updates, mu_raw, m_target_eff)
@@ -839,7 +681,7 @@ def _prism_ortho_step(
         return inverse_fn(O_flat)
 
     raise ValueError(
-        f"Unknown PRISM mode: {mode!r}. Expected 'original', 'v2', or 'bidirectional'."
+        f"Unknown PRISM mode: {mode!r}. Expected 'original' or 'bidirectional'."
     )
 
 
@@ -857,12 +699,13 @@ def scale_by_prism(
     gamma: float = 1.0,
     ns_iters: int = 5,
     mode: str = "original",
-    inv_steps: int = 8,
+    inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
     gamma_l: Optional[float] = None,
     gamma_r: Optional[float] = None,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
@@ -889,14 +732,15 @@ def scale_by_prism(
             of the spectral shaping.
         ns_iters: Number of Newton-Schulz iterations for orthogonalization.
         mode: Spectral shaping algorithm. 'original' uses Newton-Schulz on the
-            augmented matrix. 'v2' uses matmul-invroot for ~2x speedup.
-            'bidirectional' applies Shampoo-style bilateral shaping.
-        inv_steps: Iteration count for the matmul-invroot polynomial (modes v2/bidirectional).
+            augmented matrix. 'bidirectional' applies Shampoo-style bilateral shaping.
+        inv_steps: Iteration count for the matmul-invroot polynomial (mode bidirectional).
         inv_eps: Regularization epsilon inside the iterative inverse root.
         inv_scale: Coefficient scaling factor (>1.0 for conservative convergence).
         eps_gram: Regularization added to gram matrices before inversion.
         gamma_l: Left-side innovation damping (bidirectional only). Defaults to `gamma`.
         gamma_r: Right-side innovation damping (bidirectional only). Defaults to `gamma`.
+        precision: Numerical precision for bidirectional matmuls. Defaults to HIGHEST for
+            eigenvalue-sensitive iterations.
         nesterov: Whether to use Nesterov momentum.
         shape_nesterov: If True, applies spectral shaping to the Nesterov-accelerated
             momentum. If False, shapes the raw momentum.
@@ -1091,6 +935,7 @@ def scale_by_prism(
                 eps_gram=eps_gram,
                 gamma_l=gamma_l,
                 gamma_r=gamma_r,
+                precision=precision,
             ),
             effective_updates,
             mu_f32,
@@ -1194,12 +1039,13 @@ def prism(
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     ns_iters: int = 5,
     mode: str = "original",
-    inv_steps: int = 8,
+    inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
     gamma_l: Optional[float] = None,
     gamma_r: Optional[float] = None,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
@@ -1233,14 +1079,15 @@ def prism(
         ns_iters: Number of Newton-Schulz iterations for PRISM.
         mode: Spectral shaping algorithm for the PRISM branch.
             'original': Newton-Schulz on augmented [M; γD] (default, uses `ns_iters`).
-            'v2': Optimized right-side matmul-invroot (~2× faster, uses `inv_steps`).
             'bidirectional': Shampoo-style bilateral shaping (uses `inv_steps`).
-        inv_steps: Polynomial iterations for modes 'v2' and 'bidirectional'.
+        inv_steps: Polynomial iterations for mode 'bidirectional'.
         inv_eps: Regularization for the iterative inverse root solver.
         inv_scale: Convergence scaling (>1.0). Default 1.001.
         eps_gram: Gram matrix regularization epsilon. Default 1e-6.
         gamma_l: Left innovation damping (bidirectional only). Defaults to `gamma`.
         gamma_r: Right innovation damping (bidirectional only). Defaults to `gamma`.
+        precision: Numerical precision for bidirectional matmuls. Defaults to HIGHEST for
+            eigenvalue-sensitive iterations.
         nesterov: Whether to use Nesterov acceleration in PRISM.
         shape_nesterov: Whether to shape the Nesterov momentum or raw momentum.
         bias_correction: Whether to enable bias correction in PRISM.
@@ -1313,6 +1160,7 @@ def prism(
             eps_gram=eps_gram,
             gamma_l=gamma_l,
             gamma_r=gamma_r,
+            precision=precision,
             nesterov=nesterov,
             shape_nesterov=shape_nesterov,
             bias_correction=bias_correction,

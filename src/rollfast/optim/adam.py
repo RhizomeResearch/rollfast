@@ -13,9 +13,9 @@ from optax.transforms import _masking
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     _safe_bias_correction,
+    _tree_stochastic_cast,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
-    _tree_stochastic_cast,
 )
 
 

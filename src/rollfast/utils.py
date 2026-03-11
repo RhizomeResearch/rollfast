@@ -2,7 +2,6 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
-import optax
 from optax._src import base, numerics
 from optax.transforms import _masking
 
