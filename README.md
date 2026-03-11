@@ -179,26 +179,61 @@ optimizer = kron(
 
 ### Advanced: Stochastic Rounding (Low Precision)
 
-Stochastic Rounding is best used when applying updates to the model's parameters rather than for tracking optimizer moments. It's recommended to keep `mu_dtype` as `FP32` in the optimizer and apply stochastic rounding manually within your training step using the provided `apply_updates_prefix` function.
+Training models in **pure BF16** (where parameters, moments, and gradients are all low precision) can lead to the "vanishing update" problem: when the weight update $\Delta \theta$ is smaller than the precision limit of the current weight $\theta$, deterministic rounding (Round-to-Nearest-Even) collapses it to zero.
+
+Stochastic Rounding (SR) solves this by mapping the update's fractional part to a probability of rounding up, ensuring that even small updates contribute to the training trajectory on average.
+
+`rollfast` provides a high-performance SR implementation using an **integer-only bit manipulation pipeline** that is fully fusible by XLA, avoiding HBM spills and slow float conversions.
+
+#### 1. Pure BF16 Training Step
+
+To enable SR for your model parameters, use `apply_updates_prefix` (compatible with Equinox/PyTrees) or `apply_updates` (Optax-style) within your JIT-compiled step.
 
 ```python
 import jax
-from rollfast.utils import apply_updates_prefix
+import jax.numpy as jnp
+import equinox as eqx
+from rollfast import apply_updates_prefix
 
-# ... inside your step function ...
+# Initial Model (usually in FP32)
+model = ...
+
+# Cast model to BF16 for pure low-precision training
+model = jax.tree.map(
+    lambda x: x.astype(jnp.bfloat16) if eqx.is_inexact_array(x) else x, 
+    model
+)
+
+@eqx.filter_jit
 def step(model, opt_state, batch, key):
     fwd_key, sr_key = jax.random.split(key)
     
-    # Compute gradients
-    (loss, aux), grads = compute_loss_and_grads(model, batch, fwd_key)
+    # Compute gradients (model is BF16, gradients will be BF16)
+    (loss, aux), grads = eqx.filter_value_and_grad(compute_loss)(model, batch, fwd_key)
     
-    # Update optimizer state
-    updates, new_opt_state = optimizer.update(grads, opt_state, model)
+    # Update optimizer
+    # 'updates' PyTree structure matches the filtered model.
+    filtered_model = eqx.filter(model, eqx.is_inexact_array)
+    updates, new_opt_state = optimizer.update(grads, opt_state, filtered_model)
     
-    # Apply updates with stochastic rounding enabled for low precision
+    # Apply updates with Stochastic Rounding
+    # This is critical when 'model' is BF16 to prevent vanishing updates.
     new_model = apply_updates_prefix(model, updates, sr_key, stochastic=True)
     
     return new_model, new_opt_state, loss
+```
+
+#### 2. Memory-Efficient Optimizer Moments
+
+If you are bottlenecked by VRAM, you can also store the optimizer's first and second moments in **BF16 with stochastic rounding** by passing `mu_dtype=jnp.bfloat16` to `adamw` or `prism`.
+
+```python
+from rollfast import adamw
+
+optimizer = adamw(
+    learning_rate=1e-3,
+    mu_dtype=jnp.bfloat16  # Moments will be stored as BF16 with SR
+)
 ```
 
 ______________________________________________________________________
