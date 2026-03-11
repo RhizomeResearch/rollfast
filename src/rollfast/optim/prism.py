@@ -491,7 +491,9 @@ def _matmul_invroot(
     # semidefinite), but in FP16/BF16 regimes the combined shift may over-
     # regularize ill-conditioned subspaces, manifesting as premature
     # conditioning plateaus. Monitor loss curves when lowering precision.
-    P = P / (t + 1e-30) + eps * I
+    # P = P / (t + 1e-30) + eps * I
+    t_safe = jnp.maximum(t, 1e-30) * 1.05
+    P = P / t_safe + eps * I
     for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
         W = a * I + b * P + c * (P @ P)
         # s and r are trace-time constants; avoid XLA power-dispatch for s=1/r=1
@@ -500,7 +502,8 @@ def _matmul_invroot(
         G = G @ W1
         P = _sym(P @ W2)
     # Undo the Frobenius-norm scaling
-    return G * t ** (-s / r)
+    # return G * t ** (-s / r)
+    return G * t_safe ** (-s / r)
 
 
 def _double_sided_matmul_invroot(
@@ -528,8 +531,12 @@ def _double_sided_matmul_invroot(
     # asymmetric FP drift in nominally-SPD gram matrices.
     tQ = jnp.sqrt(jnp.sum(jnp.square(Q)))
     tP = jnp.sqrt(jnp.sum(jnp.square(P)))
-    Q = Q / (tQ + 1e-30) + eps * I_m
-    P = P / (tP + 1e-30) + eps * I_n
+    tQ_safe = jnp.maximum(tQ, 1e-30) * 1.05
+    tP_safe = jnp.maximum(tP, 1e-30) * 1.05
+    # Q = Q / (tQ + 1e-30) + eps * I_m
+    # P = P / (tP + 1e-30) + eps * I_n
+    Q = Q / tQ_safe + eps * I_m
+    P = P / tP_safe + eps * I_n
 
     for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
         WQ = a * I_m + b * Q + c * (Q @ Q)
@@ -556,7 +563,8 @@ def _double_sided_matmul_invroot(
         G = WQ1 @ G @ WP1
         P = _sym(P @ WP2)
 
-    return G * tQ ** (-s / r) * tP ** (-s / r)
+    # return G * tQ ** (-s / r) * tP ** (-s / r)
+    return G * tQ_safe ** (-s / r) * tP_safe ** (-s / r)
 
 
 def _prism_v2_math(
@@ -586,9 +594,18 @@ def _prism_v2_math(
     D = g - m_raw
     m, n = m_target.shape[-2], m_target.shape[-1]
 
+    norm = jnp.sqrt(
+        jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
+        + gamma**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
+    )
+    scale = jnp.maximum(norm, 1e-30)
+
+    m_target_norm = m_target / scale
+    D_norm = D / scale
+
     if 2 * m <= n:
         # Augmented left gram is smaller: (2m)^2 <= n^2
-        A = jnp.concatenate([m_target, gamma * D], axis=-2)  # (2m, n)
+        A = jnp.concatenate([m_target_norm, gamma * D_norm], axis=-2)  # (2m, n)
         k = A.shape[-2]
         H_L_aug = A @ A.mT + eps_gram * jnp.eye(k, dtype=jnp.float32)  # (2m, 2m)
         # (H_L^{-1/2}) A = (_matmul_invroot(A^T, H_L, r=2))^T
@@ -605,12 +622,12 @@ def _prism_v2_math(
     else:
         # Right gram is smaller: n^2 < (2m)^2
         H_R = (
-            m_target.mT @ m_target
-            + gamma**2 * (D.mT @ D)
+            m_target_norm.mT @ m_target_norm
+            + gamma**2 * (D_norm.mT @ D_norm)
             + eps_gram * jnp.eye(n, dtype=jnp.float32)
         )  # (n, n)
         return _matmul_invroot(
-            m_target,
+            m_target_norm,
             H_R,
             r=2,
             s=1,
@@ -644,19 +661,30 @@ def _shampoo_prism_math(
 
     D = g - m_raw
     m, n = m_target.shape[-2], m_target.shape[-1]
+
+    gamma_max = max(gamma_l, gamma_r)
+    norm = jnp.sqrt(
+        jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
+        + gamma_max**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
+    )
+    scale = jnp.maximum(norm, 1e-30)
+
+    m_target_norm = m_target / scale
+    D_norm = D / scale
+
     H_L = (
-        m_target @ m_target.mT
-        + gamma_l**2 * (D @ D.mT)
+        m_target_norm @ m_target_norm.mT
+        + gamma_l**2 * (D_norm @ D_norm.mT)
         + eps_gram * jnp.eye(m, dtype=jnp.float32)
     )
     H_R = (
-        m_target.mT @ m_target
-        + gamma_r**2 * (D.mT @ D)
+        m_target_norm.mT @ m_target_norm
+        + gamma_r**2 * (D_norm.mT @ D_norm)
         + eps_gram * jnp.eye(n, dtype=jnp.float32)
     )
     return _double_sided_matmul_invroot(
         H_L,
-        m_target,
+        m_target_norm,
         H_R,
         r=4,
         s=1,
