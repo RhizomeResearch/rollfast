@@ -391,104 +391,6 @@ def _quintic_newton_schulz(
     return x_f32.astype(x.dtype)
 
 
-def _zeropower_ns5_split_complex(
-    Xre: jax.Array, Xim: jax.Array, steps: int, eps: float
-) -> Tuple[jax.Array, jax.Array]:
-    """
-    Computes complex Newton-Schulz via explicit real arithmetic to maximize
-    systolic array utilization and avoid XLA complex-GEMM lowering overhead.
-    """
-    a, b, c = 3.4445, -4.7750, 2.0315
-
-    # FP32 Frobenius normalization
-    denom = jnp.sqrt(
-        jnp.sum(Xre**2, axis=(-2, -1), keepdims=True)
-        + jnp.sum(Xim**2, axis=(-2, -1), keepdims=True)
-    )
-    denom = jnp.maximum(denom, eps)
-    Xre = Xre / denom
-    Xim = Xim / denom
-
-    m, n = Xre.shape[-2], Xre.shape[-1]
-    transposed = False
-    if m > n:
-        Xre = jnp.swapaxes(Xre, -1, -2)
-        Xim = jnp.swapaxes(Xim, -1, -2)
-        transposed = True
-
-    # Statically unrolled for optimal SPMD collective communication scheduling
-    for _ in range(steps):
-        Xt_re_T = jnp.swapaxes(Xre, -1, -2)
-        Xt_im_T = jnp.swapaxes(Xim, -1, -2)
-
-        # A = X X^H
-        Ar = (Xre @ Xt_re_T) + (Xim @ Xt_im_T)
-        Ai = (Xim @ Xt_re_T) - (Xre @ Xt_im_T)
-
-        # A^2
-        Ar2 = (Ar @ Ar) - (Ai @ Ai)
-        Ai2 = (Ar @ Ai) + (Ai @ Ar)
-
-        # B = bA + cA^2
-        Br = b * Ar + c * Ar2
-        Bi = b * Ai + c * Ai2
-
-        # B @ X
-        Yre = (Br @ Xre) - (Bi @ Xim)
-        Yim = (Br @ Xim) + (Bi @ Xre)
-
-        Xre = a * Xre + Yre
-        Xim = a * Xim + Yim
-
-    if transposed:
-        Xre = jnp.swapaxes(Xre, -1, -2)
-        Xim = jnp.swapaxes(Xim, -1, -2)
-
-    return Xre, Xim
-
-
-def _project_hermitian_symmetry(
-    Xre: jax.Array, Xim: jax.Array, M: int
-) -> Tuple[jax.Array, jax.Array]:
-    """
-    Strictly enforces Hermitian symmetry on the rfft2 boundaries.
-    Inputs are shape (M, M//2 + 1, Cout, Cin).
-    """
-    half = M // 2
-
-    # Force strictly real invariants at (u, v) across ALL channels
-    Xim = Xim.at[0, 0].set(0.0)
-    if M % 2 == 0:
-        Xim = Xim.at[half, 0].set(0.0)
-        Xim = Xim.at[0, half].set(0.0)
-        Xim = Xim.at[half, half].set(0.0)
-
-    # Average conjugate pairs along v=0
-    u_idx = jnp.arange(1, half + (0 if M % 2 == 0 else 1))
-    mu_idx = M - u_idx
-
-    # Dimension 0 is u, Dimension 1 is v=0. Broadcasts over Cout, Cin.
-    avg_re_0 = 0.5 * (Xre[u_idx, 0] + Xre[mu_idx, 0])
-    avg_im_0 = 0.5 * (Xim[u_idx, 0] - Xim[mu_idx, 0])
-
-    Xre = Xre.at[u_idx, 0].set(avg_re_0)
-    Xre = Xre.at[mu_idx, 0].set(avg_re_0)
-    Xim = Xim.at[u_idx, 0].set(avg_im_0)
-    Xim = Xim.at[mu_idx, 0].set(-avg_im_0)
-
-    # Average conjugate pairs along v=M/2
-    if M % 2 == 0:
-        avg_re_half = 0.5 * (Xre[u_idx, half] + Xre[mu_idx, half])
-        avg_im_half = 0.5 * (Xim[u_idx, half] - Xim[mu_idx, half])
-
-        Xre = Xre.at[u_idx, half].set(avg_re_half)
-        Xre = Xre.at[mu_idx, half].set(avg_re_half)
-        Xim = Xim.at[u_idx, half].set(avg_im_half)
-        Xim = Xim.at[mu_idx, half].set(-avg_im_half)
-
-    return Xre, Xim
-
-
 def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
     """Core PRISM mathematical operation: Innovation -> Augmentation -> Orthogonalization.
 
@@ -520,66 +422,6 @@ def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
     return augmented_O[..., : m_raw.shape[-2], :]
 
 
-def _freq_prism_ortho_step(
-    updates: jax.Array,
-    mu_raw: jax.Array,
-    gamma: float,
-    ns_iters: int,
-    fft_size: int,
-    mu_nest: Optional[jax.Array] = None,
-) -> jax.Array:
-    m_target = mu_nest if mu_nest is not None else mu_raw
-    kH, kW = updates.shape[-2:]
-    M = fft_size
-
-    # Cast to FP32 immediately to prevent underflow in spectral density
-    g_pad = jnp.pad(
-        updates.astype(jnp.float32), ((0, 0), (0, 0), (0, M - kH), (0, M - kW))
-    )
-    m_raw_pad = jnp.pad(
-        mu_raw.astype(jnp.float32), ((0, 0), (0, 0), (0, M - kH), (0, M - kW))
-    )
-    m_tgt_pad = jnp.pad(
-        m_target.astype(jnp.float32), ((0, 0), (0, 0), (0, M - kH), (0, M - kW))
-    )
-
-    # Extract frequencies
-    G_hat = jnp.fft.rfft2(g_pad, norm="ortho")
-    M_raw_hat = jnp.fft.rfft2(m_raw_pad, norm="ortho")
-    M_tgt_hat = jnp.fft.rfft2(m_tgt_pad, norm="ortho")
-
-    # Transpose to (M, M//2+1, Cout, Cin)
-    G_hat = jnp.moveaxis(G_hat, (0, 1), (-2, -1))
-    M_raw_hat = jnp.moveaxis(M_raw_hat, (0, 1), (-2, -1))
-    M_tgt_hat = jnp.moveaxis(M_tgt_hat, (0, 1), (-2, -1))
-
-    # Innovation-Augmentation split into Re/Im
-    D_hat = G_hat - M_raw_hat
-    aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-1)
-    # aug_hat = jnp.concatenate([M_tgt_hat, gamma * D_hat], axis=-2)
-
-    Xre = jnp.real(aug_hat)
-    Xim = jnp.imag(aug_hat)
-
-    # Fast Split-Real Orthogonalization
-    Ore_aug, Oim_aug = _zeropower_ns5_split_complex(Xre, Xim, steps=ns_iters, eps=1e-8)
-
-    # Block Extraction
-    Cin = M_tgt_hat.shape[-1]
-    Ore = Ore_aug[..., :Cin]
-    Oim = Oim_aug[..., :Cin]
-
-    # Exact Hermitian Projection
-    Ore, Oim = _project_hermitian_symmetry(Ore, Oim, M)
-
-    # Inverse Transform
-    O_hat = Ore + 1j * Oim
-    O_hat = jnp.moveaxis(O_hat, (-2, -1), (0, 1))
-    upd_pad = jnp.fft.irfft2(O_hat, s=(M, M), norm="ortho")
-
-    return upd_pad[..., :kH, :kW].astype(updates.dtype)
-
-
 def _prism_ortho_step(
     updates: jax.Array,
     mu_raw: jax.Array,
@@ -587,7 +429,6 @@ def _prism_ortho_step(
     ns_iters: int,
     mu_nest: Optional[jax.Array] = None,
     dim_nums: Optional[PrismDimensionNumbers] = None,
-    fft_size: Optional[int] = None,
 ) -> jax.Array:
     """Orchestrates the PRISM spectral shaping step, handling reshaping and batching.
 
@@ -612,11 +453,6 @@ def _prism_ortho_step(
         return mu_nest if mu_nest is not None else mu_raw
 
     m_target_eff = mu_nest if mu_nest is not None else mu_raw
-
-    if updates.ndim == 4 and fft_size is not None:
-        return _freq_prism_ortho_step(
-            updates, mu_raw, gamma, ns_iters, fft_size, mu_nest
-        )
 
     # Fast Path: Standard 2D Matrix
     # Avoids overhead of reshape + vmap for the most common case
@@ -662,7 +498,6 @@ def scale_by_prism(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     use_magma: bool = False,
     magma_tau: float = 2.0,
-    fft_size: Optional[int] = None,
     axis_name: Optional[str] = None,
     key: int = 42,
 ) -> base.GradientTransformation:
@@ -849,7 +684,6 @@ def scale_by_prism(
                 ns_iters,
                 mu_nest=target,
                 dim_nums=dims,
-                fft_size=fft_size,
             ),
             effective_updates,
             mu_cast,
@@ -924,7 +758,6 @@ def prism(
     axis_name: Optional[str] = None,
     use_magma: bool = False,
     magma_tau: float = 2.0,
-    fft_size: Optional[int] = None,
     key: int = 42,
     # Partitioning Arguments
     adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
@@ -1010,7 +843,6 @@ def prism(
             weight_dimension_numbers=prism_weight_dim_nums_fn,
             use_magma=use_magma,
             magma_tau=magma_tau,
-            fft_size=fft_size,
             axis_name=axis_name,
             key=key,
         ),
