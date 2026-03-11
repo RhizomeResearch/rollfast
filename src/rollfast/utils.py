@@ -74,21 +74,28 @@ def _tree_stochastic_cast(
     tree: base.Params, target_dtype: Any, key: jax.Array
 ) -> base.Params:
     """
-    Safely maps stochastic rounding across a PyTree while ignoring Partitioning masks.
+    Safely maps stochastic rounding across a PyTree while ignoring Partitioning masks
+    and non-differentiable static leaves (e.g., Equinox Callables).
     """
-    if target_dtype != jnp.bfloat16:
-        return optax.tree.cast(tree, target_dtype)
-
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves, treedef = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
     keys = jax.random.split(key, len(leaves))
 
-    rounded_leaves = [
-        _stochastic_round_bf16(leaf, k)
-        if leaf is not None and not isinstance(leaf, _masking.MaskedNode)
-        else leaf
-        for leaf, k in zip(leaves, keys)
-    ]
+    def _cast_leaf(leaf, k):
+        # Short-circuit MaskedNodes and static Callables before ANY cast attempt.
+        # This completely replaces the unsafe `optax.tree.cast` fast-path.
+        if (
+            leaf is None
+            or isinstance(leaf, _masking.MaskedNode)
+            or not hasattr(leaf, "dtype")
+        ):
+            return leaf
+
+        if target_dtype == jnp.bfloat16:
+            return _stochastic_round_bf16(leaf, k)
+        return leaf.astype(target_dtype)
+
+    rounded_leaves = [_cast_leaf(leaf, k) for leaf, k in zip(leaves, keys)]
     return jax.tree.unflatten(treedef, rounded_leaves)
 
 
@@ -108,6 +115,7 @@ def _tree_stochastic_cast_like(
             x_leaf is None
             or ref_leaf is None
             or isinstance(x_leaf, _masking.MaskedNode)
+            or not hasattr(x_leaf, "dtype")
         ):
             return x_leaf
         tgt_dtype = getattr(ref_leaf, "dtype", x_leaf.dtype)
@@ -185,13 +193,21 @@ def stochastic_apply_updates(
        sub-representable update signals from collapsing to zero.
     """
 
-    leaves, treedef = jax.tree.flatten(params, is_leaf=lambda x: x is None)
+    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+    leaves, treedef = jax.tree.flatten(params, is_leaf=is_leaf_fn)
     keys = jax.random.split(key, len(leaves))
     keys_tree = jax.tree.unflatten(treedef, list(keys))
 
     def _apply_leaf(p, u, k):
-        if p is None:
-            return None
+        # Short-circuit when update is absent (Equinox static modules)
+        # or when explicitly masked by Optax multi-transform behavior.
+        if (
+            p is None
+            or u is None
+            or isinstance(u, _masking.MaskedNode)
+            or isinstance(p, _masking.MaskedNode)
+        ):
+            return p
 
         p_arr = jnp.asarray(p)
         u_arr = jnp.asarray(u)
@@ -209,5 +225,5 @@ def stochastic_apply_updates(
         params,
         updates,
         keys_tree,
-        is_leaf=lambda x: x is None,
+        is_leaf=is_leaf_fn,
     )
