@@ -110,6 +110,9 @@ def schedule_free(
         else:
             lr_tree = learning_rate
 
+        if jax.tree.structure(lr_tree) != jax.tree.structure(params):
+            lr_tree = jax.tree.map(lambda _: lr_tree, params)
+
         lr_tree = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), lr_tree)
 
         # Compute Base Optimizer Update (Preconditioned Gradient)

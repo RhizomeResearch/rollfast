@@ -31,4 +31,9 @@ in
   enterShell = ''
     . .devenv/state/venv/bin/activate
   '';
+
+  enterTest = ''
+    . .devenv/state/venv/bin/activate
+    pytest
+  '';
 }

@@ -14,7 +14,7 @@ from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
 from optax.transforms import _masking
 
-from rollfast.optim.magma import apply_magma_mask, apply_magma_internal
+from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     _tree_stochastic_cast,
     _tree_update_moment_f32,
