@@ -29,11 +29,13 @@ in
   };
 
   enterShell = ''
+    uv sync
     . .devenv/state/venv/bin/activate
   '';
 
   enterTest = ''
-    # . .devenv/state/venv/bin/activate
+    uv sync
+    . .devenv/state/venv/bin/activate
     pytest
   '';
 }
