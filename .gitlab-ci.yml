@@ -1,8 +1,0 @@
-stages:
-  - test
-
-test:
-  stage: test
-  image: ghcr.io/cachix/devenv/devenv:latest
-  script:
-    - devenv test
