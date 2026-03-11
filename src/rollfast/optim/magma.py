@@ -17,6 +17,24 @@ def apply_magma_internal(
     """
     Computes Momentum-aligned gradient masking (Magma) internally.
     Enforces strict structural preservation by processing flattened leaves.
+
+    Args:
+        raw_gradients: The raw gradients from the current step.
+        first_moments: The first moments (e.g., from Adam/EMA).
+        base_updates: The proposed base updates before masking.
+        magma_s_prev: The previous Magma scores.
+        key: A PRNG key for generating Bernoulli masks.
+        tau: The temperature parameter for the sigmoid (default: 2.0).
+        axis_name: Optional axis name for pmap/sharding.
+
+    Returns:
+        A tuple of (magma_updates, new_magma_s) where magma_updates are the
+        masked base updates and new_magma_s are the updated EMA scores.
+
+    Reference:
+        Joo, T., Xia, W., Kim, C., Zhang, M., & Ie, E. (2026).
+        On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
+        arXiv preprint arXiv:2602.15322.
     """
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
 

@@ -559,53 +559,6 @@ def _double_sided_matmul_invroot(
     return G * tQ ** (-s / r) * tP ** (-s / r)
 
 
-# def _prism_v2_math(
-#     m_target: jax.Array,
-#     m_raw: jax.Array,
-#     g: jax.Array,
-#     gamma: float,
-#     inv_steps: int,
-#     inv_eps: float,
-#     inv_scale: float,
-#     eps_gram: float,
-# ) -> jax.Array:
-#     r"""Optimized PRISM: $M (M^\top M + \gamma^2 D^\top D + \varepsilon I)^{-1/2}$.
-
-#     Replicates the original PRISM dimension-swap so the gram is always
-#     $\min(m,n) \times \min(m,n)$, preserving the O(min(m,n)^2) memory bound.
-#     """
-#     m_target = m_target.astype(jnp.float32)
-#     m_raw = m_raw.astype(jnp.float32)
-#     g = g.astype(jnp.float32)
-
-#     # transpose so rows >= cols -> gram over smaller dim
-#     swapped = m_target.shape[-2] < m_target.shape[-1]
-#     if swapped:
-#         m_target = jnp.swapaxes(m_target, -1, -2)
-#         m_raw = jnp.swapaxes(m_raw, -1, -2)
-#         g = jnp.swapaxes(g, -1, -2)
-
-#     D = g - m_raw
-#     n = m_target.shape[-1]  # guaranteed <= m after swap
-#     H_R = (
-#         m_target.mT @ m_target
-#         + gamma**2 * (D.mT @ D)
-#         + eps_gram * jnp.eye(n, dtype=jnp.float32)
-#     )
-#     result = _matmul_invroot(
-#         m_target,
-#         H_R,
-#         r=2,
-#         s=1,
-#         steps=inv_steps,
-#         eps=inv_eps,
-#         scale=inv_scale,
-#     )
-
-
-#     if swapped:
-#         result = jnp.swapaxes(result, -1, -2)
-#     return result
 def _prism_v2_math(
     m_target: jax.Array,
     m_raw: jax.Array,
@@ -840,7 +793,7 @@ def scale_by_prism(
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable]] = None,
     axis_name: Optional[str] = None,
-    key: int = 42,
+    key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
     """The core PRISM gradient transformation.
 
@@ -874,11 +827,23 @@ def scale_by_prism(
             (max RMS) or a tuple (max RMS, max Abs).
         weight_dimension_numbers: Specification for reshaping tensors. If provided,
             `params` must be passed to `update`.
+        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
+        weight_decay: Weight decay applied to PRISM.
+        weight_decay_mask: A mask for weight decay.
         axis_name: Axis name for distributed (SPMD) global norm reduction.
         key: Initial PRNG key.
 
     Returns:
         An `optax.GradientTransformation`.
+
+    References:
+        Yang, Y. (2026). PRISM: Structured Optimization via Anisotropic Spectral Shaping.
+        arXiv preprint arXiv:2602.03096.
+
+        Cesista, F. L. (2026). Bidirectional-PRISM: Kronecker-Factored Optimization
+        via Anisotropic Spectral Shaping.
+        URL: https://leloykun.github.io/ponder/shampoo-prism/
     """
     if mu_dtype is None:
         mu_dtype = jnp.float32
@@ -909,7 +874,7 @@ def scale_by_prism(
             count=jnp.zeros([], jnp.int32),
             mu=mu,
             magma_s=magma_s,
-            key=jax.random.PRNGKey(key),
+            key=key,
         )
 
     def update_fn(updates, state, params=None):
@@ -1162,7 +1127,7 @@ def prism(
     axis_name: Optional[str] = None,
     use_magma: bool = False,
     magma_tau: float = 2.0,
-    key: int = 42,
+    key: jax.Array = jax.random.PRNGKey(42),
     # Partitioning Arguments
     adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
     adam_b1: float = 0.9,
@@ -1181,6 +1146,7 @@ def prism(
         b1: Momentum coefficient for PRISM.
         gamma: Innovation damping coefficient for PRISM.
         weight_decay: Weight decay applied to both PRISM and Adam branches.
+        weight_decay_mask: Optional mask for weight decay.
         ns_iters: Number of Newton-Schulz iterations for PRISM.
         mode: Spectral shaping algorithm for the PRISM branch.
             'original': Newton-Schulz on augmented [M; γD] (default, uses `ns_iters`).
@@ -1199,6 +1165,7 @@ def prism(
         raw_global_grad_clip: Global gradient norm clipping threshold.
         permissive_spike_protection: Behavior when global clip is triggered (Clip vs Skip).
         mu_dtype: Dtype for momentum accumulators.
+        axis_name: Axis name for distributed (SPMD) global norm reduction.
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
             WARNING: Magma introduces intentional update bias (damping). At an
             equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
@@ -1206,7 +1173,6 @@ def prism(
             of ~0.25x. You may need to scale the global learning rate by ~4x to
             maintain the original update volume.
         magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
-        axis_name: Axis name for distributed (SPMD) global norm reduction.
         key: Initial PRNG key for Magma's Bernoulli sampling.
         adam_learning_rate: Learning rate for the Adam branch. Defaults to `learning_rate`.
         adam_b1: Beta1 for Adam.
@@ -1219,7 +1185,17 @@ def prism(
 
     Returns:
         A `optax.GradientTransformation` that handles the partitioned optimization.
+
+    References:
+        Yang, Y. (2026). PRISM: Structured Optimization via Anisotropic Spectral Shaping.
+        arXiv preprint arXiv:2602.03096.
+
+        Cesista, F. L. (2026). Bidirectional-PRISM: Kronecker-Factored Optimization
+        via Anisotropic Spectral Shaping.
+        URL: https://leloykun.github.io/ponder/shampoo-prism/
     """
+    key_prism, key_adam = jax.random.split(key, 2)
+
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
@@ -1267,7 +1243,7 @@ def prism(
             weight_decay=weight_decay if use_magma else 0.0,
             weight_decay_mask=weight_decay_mask if use_magma else None,
             axis_name=axis_name,
-            key=key,
+            key=key_prism,
         ),
     ]
 
@@ -1295,7 +1271,7 @@ def prism(
                 use_magma=use_magma,
                 magma_tau=magma_tau,
                 axis_name=axis_name,
-                key=key + 1,
+                key=key_adam,
             ),
         },
         param_labels=param_labels,

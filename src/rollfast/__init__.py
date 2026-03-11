@@ -5,6 +5,7 @@ from .optim.prism import (
 )
 from .optim.psgd import kron as kron
 from .schedules.schedulefree import (
+    schedule_free_adam as schedule_free_adam,
     schedule_free_eval_params as schedule_free_eval_params,
     schedule_free_kron as schedule_free_kron,
     schedule_free_prism as schedule_free_prism,

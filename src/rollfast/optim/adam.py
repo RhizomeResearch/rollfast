@@ -42,7 +42,7 @@ def scale_by_adam(
     use_magma: bool = False,
     magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
-    key: int = 42,
+    key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
     r"""Rescale updates according to the Adam algorithm.
 
@@ -56,13 +56,25 @@ def scale_by_adam(
             numerical stability when backpropagating gradients through the rescaling.
         mu_dtype: Optional `dtype` to be used for the first order accumulator; if
             `None` then the `dtype` is inferred from `params` and `updates`.
+        weight_decay: Strength of the weight decay regularization (only used if use_magma=True).
+        weight_decay_mask: A tree with same structure as (or a prefix of) the params PyTree,
+            or a Callable that returns such a pytree given the params/updates.
+            The leaves should be booleans, `True` for leaves/subtrees you want to
+            apply the weight decay to, and `False` for those you want to skip.
         nesterov: Whether to use Nesterov momentum. The variant of Adam with
             Nesterov momentum is described in [Dozat 2016]
+        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
         axis_name: Axis name for distributed (SPMD) global norm reduction.
         key: Initial PRNG seed for Magma's Bernoulli sampling.
 
     Returns:
         A :class:`optax.GradientTransformation` object.
+
+    Reference:
+        Joo, T., Xia, W., Kim, C., Zhang, M., & Ie, E. (2026).
+        On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
+        arXiv preprint arXiv:2602.15322.
     """
 
     if mu_dtype is None:
@@ -96,7 +108,7 @@ def scale_by_adam(
             mu=mu,
             nu=nu,
             magma_s=magma_s,
-            key=jax.random.PRNGKey(key),
+            key=key,
         )
 
     def update_fn(updates, state, params=None):
@@ -239,7 +251,7 @@ def adamw(
     use_magma: bool = False,
     magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
-    key: int = 42,
+    key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     r"""Adam with weight decay regularization.
 
@@ -303,7 +315,7 @@ def adamw(
             with other frameworks such as PyTorch, but different from
             (Loshchilov et al, 2019) where the weight decay is only multiplied with
             the "schedule multiplier", but not the base learning rate.
-        mask: A tree with same structure as (or a prefix of) the params PyTree,
+        weight_decay_mask: A tree with same structure as (or a prefix of) the params PyTree,
             or a Callable that returns such a pytree given the params/updates.
             The leaves should be booleans, `True` for leaves/subtrees you want to
             apply the weight decay to, and `False` for those you want to skip. Note
@@ -351,6 +363,10 @@ def adamw(
 
         Dozat, `Incorporating Nesterov Momentum into Adam
         <https://openreview.net/pdf?id=OM0jvwB8jIp57ZJjtNEZ>`_, 2016
+
+        Joo, T., Xia, W., Kim, C., Zhang, M., & Ie, E. (2026).
+        On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
+        arXiv preprint arXiv:2602.15322.
 
     .. seealso::
         See the related functions :func:`optax.adam`, :func:`optax.nadamw`, as well

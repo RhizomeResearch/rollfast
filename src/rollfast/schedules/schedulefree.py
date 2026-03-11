@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import optax
 from optax._src import alias, base, combine, numerics, transform
 
+from rollfast.optim.adam import adamw
 from rollfast.optim.prism import (
     WeightDimNumOrFn,
     _get_dimension_numbers,
@@ -52,7 +53,7 @@ def schedule_free(
     b1: float = 0.9,
     weighting_mode: Union[str, WeightingMode] = WeightingMode.SCHEDULET,
     state_dtype: Optional[jax.typing.DTypeLike] = None,
-    key: int = 42,
+    key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free Wrapper supporting Schedulet, Practical, and Theoretical modes.
 
@@ -69,9 +70,19 @@ def schedule_free(
             Controls the interpolation between `x` and `z`.
         weighting_mode: Strategy for averaging weights.
         state_dtype: Dtype for the z-sequence storage.
+        key: PRNG key.
 
     Returns:
         A `GradientTransformationExtraArgs` wrapper.
+
+    References:
+        Defazio, A., Yang, X. A., Mehta, H., Mishchenko, K., Khaled, A., & Cutkosky, A. (2024).
+        The Road Less Scheduled.
+        arXiv preprint arXiv:2405.15682.
+
+        Pun, Y.-M., Buchholz, M., & Gower, R. M. (2025).
+        Schedulers for Schedule-free: Theoretically inspired hyperparameters.
+        arXiv preprint arXiv:2511.07767.
     """
     if isinstance(weighting_mode, str):
         weighting_mode = WeightingMode(weighting_mode)
@@ -96,7 +107,7 @@ def schedule_free(
             step_count=jnp.zeros([], dtype=jnp.int32),
             base_state=base_optimizer.init(params),
             z=z,
-            key=jax.random.PRNGKey(key),
+            key=key,
         )
 
     def update_fn(updates, state, params=None, **extra_args):
@@ -346,13 +357,22 @@ def schedule_free_prism(
     prism_b1: float = 0.0,
     gamma: float = 1.0,
     ns_iters: int = 5,
+    mode: str = "original",
+    inv_steps: int = 8,
+    inv_eps: float = 1e-5,
+    inv_scale: float = 1.001,
+    eps_gram: float = 1e-6,
+    gamma_l: Optional[float] = None,
+    gamma_r: Optional[float] = None,
     shape_nesterov: bool = True,
     weight_decay: float = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     axis_name: Optional[str] = None,
+    key: jax.Array = jax.random.PRNGKey(42),
     # Partitioning Arguments
     adam_learning_rate: Optional[float] = None,
     adam_b1: float = 0.0,
@@ -391,6 +411,15 @@ def schedule_free_prism(
 
     Returns:
         A Schedule-Free gradient transformation with partitioned inner optimizer.
+
+    References:
+        Defazio, A., Yang, X. A., Mehta, H., Mishchenko, K., Khaled, A., & Cutkosky, A. (2024).
+        The Road Less Scheduled.
+        arXiv preprint arXiv:2405.15682.
+
+        Pun, Y.-M., Buchholz, M., & Gower, R. M. (2025).
+        Schedulers for Schedule-free: Theoretically inspired hyperparameters.
+        arXiv preprint arXiv:2511.07767.
     """
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -431,35 +460,60 @@ def schedule_free_prism(
         dim_nums = get_resolved_dim_nums(params)
         return _mask_dimension_numbers(dim_nums)
 
+    key_prism, key_adam = jax.random.split(key, 2)
+
     # Note: We must apply the schedule INSIDE the base optimizer branches
     # so that the updates passed to `schedule_free` are fully scaled.
+    prism_components = [
+        scale_by_prism(
+            b1=prism_b1,
+            gamma=gamma,
+            ns_iters=ns_iters,
+            mode=mode,
+            inv_steps=inv_steps,
+            inv_eps=inv_eps,
+            inv_scale=inv_scale,
+            eps_gram=eps_gram,
+            gamma_l=gamma_l,
+            gamma_r=gamma_r,
+            nesterov=False,
+            shape_nesterov=shape_nesterov,
+            # bias_correction=False,  # SF handles bias correction implicitly
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            axis_name=axis_name,
+            weight_dimension_numbers=prism_weight_dim_nums_fn,
+            use_magma=False,
+            weight_decay=0.0,
+            weight_decay_mask=None,
+            key=key_prism,
+        ),
+    ]
+
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero:
+        prism_components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+
+    prism_components.append(transform.scale_by_learning_rate(prism_schedule))
+
     base_opt = combine.partition(
         transforms={
-            "prism": combine.chain(
-                scale_by_prism(
-                    b1=prism_b1,
-                    gamma=gamma,
-                    ns_iters=ns_iters,
-                    nesterov=False,
-                    shape_nesterov=shape_nesterov,
-                    # bias_correction=False,  # SF handles bias correction implicitly
-                    mu_dtype=mu_dtype,
-                    raw_global_grad_clip=raw_global_grad_clip,
-                    permissive_spike_protection=permissive_spike_protection,
-                    grad_clip_max_amps=grad_clip_max_amps,
-                    axis_name=axis_name,
-                    weight_dimension_numbers=prism_weight_dim_nums_fn,
-                ),
-                transform.add_decayed_weights(weight_decay),
-                transform.scale_by_learning_rate(prism_schedule),
-            ),
-            "adam": alias.adamw(
+            "prism": combine.chain(*prism_components),
+            "adam": adamw(
                 learning_rate=adam_schedule,
                 b1=adam_b1,
                 b2=adam_b2,
                 eps=adam_eps,
                 weight_decay=weight_decay,
+                weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
+                use_magma=False,
+                axis_name=axis_name,
+                key=key_adam,
             ),
         },
         param_labels=param_labels,
@@ -539,8 +593,13 @@ def schedule_free_kron(
     Args:
         learning_rate: Peak learning rate.
         total_steps: Total training steps (required for WSD schedule generation).
+        warmup_fraction: Fraction of steps for warmup.
+        decay_fraction: Fraction of steps for decay.
         weighting_mode: The weighting strategy (Practical, Theoretical, Schedulet).
         sf_b1: Schedule-free interpolation parameter (replaces momentum).
+        state_dtype: Dtype for schedule-free z-sequence.
+        weight_decay: Weight decay applied to the optimizer.
+        weight_decay_mask: Mask for weight decay.
         preconditioner_update_probability: Probability (or schedule) of updating
             the preconditioner matrix Q at each step.
         max_size_triangular: Max size for a dimension to be considered for
@@ -549,9 +608,9 @@ def schedule_free_kron(
         min_ndim_triangular: Minimum tensor rank required for dense preconditioning.
         memory_save_mode: Strategy to force diagonal approximations to save RAM.
             Values: [None, 'one_diag', 'all_diag'].
+        update_preconditioner_first: Update Q before applying it to the gradient.
         preconditioner_lr: Learning rate for the preconditioner matrix Q.
         preconditioner_init_scale: Initial scale for Q. If None, computed on-the-fly.
-        update_preconditioner_first: Update Q before applying it to the gradient.
         precond_dtype: Dtype for preconditioner storage (e.g. float32, bfloat16).
         precond_update_precision: JAX precision for Q update matmuls.
         precond_grads_precision: JAX precision for gradient application matmuls.
@@ -569,6 +628,18 @@ def schedule_free_kron(
         newton_schulz_iters: Iterations for NS mode (default 5).
         axis_name: Axis name for distributed (SPMD) reduction.
         key: PRNG key for stochastic elements.
+
+    Returns:
+        A Schedule-Free gradient transformation.
+
+    References:
+        Defazio, A., Yang, X. A., Mehta, H., Mishchenko, K., Khaled, A., & Cutkosky, A. (2024).
+        The Road Less Scheduled.
+        arXiv preprint arXiv:2405.15682.
+
+        Pun, Y.-M., Buchholz, M., & Gower, R. M. (2025).
+        Schedulers for Schedule-free: Theoretically inspired hyperparameters.
+        arXiv preprint arXiv:2511.07767.
     """
     lr_schedule = wsd_schedule(
         peak_lr=learning_rate,
@@ -607,18 +678,104 @@ def schedule_free_kron(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             newton_schulz_iters=newton_schulz_iters,
+            use_magma=False,
+            weight_decay=0.0,
+            weight_decay_mask=None,
             axis_name=axis_name,
             key=key,
         )
     ]
 
-    if weight_decay > 0.0:
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero:
         base_opt_components.append(
             transform.add_decayed_weights(weight_decay, weight_decay_mask)
         )
 
     base_opt_components.append(transform.scale_by_learning_rate(lr_schedule))
     base_optimizer = combine.chain(*base_opt_components)
+
+    return schedule_free(
+        base_optimizer=base_optimizer,
+        learning_rate=lr_schedule,
+        b1=sf_b1,
+        weighting_mode=weighting_mode,
+        state_dtype=state_dtype,
+    )
+
+
+def schedule_free_adam(
+    learning_rate: float,
+    total_steps: int,
+    # Schedule Config
+    warmup_fraction: float = 0.1,
+    decay_fraction: float = 0.1,
+    weighting_mode: Union[str, WeightingMode] = WeightingMode.PRACTICAL,
+    # Schedule-Free Config
+    sf_b1: float = 0.9,
+    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    # Adam Config
+    b1: float = 0.0,
+    b2: float = 0.999,
+    eps: float = 1e-8,
+    weight_decay: float = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    axis_name: Optional[str] = None,
+    key: jax.Array = jax.random.PRNGKey(42),
+) -> base.GradientTransformationExtraArgs:
+    """Schedule-Free Adam optimizer.
+
+    Args:
+        learning_rate: Peak learning rate.
+        total_steps: Total training steps.
+        warmup_fraction: Fraction of steps for warmup.
+        decay_fraction: Fraction of steps for decay.
+        weighting_mode: Schedule-free weighting mode.
+        sf_b1: Schedule-free interpolation parameter (distinct from momentum).
+        state_dtype: Dtype for schedule-free z-sequence.
+        b1: Adam Beta1 (momentum). Should typically be 0.0 for Schedule-Free.
+        b2: Adam Beta2.
+        eps: Adam Epsilon.
+        weight_decay: Weight decay.
+        weight_decay_mask: Mask for weight decay.
+        mu_dtype: Momentum dtype.
+        axis_name: Distributed axis name.
+        key: PRNG key.
+        
+    Returns:
+        A Schedule-Free gradient transformation.
+
+    References:
+        Defazio, A., Yang, X. A., Mehta, H., Mishchenko, K., Khaled, A., & Cutkosky, A. (2024).
+        The Road Less Scheduled.
+        arXiv preprint arXiv:2405.15682.
+
+        Pun, Y.-M., Buchholz, M., & Gower, R. M. (2025).
+        Schedulers for Schedule-free: Theoretically inspired hyperparameters.
+        arXiv preprint arXiv:2511.07767.
+    """
+    lr_schedule = wsd_schedule(
+        peak_lr=learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+
+    base_optimizer = adamw(
+        learning_rate=lr_schedule,
+        b1=b1,
+        b2=b2,
+        eps=eps,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        mu_dtype=mu_dtype,
+        use_magma=False,
+        axis_name=axis_name,
+        key=key,
+    )
 
     return schedule_free(
         base_optimizer=base_optimizer,

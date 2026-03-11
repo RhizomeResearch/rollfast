@@ -785,11 +785,23 @@ def scale_by_kron(
         raw_global_grad_clip: Threshold for global gradient norm clipping (spike protection).
         permissive_spike_protection: If True, allows updates during spikes if prob=1.0.
         newton_schulz_iters: Iterations for NS mode (default 5).
+        use_magma: If True, applies Momentum-aligned gradient masking (Magma).
+        magma_tau: Temperature parameter for the alignment sigmoid. Default is 2.0.
+        weight_decay: Weight decay to apply.
+        weight_decay_mask: Optional mask for weight decay.
         axis_name: Axis name for distributed (SPMD) reduction.
         key: PRNG key for stochastic elements.
 
     Returns:
         optax.GradientTransformationExtraArgs
+
+    References:
+        Li, X. (2023). Preconditioned Stochastic Gradient Descent.
+        URL: https://github.com/lixilinx/psgd_torch
+
+        Joo, T., Xia, W., Kim, C., Zhang, M., & Ie, E. (2026).
+        On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
+        arXiv preprint arXiv:2602.15322.
     """
     if use_magma and b1 <= 0:
         raise ValueError(
@@ -1461,6 +1473,14 @@ def kron(
 
     See `scale_by_kron` for detailed argument descriptions.
     This wrapper adds weight decay and learning rate scaling to the chain.
+
+    References:
+        Li, X. (2023). Preconditioned Stochastic Gradient Descent.
+        URL: https://github.com/lixilinx/psgd_torch
+
+        Joo, T., Xia, W., Kim, C., Zhang, M., & Ie, E. (2026).
+        On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
+        arXiv preprint arXiv:2602.15322.
     """
     optimizer = [
         scale_by_kron(

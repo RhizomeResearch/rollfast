@@ -48,8 +48,7 @@ def _safe_bias_correction(tree, factor):
 
 
 def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
-    """
-    Stochastic rounding from FP32 → BF16 via uint32 bit manipulation.
+    """Stochastic rounding from FP32 → BF16 via uint32 bit manipulation.
 
     For ±Inf (0x7F800000 / 0xFF800000), max noise 0xFFFF yields
     0x7F80FFFF / 0xFF80FFFF. The mask (& 0xFFFF0000) truncates
@@ -59,6 +58,13 @@ def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
     scaling, producing float intermediates that break XLA's integer-only
     fusion chain and force HBM spills. bits() emits a single Threefry
     kernel in uint32, keeping the full pipeline integer-typed and fusible.
+
+    Args:
+        x: The input array to be rounded.
+        key: A PRNG key for generating noise.
+
+    Returns:
+        The stochastically rounded array in bfloat16.
     """
     if x.dtype == jnp.bfloat16:
         return x
@@ -76,9 +82,16 @@ def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
 def _tree_stochastic_cast(
     tree: base.Params, target_dtype: Any, key: jax.Array
 ) -> base.Params:
-    """
-    Safely maps stochastic rounding across a PyTree while ignoring Partitioning masks
+    """Safely maps stochastic rounding across a PyTree while ignoring Partitioning masks
     and non-differentiable static leaves (e.g., Equinox Callables).
+
+    Args:
+        tree: The input PyTree of parameters or updates.
+        target_dtype: The target dtype for casting.
+        key: A PRNG key for generating noise during rounding.
+
+    Returns:
+        A new PyTree with the casted and stochastically rounded leaves.
     """
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves, treedef = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
@@ -105,8 +118,15 @@ def _tree_stochastic_cast(
 def _tree_stochastic_cast_like(
     tree: base.Params, reference_tree: base.Params, key: jax.Array
 ) -> base.Params:
-    """
-    A stochastic equivalent to `optax.tree.cast_like`, strictly enforcing isomorphism.
+    """A stochastic equivalent to `optax.tree.cast_like`, strictly enforcing isomorphism.
+
+    Args:
+        tree: The input PyTree to cast.
+        reference_tree: The reference PyTree whose dtypes will be matched.
+        key: A PRNG key for generating noise during rounding.
+
+    Returns:
+        A new PyTree with the same structure and dtypes as the reference tree.
     """
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves_x, treedef_x = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
@@ -198,6 +218,15 @@ def apply_updates(
     1. Mirrors optax.apply_updates structural traversal and exact dtype enforcement.
     2. Overrides the deterministic RNE cast ONLY for bfloat16 parameters, preventing
        sub-representable update signals from collapsing to zero.
+
+    Args:
+        params: The current parameters.
+        updates: The updates to apply.
+        key: A PRNG key for stochastic rounding. Required if stochastic=True.
+        stochastic: Whether to use stochastic rounding for bfloat16 params (default: True).
+
+    Returns:
+        The updated parameters.
     """
     if stochastic and key is None:
         raise ValueError(
@@ -256,6 +285,15 @@ def apply_updates_prefix(
     is the reference. `flatten_up_to` extracts entire model subtrees at
     positions where updates is a leaf (None), preserving non-differentiable
     Equinox leaves (Callables, static fields) without any cast attempt.
+
+    Args:
+        model: The current model parameters.
+        updates: The updates to apply (may be a prefix tree of the model).
+        key: A PRNG key for stochastic rounding. Required if stochastic=True.
+        stochastic: Whether to use stochastic rounding for bfloat16 params (default: True).
+
+    Returns:
+        The updated model parameters.
     """
     if stochastic and key is None:
         raise ValueError(
