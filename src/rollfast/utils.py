@@ -66,6 +66,9 @@ def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
     x_f32 = x.astype(jnp.float32)
     noise = jax.random.bits(key, x_f32.shape, dtype=jnp.uint32) & jnp.uint32(0xFFFF)
     x_u32 = jax.lax.bitcast_convert_type(x_f32, jnp.uint32)
+    abs_u32 = x_u32 & jnp.uint32(0x7FFFFFFF)
+    is_special = abs_u32 >= jnp.uint32(0x7F800000)
+    noise = jnp.where(is_special, jnp.uint32(0), noise)
     rounded = (x_u32 + noise) & jnp.uint32(0xFFFF0000)
     return jax.lax.bitcast_convert_type(rounded, jnp.float32).astype(jnp.bfloat16)
 
@@ -182,10 +185,14 @@ def _compute_ema_f32(m, u, b1):
     return b1 * m.astype(jnp.float32) + (1.0 - b1) * u.astype(jnp.float32)
 
 
-def stochastic_apply_updates(
-    params: base.Params, updates: base.Updates, key: jax.Array
+def apply_updates(
+    params: base.Params,
+    updates: base.Updates,
+    key: jax.Array,
+    stochastic: bool = True,
 ) -> base.Params:
-    """Applies an update to the corresponding parameters with stochastic rounding for bf16.
+    """Applies an update to the corresponding parameters with optional stochastic
+    rounding for bf16.
 
     Why:
     1. Mirrors optax.apply_updates structural traversal and exact dtype enforcement.
@@ -195,12 +202,16 @@ def stochastic_apply_updates(
 
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves, treedef = jax.tree.flatten(params, is_leaf=is_leaf_fn)
-    keys = jax.random.split(key, len(leaves))
-    keys_tree = jax.tree.unflatten(treedef, list(keys))
+
+    # Skip PRNG work entirely when deterministic — avoids materializing
+    # len(leaves) unused uint32[2] arrays on device.
+    if stochastic:
+        keys = jax.random.split(key, len(leaves))
+        keys_tree = jax.tree.unflatten(treedef, list(keys))
+    else:
+        keys_tree = jax.tree.unflatten(treedef, [None] * len(leaves))
 
     def _apply_leaf(p, u, k):
-        # Short-circuit when update is absent (Equinox static modules)
-        # or when explicitly masked by Optax multi-transform behavior.
         if (
             p is None
             or u is None
@@ -213,11 +224,11 @@ def stochastic_apply_updates(
         u_arr = jnp.asarray(u)
 
         if p_arr.dtype == jnp.bfloat16:
-            # Strictly FP32 addition BEFORE quantization
             sum_f32 = p_arr.astype(jnp.float32) + u_arr.astype(jnp.float32)
-            return _stochastic_round_bf16(sum_f32, k)
+            if stochastic:
+                return _stochastic_round_bf16(sum_f32, k)
+            return sum_f32.astype(jnp.bfloat16)
 
-        # Strict Optax parity: Force output to match the parameter's original dtype
         return jnp.asarray(p_arr + u_arr).astype(p_arr.dtype)
 
     return jax.tree.map(

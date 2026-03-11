@@ -388,7 +388,7 @@ def _quintic_newton_schulz(
     if transposed:
         x_f32 = jnp.swapaxes(x_f32, -1, -2)
 
-    return x_f32.astype(x.dtype)
+    return x_f32
 
 
 def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
@@ -498,6 +498,8 @@ def scale_by_prism(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     use_magma: bool = False,
     magma_tau: float = 2.0,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable]] = None,
     axis_name: Optional[str] = None,
     key: int = 42,
 ) -> base.GradientTransformation:
@@ -545,7 +547,7 @@ def scale_by_prism(
                     return None
                 if isinstance(x, _masking.MaskedNode):
                     return _masking.MaskedNode()
-                return jnp.zeros([], jnp.float32)
+                return jnp.array(0.5, dtype=jnp.float32)
 
             magma_s = jax.tree.map(
                 _init_s,
@@ -566,9 +568,9 @@ def scale_by_prism(
         raw_gradients = updates
 
         if use_magma:
-            next_state_key, sr_key1, sr_key2, magma_key = jax.random.split(state.key, 4)
+            next_state_key, sr_key1, magma_key = jax.random.split(state.key, 3)
         else:
-            next_state_key, sr_key1, sr_key2 = jax.random.split(state.key, 3)
+            next_state_key, sr_key1 = jax.random.split(state.key, 2)
             magma_key = None
 
         # Strict requirement for params if dimension numbers are used
@@ -610,7 +612,11 @@ def scale_by_prism(
         )
 
         # Enforce unified FP32 tracking to prevent accumulator vanishing
-        mu_f32 = _tree_update_moment_f32(effective_updates, state.mu, b1)
+        mu_f32 = jax.lax.cond(
+            should_skip,
+            lambda: jax.tree.map(lambda m: m.astype(jnp.float32), state.mu),
+            lambda: _tree_update_moment_f32(effective_updates, state.mu, b1),
+        )
 
         # Nesterov / Bias Correction (Strictly FP32)
         mu_nest_f32 = mu_f32
@@ -666,15 +672,13 @@ def scale_by_prism(
 
         if mu_dtype == jnp.bfloat16:
             mu_cast = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key1)
-            mu_nest_cast = _tree_stochastic_cast(mu_nest_f32, mu_dtype, sr_key2)
         else:
             mu_cast = optax.tree.cast(mu_f32, mu_dtype)
-            mu_nest_cast = optax.tree.cast(mu_nest_f32, mu_dtype)
 
         if shape_nesterov:
-            target_for_ortho = mu_nest_cast
+            target_for_ortho_f32 = mu_nest_f32  # FP32, not mu_nest_cast
         else:
-            target_for_ortho = jax.tree.map(lambda _: None, effective_updates)
+            target_for_ortho_f32 = jax.tree.map(lambda _: None, effective_updates)
 
         prism_out = jax.tree.map(
             lambda g, m, target, dims: _prism_ortho_step(
@@ -686,8 +690,8 @@ def scale_by_prism(
                 dim_nums=dims,
             ),
             effective_updates,
-            mu_cast,
-            target_for_ortho,
+            mu_f32,
+            target_for_ortho_f32,
             resolved_dim_nums,
             is_leaf=_is_prism_leaf,
         )
@@ -708,6 +712,38 @@ def scale_by_prism(
             new_updates = jax.tree.map(
                 lambda u: _clip_per_tensor_rms(u, max_rms, max_val), new_updates
             )
+
+        _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
+        if _may_have_wd and params is not None:
+            wd_step = (
+                weight_decay(state.count) if callable(weight_decay) else weight_decay
+            )
+            _wd_mask = None
+            if weight_decay_mask is not None:
+                _wd_mask = (
+                    weight_decay_mask(params)
+                    if callable(weight_decay_mask)
+                    else weight_decay_mask
+                )
+
+            def _add_wd(u, p, m=True):
+                if _is_prism_leaf(u) or _is_prism_leaf(p):
+                    return u
+                if isinstance(m, _masking.MaskedNode) or m is None or not m:
+                    return u
+                return u + wd_step * p.astype(u.dtype)
+
+            if _wd_mask is not None:
+                new_updates = jax.tree.map(
+                    _add_wd, new_updates, params, _wd_mask, is_leaf=_is_prism_leaf
+                )
+            else:
+                new_updates = jax.tree.map(
+                    lambda u, p: _add_wd(u, p),
+                    new_updates,
+                    params,
+                    is_leaf=_is_prism_leaf,
+                )
 
         new_updates = jax.lax.cond(
             should_skip,
@@ -730,11 +766,16 @@ def scale_by_prism(
             final_updates = new_updates
             new_magma_s = state.magma_s
 
+        if use_magma:
+            new_magma_s = jax.tree.map(
+                lambda new_s, old_s: jnp.where(should_skip, old_s, new_s),
+                new_magma_s,
+                state.magma_s,
+            )
+
         return final_updates, ScaleByPrismState(
             count=count_inc,
-            mu=mu_cast
-            if mu_dtype == jnp.bfloat16
-            else optax.tree.cast(mu_f32, mu_dtype),
+            mu=mu_cast,
             magma_s=new_magma_s,
             key=next_state_key,
         )
@@ -746,7 +787,8 @@ def prism(
     learning_rate: base.ScalarOrSchedule,
     b1: float = 0.95,
     gamma: float = 1.0,
-    weight_decay: float = 0.01,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     ns_iters: int = 5,
     nesterov: bool = True,
     shape_nesterov: bool = True,
@@ -806,6 +848,8 @@ def prism(
     Returns:
         A `optax.GradientTransformation` that handles the partitioned optimization.
     """
+    key_prism, key_adam = jax.random.split(key, 2)
+
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
@@ -843,12 +887,22 @@ def prism(
             weight_dimension_numbers=prism_weight_dim_nums_fn,
             use_magma=use_magma,
             magma_tau=magma_tau,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
             axis_name=axis_name,
-            key=key,
+            key=key_prism,
         ),
-        transform.add_decayed_weights(weight_decay),
-        transform.scale_by_learning_rate(learning_rate),
     ]
+
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero and not use_magma:
+        prism_components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+
+    prism_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={
@@ -859,11 +913,12 @@ def prism(
                 b2=adam_b2,
                 eps=adam_eps,
                 weight_decay=weight_decay,
+                weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
                 use_magma=use_magma,
                 magma_tau=magma_tau,
                 axis_name=axis_name,
-                key=key,
+                key=key_adam,
             ),
         },
         param_labels=param_labels,

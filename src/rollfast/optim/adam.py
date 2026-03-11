@@ -15,6 +15,7 @@ from rollfast.utils import (
     _safe_bias_correction,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
+    _tree_stochastic_cast,
 )
 
 
@@ -35,6 +36,8 @@ def scale_by_adam(
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     *,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     nesterov: bool = False,
     use_magma: bool = False,
     magma_tau: float = 2.0,
@@ -62,11 +65,14 @@ def scale_by_adam(
         A :class:`optax.GradientTransformation` object.
     """
 
-    mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    if mu_dtype is None:
+        mu_dtype = jnp.float32
+    else:
+        mu_dtype = utils.canonicalize_dtype(mu_dtype)
 
     def init_fn(params):
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # First moment
-        nu = optax.tree.zeros_like(params)  # Second moment
+        nu = optax.tree.zeros_like(params, dtype=mu_dtype)  # Second moment
 
         if use_magma:
 
@@ -75,7 +81,7 @@ def scale_by_adam(
                     return None
                 if isinstance(x, _masking.MaskedNode):
                     return _masking.MaskedNode()
-                return jnp.zeros([], jnp.float32)
+                return jnp.array(0.5, dtype=jnp.float32)
 
             magma_s = jax.tree.map(
                 _init_s,
@@ -90,19 +96,17 @@ def scale_by_adam(
             mu=mu,
             nu=nu,
             magma_s=magma_s,
-            key=jax.random.PRNGKey(key) if use_magma else None,
+            key=jax.random.PRNGKey(key),
         )
 
     def update_fn(updates, state, params=None):
-        del params
-
         # Preserve raw stochastic gradients (g_t) for Magma alignment
         raw_gradients = updates
 
         if use_magma:
-            next_state_key, magma_key = jax.random.split(state.key, 2)
+            next_state_key, sr_key, magma_key = jax.random.split(state.key, 3)
         else:
-            next_state_key = state.key
+            next_state_key, sr_key = jax.random.split(state.key, 2)
             magma_key = None
 
         mu_f32 = _tree_update_moment_f32(updates, state.mu, b1)
@@ -159,6 +163,34 @@ def scale_by_adam(
             is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
 
+        wd_step = weight_decay(state.count) if callable(weight_decay) else weight_decay
+
+        if params is not None:
+            # Resolve the mask tree natively
+            resolved_mask = (
+                weight_decay_mask(params)
+                if callable(weight_decay_mask)
+                else weight_decay_mask
+            )
+            if resolved_mask is None:
+                resolved_mask = jax.tree.map(
+                    lambda _: True,
+                    params,
+                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                )
+
+            adam_updates = jax.tree.map(
+                lambda u, p, m_leaf: (
+                    u
+                    if isinstance(u, _masking.MaskedNode) or u is None
+                    else (u + wd_step * p.astype(jnp.float32) if m_leaf else u)
+                ),
+                adam_updates,
+                params,
+                resolved_mask,
+                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            )
+
         # Intercept and mathematically project Delta_t through Magma logic
         if use_magma:
             final_updates, new_magma_s = apply_magma_internal(
@@ -174,10 +206,18 @@ def scale_by_adam(
             final_updates = adam_updates
             new_magma_s = state.magma_s
 
+        if mu_dtype == jnp.bfloat16:
+            k1, k2 = jax.random.split(sr_key)
+            mu_stored = _tree_stochastic_cast(mu_f32, jnp.bfloat16, k1)
+            nu_stored = _tree_stochastic_cast(nu_f32, jnp.bfloat16, k2)
+        else:
+            mu_stored = mu_f32
+            nu_stored = nu_f32
+
         return final_updates, ScaleByAdamState(
             count=count_inc,
-            mu=mu_f32,
-            nu=nu_f32,
+            mu=mu_stored,
+            nu=nu_stored,
             magma_s=new_magma_s,
             key=next_state_key,
         )
@@ -191,9 +231,9 @@ def adamw(
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    mu_dtype: Optional[Any] = None,
+    mu_dtype: Optional[jax.typing.DTypeLike] = None,
     weight_decay: base.ScalarOrSchedule = 1e-4,
-    mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     *,
     nesterov: bool = False,
     use_magma: bool = False,
@@ -324,14 +364,23 @@ def adamw(
             eps=eps,
             eps_root=eps_root,
             mu_dtype=mu_dtype,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
             nesterov=nesterov,
             use_magma=use_magma,
             magma_tau=magma_tau,
             axis_name=axis_name,
             key=key,
-        ),
-        transform.add_decayed_weights(weight_decay, mask),
-        transform.scale_by_learning_rate(learning_rate),
+        )
     ]
 
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero and not use_magma:
+        components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+
+    components.append(transform.scale_by_learning_rate(learning_rate))
     return combine.chain(*components)

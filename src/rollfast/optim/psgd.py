@@ -83,9 +83,7 @@ def _compute_global_norm(
     grads: Any,
     axis_name: Optional[str] = None,
 ) -> jax.Array:
-    _is_leaf = lambda x: (
-        hasattr(x, "__class__") and x.__class__.__name__ == "MaskedNode" or x is None
-    )
+    _is_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves = [x for x in jax.tree.leaves(grads, is_leaf=_is_leaf) if not _is_leaf(x)]
 
     if not leaves:
@@ -672,7 +670,7 @@ def _update_precond_generic(
                     new_q = q - step
                     new_q = _procrustes_step2(new_q, geom_key)
 
-        new_Qs.append(new_q.astype(dtype_in))
+        new_Qs.append(new_q)
 
         if new_Ls is not None:
             new_Ls.append(new_l)
@@ -731,8 +729,8 @@ def scale_by_kron(
     preconditioner_lr: float = 0.1,
     preconditioner_init_scale: Optional[float] = None,
     update_preconditioner_first: bool = True,
-    mu_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
+    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    precond_dtype: Optional[jax.typing.DTypeLike] = None,
     precond_update_precision: Optional[str] = "tensorfloat32",
     precond_grads_precision: Optional[str] = None,
     scanned_layers: Optional[base.Params] = None,
@@ -749,6 +747,8 @@ def scale_by_kron(
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
     magma_tau: float = 2.0,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     axis_name: Optional[str] = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -791,6 +791,16 @@ def scale_by_kron(
     Returns:
         optax.GradientTransformationExtraArgs
     """
+    if use_magma and b1 <= 0:
+        raise ValueError(
+            "Magma requires momentum (b1 > 0) to compute gradient-momentum alignment."
+        )
+
+    if mu_dtype is None:
+        mu_dtype = jnp.float32
+    else:
+        mu_dtype = canonicalize_dtype(mu_dtype)
+
     mu_dtype = canonicalize_dtype(mu_dtype)
     precond_dtype = canonicalize_dtype(precond_dtype)
 
@@ -946,7 +956,7 @@ def scale_by_kron(
                     return None
                 if isinstance(x, _masking.MaskedNode):
                     return _masking.MaskedNode()
-                return jnp.zeros([], jnp.float32)
+                return jnp.array(0.5, dtype=jnp.float32)
 
             magma_s = jax.tree.map(
                 _init_s,
@@ -967,7 +977,6 @@ def scale_by_kron(
         )
 
     def update_fn(updates: base.Updates, state: KronState, params: base.Params = None):
-        del params
         raw_gradients = updates
 
         count_inc = safe_int32_increment(state.count)
@@ -987,8 +996,6 @@ def scale_by_kron(
             )
             updates = jax.tree.map(lambda g: g * clip_scale, updates)
 
-        post_clip_raw_gradients = updates
-
         scanned_layers_ = scanned_layers
         if scanned_layers is None:
             scanned_layers_ = jax.tree.map(lambda _: False, updates)
@@ -998,6 +1005,7 @@ def scale_by_kron(
             update_prob_in = preconditioner_update_probability(count_inc)
 
         mu_to_save = None
+        mu_f32 = None
         momentum_updates = updates
         if state.mu is not None:
             key, sr_key = jax.random.split(key)
@@ -1014,6 +1022,14 @@ def scale_by_kron(
                 mu_to_save = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key)
             else:
                 mu_to_save = otu.tree_cast(mu_f32, mu_dtype)
+        else:
+            # Defensive fallback: use raw grads as surrogate first moment
+            _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+            mu_f32 = jax.tree.map(
+                lambda g: g.astype(jnp.float32) if not _is_psgd_leaf(g) else g,
+                updates,
+                is_leaf=_is_psgd_leaf,
+            )
 
         _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
 
@@ -1228,16 +1244,23 @@ def scale_by_kron(
 
         # Use >= 1.0 to be safe against tiny float precision issues, though == 1.0 usually works for manually set schedules.
         is_early_training = update_prob_in >= 1.0
-
         permissive = jnp.logical_and(permissive_spike_protection, is_early_training)
-
         # protect curvature state but still keep updates early in the training
         # Note: raw_global_grad_clip is static (Python variable), so 'is not None' is safe.
         skip_condition = jnp.logical_and(
             raw_global_grad_clip is not None, jnp.logical_not(permissive)
         )
-
         should_skip = jnp.logical_and(skip_condition, is_spike)
+
+        if state.mu is not None:
+            mu_to_save = jax.tree.map(
+                lambda new, old: (
+                    jnp.where(should_skip, old, new) if not _is_psgd_leaf(new) else new
+                ),
+                mu_to_save,
+                state.mu,
+                is_leaf=_is_psgd_leaf,
+            )
 
         # Only update if we were going to update AND we shouldn't skip
         do_update = jnp.logical_and(do_update, jnp.logical_not(should_skip))
@@ -1316,6 +1339,38 @@ def scale_by_kron(
 
         updates = grads_structure.unflatten(precond_gs)
 
+        _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
+        if _may_have_wd and params is not None:
+            wd_step = (
+                weight_decay(state.count) if callable(weight_decay) else weight_decay
+            )
+            _wd_mask = None
+            if weight_decay_mask is not None:
+                _wd_mask = (
+                    weight_decay_mask(params)
+                    if callable(weight_decay_mask)
+                    else weight_decay_mask
+                )
+
+            def _add_wd(u, p, m=True):
+                if _is_psgd_leaf(u) or _is_psgd_leaf(p):
+                    return u
+                if isinstance(m, _masking.MaskedNode) or m is None or not m:
+                    return u
+                return u + wd_step * p.astype(u.dtype)
+
+            if _wd_mask is not None:
+                updates = jax.tree.map(
+                    _add_wd, updates, params, _wd_mask, is_leaf=_is_psgd_leaf
+                )
+            else:
+                updates = jax.tree.map(
+                    lambda u, p: _add_wd(u, p),
+                    updates,
+                    params,
+                    is_leaf=_is_psgd_leaf,
+                )
+
         if use_magma:
             final_updates, new_magma_s = apply_magma_internal(
                 raw_gradients=raw_gradients,
@@ -1330,13 +1385,24 @@ def scale_by_kron(
             final_updates = updates
             new_magma_s = state.magma_s
 
-        key_next, key_save_q = jax.random.split(key_next)
+        final_updates = jax.tree.map(
+            lambda u: (
+                jnp.where(should_skip, jnp.zeros_like(u), u)
+                if not _is_psgd_leaf(u)
+                else u
+            ),
+            final_updates,
+            is_leaf=_is_psgd_leaf,
+        )
+
+        if use_magma:
+            new_magma_s = jax.tree.map(
+                lambda new_s, old_s: jnp.where(should_skip, old_s, new_s),
+                new_magma_s,
+                state.magma_s,
+            )
 
         Qs_to_save = grads_structure.unflatten(Qs_next)
-        if precond_dtype == jnp.bfloat16:
-            Qs_to_save = _tree_stochastic_cast(Qs_to_save, precond_dtype, key_save_q)
-        else:
-            Qs_to_save = otu.tree_cast(Qs_to_save, precond_dtype)
         Ls_to_save = grads_structure.unflatten(Ls_next) if Ls_next else None
 
         new_state = KronState(
@@ -1357,7 +1423,7 @@ def scale_by_kron(
 def kron(
     learning_rate: Union[float, Callable[[int], float]] = 0.001,
     b1: float = 0.9,
-    weight_decay: float = 0.0,
+    weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     preconditioner_update_probability: Union[
         float, Callable[[int], float]
@@ -1426,11 +1492,17 @@ def kron(
             newton_schulz_iters=newton_schulz_iters,
             use_magma=use_magma,
             magma_tau=magma_tau,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
             axis_name=axis_name,
             key=key,
         )
     ]
-    if weight_decay > 0.0:
+
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero and not use_magma:
         optimizer.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
 
     optimizer.append(transform.scale_by_learning_rate(learning_rate))

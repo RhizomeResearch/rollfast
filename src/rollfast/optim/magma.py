@@ -51,10 +51,12 @@ def apply_magma_internal(
             norm_g_sq = dist_reduce(norm_g_sq, axis_name, "sum")
             norm_mu_sq = dist_reduce(norm_mu_sq, axis_name, "sum")
 
-        denom = jnp.maximum(
-            jnp.sqrt(norm_g_sq + 1e-12) * jnp.sqrt(norm_mu_sq + 1e-12), 1e-9
-        )
-        cossim = dot / denom
+        # denom = jnp.maximum(
+        #     jnp.sqrt(norm_g_sq + 1e-12) * jnp.sqrt(norm_mu_sq + 1e-12), 1e-9
+        # )
+        denom = jnp.maximum(jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-12)
+        cossim = jnp.nan_to_num(dot / denom, nan=0.0)
+        cossim = jnp.clip(cossim, -1.0, 1.0)
 
         # Score EMA
         s_tilde = jax.nn.sigmoid(cossim / tau)
@@ -63,7 +65,9 @@ def apply_magma_internal(
         # Singular block-wise Bernoulli scalar
         m_mask = jax.random.bernoulli(block_key, 0.5).astype(delta.dtype)
 
-        delta_magma = s_new.astype(delta.dtype) * m_mask * delta
+        delta_magma = jnp.where(
+            m_mask, s_new.astype(delta.dtype) * delta, jnp.zeros_like(delta)
+        )
 
         new_delta_leaves.append(delta_magma)
         new_s_leaves.append(s_new)
