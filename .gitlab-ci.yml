@@ -1,0 +1,14 @@
+stages:
+  - test
+
+variables:
+  # Prevent git from complaining about dubious ownership inside the container
+  GIT_CONFIG_GLOBAL: /tmp/.gitconfig
+
+test:
+  stage: test
+  image: cachix/devenv:latest
+  before_script:
+    - git config --global --add safe.directory $CI_PROJECT_DIR
+  script:
+    - devenv test
