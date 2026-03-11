@@ -33,7 +33,7 @@ in
   '';
 
   enterTest = ''
-    . .devenv/state/venv/bin/activate
+    # . .devenv/state/venv/bin/activate
     pytest
   '';
 }
