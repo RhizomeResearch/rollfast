@@ -484,7 +484,7 @@ def _matmul_invroot(
     # t = jnp.sqrt(jnp.sum(P * P.mT))
     # jnp.square guarantees non-negative summands, preventing NaN from
     # asymmetric FP drift in nominally-SPD gram matrices.
-    t = jnp.sqrt(jnp.sum(jnp.square(P)))
+    # t = jnp.sqrt(jnp.sum(jnp.square(P)))
     # NOTE: eps_gram is applied to the gram *before* this function is called,
     # and `eps * I` is applied here *after* Frobenius normalization. This
     # constitutes a double spectral shift. Both are safe (additive positive
@@ -492,8 +492,14 @@ def _matmul_invroot(
     # regularize ill-conditioned subspaces, manifesting as premature
     # conditioning plateaus. Monitor loss curves when lowering precision.
     # P = P / (t + 1e-30) + eps * I
+    # t_safe = jnp.maximum(t, 1e-30) * 1.05
+    # P = P / t_safe + eps * I
+
+    p_max = jnp.maximum(jnp.max(jnp.abs(P)), 1e-30)
+    t = p_max * jnp.sqrt(jnp.sum(jnp.square(P / p_max)))
     t_safe = jnp.maximum(t, 1e-30) * 1.05
     P = P / t_safe + eps * I
+
     for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
         W = a * I + b * P + c * (P @ P)
         # s and r are trace-time constants; avoid XLA power-dispatch for s=1/r=1
@@ -529,12 +535,23 @@ def _double_sided_matmul_invroot(
     # tP = jnp.sqrt(jnp.sum(P * P.mT))
     # jnp.square guarantees non-negative summands, preventing NaN from
     # asymmetric FP drift in nominally-SPD gram matrices.
-    tQ = jnp.sqrt(jnp.sum(jnp.square(Q)))
-    tP = jnp.sqrt(jnp.sum(jnp.square(P)))
-    tQ_safe = jnp.maximum(tQ, 1e-30) * 1.05
-    tP_safe = jnp.maximum(tP, 1e-30) * 1.05
+    # tQ = jnp.sqrt(jnp.sum(jnp.square(Q)))
+    # tP = jnp.sqrt(jnp.sum(jnp.square(P)))
+    # tQ_safe = jnp.maximum(tQ, 1e-30) * 1.05
+    # tP_safe = jnp.maximum(tP, 1e-30) * 1.05
     # Q = Q / (tQ + 1e-30) + eps * I_m
     # P = P / (tP + 1e-30) + eps * I_n
+    # Q = Q / tQ_safe + eps * I_m
+    # P = P / tP_safe + eps * I_n
+
+    q_max = jnp.maximum(jnp.max(jnp.abs(Q)), 1e-30)
+    tQ = q_max * jnp.sqrt(jnp.sum(jnp.square(Q / q_max)))
+    tQ_safe = jnp.maximum(tQ, 1e-30) * 1.05
+
+    p_max = jnp.maximum(jnp.max(jnp.abs(P)), 1e-30)
+    tP = p_max * jnp.sqrt(jnp.sum(jnp.square(P / p_max)))
+    tP_safe = jnp.maximum(tP, 1e-30) * 1.05
+
     Q = Q / tQ_safe + eps * I_m
     P = P / tP_safe + eps * I_n
 
@@ -594,9 +611,22 @@ def _prism_v2_math(
     D = g - m_raw
     m, n = m_target.shape[-2], m_target.shape[-1]
 
-    norm = jnp.sqrt(
-        jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
-        + gamma**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
+    # norm = jnp.sqrt(
+    #     jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
+    #     + gamma**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
+    # )
+    # scale = jnp.maximum(norm, 1e-30)
+
+    # m_target_norm = m_target / scale
+    # D_norm = D / scale
+
+    max_m = jnp.max(jnp.abs(m_target), axis=(-2, -1), keepdims=True)
+    max_d = jnp.max(jnp.abs(D), axis=(-2, -1), keepdims=True)
+    max_val = jnp.maximum(jnp.maximum(max_m, gamma * max_d), 1e-30)
+
+    norm = max_val * jnp.sqrt(
+        jnp.sum(jnp.square(m_target / max_val), axis=(-2, -1), keepdims=True)
+        + gamma**2 * jnp.sum(jnp.square(D / max_val), axis=(-2, -1), keepdims=True)
     )
     scale = jnp.maximum(norm, 1e-30)
 
@@ -662,10 +692,24 @@ def _shampoo_prism_math(
     D = g - m_raw
     m, n = m_target.shape[-2], m_target.shape[-1]
 
+    # gamma_max = max(gamma_l, gamma_r)
+    # norm = jnp.sqrt(
+    #     jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
+    #     + gamma_max**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
+    # )
+    # scale = jnp.maximum(norm, 1e-30)
+
+    # m_target_norm = m_target / scale
+    # D_norm = D / scale
+
     gamma_max = max(gamma_l, gamma_r)
-    norm = jnp.sqrt(
-        jnp.sum(jnp.square(m_target), axis=(-2, -1), keepdims=True)
-        + gamma_max**2 * jnp.sum(jnp.square(D), axis=(-2, -1), keepdims=True)
+    max_m = jnp.max(jnp.abs(m_target), axis=(-2, -1), keepdims=True)
+    max_d = jnp.max(jnp.abs(D), axis=(-2, -1), keepdims=True)
+    max_val = jnp.maximum(jnp.maximum(max_m, gamma_max * max_d), 1e-30)
+
+    norm = max_val * jnp.sqrt(
+        jnp.sum(jnp.square(m_target / max_val), axis=(-2, -1), keepdims=True)
+        + gamma_max**2 * jnp.sum(jnp.square(D / max_val), axis=(-2, -1), keepdims=True)
     )
     scale = jnp.maximum(norm, 1e-30)
 
