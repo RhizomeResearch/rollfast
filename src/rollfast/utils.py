@@ -49,25 +49,25 @@ def _safe_bias_correction(tree, factor):
 
 def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
     """
-    Bypasses XLA's deterministic RNE casting to preserve sub-representable gradient signals.
-    IEEE 754 Infinities (0x7F800000 / 0xFF800000) are explicitly masked out.
-    Adding integer noise to Infinity overflows into the NaN domain (0x7F800001+).
+    Stochastic rounding from FP32 → BF16 via uint32 bit manipulation.
+
+    For ±Inf (0x7F800000 / 0xFF800000), max noise 0xFFFF yields
+    0x7F80FFFF / 0xFF80FFFF. The mask (& 0xFFFF0000) truncates
+    these back to the original Inf encoding. No NaN can escape.
+
+    randint() internally upcasts raw PRNG output to float32 for range
+    scaling, producing float intermediates that break XLA's integer-only
+    fusion chain and force HBM spills. bits() emits a single Threefry
+    kernel in uint32, keeping the full pipeline integer-typed and fusible.
     """
     if x.dtype == jnp.bfloat16:
         return x
 
     x_f32 = x.astype(jnp.float32)
-    noise = jax.random.randint(key, x.shape, minval=0, maxval=0x10000, dtype=jnp.uint32)
+    noise = jax.random.bits(key, x_f32.shape, dtype=jnp.uint32) & jnp.uint32(0xFFFF)
     x_u32 = jax.lax.bitcast_convert_type(x_f32, jnp.uint32)
-
-    # Isolate non-finite values to prevent Inf -> NaN corruption
-    is_finite = jnp.isfinite(x_f32)
-    x_u32_noisy = jnp.where(is_finite, x_u32 + noise, x_u32)
-
-    MASK = jnp.array(0xFFFF0000, dtype=jnp.uint32)
-    x_u32_rounded = jnp.bitwise_and(x_u32_noisy, MASK)
-
-    return jax.lax.bitcast_convert_type(x_u32_rounded, jnp.float32).astype(jnp.bfloat16)
+    rounded = (x_u32 + noise) & jnp.uint32(0xFFFF0000)
+    return jax.lax.bitcast_convert_type(rounded, jnp.float32).astype(jnp.bfloat16)
 
 
 def _tree_stochastic_cast(
