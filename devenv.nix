@@ -26,12 +26,10 @@ in
 
   enterShell = ''
     uv sync
-    . .devenv/state/venv/bin/activate
   '';
 
   enterTest = ''
     uv sync
-    . .devenv/state/venv/bin/activate
-    pytest
+    uv run pytest
   '';
 }
