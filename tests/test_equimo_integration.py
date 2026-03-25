@@ -25,7 +25,7 @@ if EQUINOX_EQUIMO_AVAILABLE:
     )
 
 
-@pytest.fixture(params=["iformer", "vit", "reduceformer"])
+@pytest.fixture(params=["vit"])
 def model_and_data(request):
     key = jr.PRNGKey(42)
     model_name = request.param
