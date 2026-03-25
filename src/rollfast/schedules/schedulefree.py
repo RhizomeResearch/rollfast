@@ -93,12 +93,17 @@ def schedule_free(
             if state_dtype is not None
             else optax.tree.dtype(params, "lowest")
         )
-        z = optax.tree.cast(params, dtype=dtype)
-        z = jax.tree.map(lambda t: jnp.array(t, copy=True), z)
+        # Prevent structural collapse of None leaves during initialization
+        z = jax.tree.map(
+            lambda t: jnp.array(t, dtype=dtype, copy=True) if t is not None else None,
+            params,
+            is_leaf=lambda x: x is None,
+        )
 
         weight_sum = jax.tree.map(
             lambda x: jnp.zeros([], dtype=jnp.float32) if x is not None else None,
             params,
+            is_leaf=lambda x: x is None,
         )
 
         return ScheduleFreeState(
@@ -122,9 +127,15 @@ def schedule_free(
             lr_tree = learning_rate
 
         if jax.tree.structure(lr_tree) != jax.tree.structure(params):
-            lr_tree = jax.tree.map(lambda _: lr_tree, params)
+            lr_tree = jax.tree.map(
+                lambda _: lr_tree, params, is_leaf=lambda x: x is None
+            )
 
-        lr_tree = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), lr_tree)
+        lr_tree = jax.tree.map(
+            lambda x: jnp.asarray(x, dtype=jnp.float32) if x is not None else None,
+            lr_tree,
+            is_leaf=lambda x: x is None,
+        )
 
         # Compute Base Optimizer Update (Preconditioned Gradient)
         # Note: base_optimizer should output the update step d = -lr * P * g
@@ -138,11 +149,15 @@ def schedule_free(
             weight_tree = lr_tree
         elif weighting_mode == WeightingMode.PRACTICAL:
             weight_tree = jax.tree.map(
-                lambda x: jnp.square(x) if x is not None else None, lr_tree
+                lambda x: jnp.square(x) if x is not None else None,
+                lr_tree,
+                is_leaf=lambda x: x is None,
             )
         else:  # THEORETICAL
             weight_tree = jax.tree.map(
-                lambda x: jnp.ones_like(x) if x is not None else None, lr_tree
+                lambda x: jnp.ones_like(x) if x is not None else None,
+                lr_tree,
+                is_leaf=lambda x: x is None,
             )
 
         # Accumulate weights: W_t = W_{t-1} + w_t
@@ -153,18 +168,20 @@ def schedule_free(
             lambda acc, w: (acc + w) if (acc is not None and w is not None) else None,
             state.weight_sum,
             weight_tree,
+            is_leaf=lambda x: x is None,
         )
 
         # c_t = w_t / W_t
-        # Safety: avoid division by zero
+        # Safety: avoid division by zero and protect XLA from NaN injection during compilation
         ck_tree = jax.tree.map(
             lambda w, sum_w: (
-                jnp.where(sum_w > 0, w / sum_w, 0.0)
+                jnp.where(sum_w > 0, w / jnp.maximum(sum_w, 1e-30), 0.0)
                 if (w is not None and sum_w is not None)
                 else None
             ),
             weight_tree,
             new_weight_sum,
+            is_leaf=lambda x: x is None,
         )
 
         # Protect against b1 -> 0
@@ -224,7 +241,9 @@ def schedule_free(
 
         final_updates = jax.tree.map(
             lambda y_n, p: (
-                (y_n - p.astype(jnp.float32)).astype(p.dtype) if p is not None else None
+                (y_n - p.astype(jnp.float32)).astype(p.dtype)
+                if y_n is not None and hasattr(p, "astype")
+                else None
             ),
             y_next,
             params,
@@ -238,104 +257,6 @@ def schedule_free(
             base_state=new_base_state,
             z=z_next,
             key=next_state_key,
-        )
-
-        return final_updates, new_state
-
-    return base.GradientTransformationExtraArgs(init_fn, update_fn)
-
-    def update_fn(updates, state, params=None, **extra_args):
-        if callable(learning_rate):
-            try:
-                lr_tree = learning_rate(state.step_count, params)
-            except TypeError:
-                # Fallback: The schedule does not accept params (standard optax schedule)
-                lr_tree = learning_rate(state.step_count)
-        else:
-            lr_tree = learning_rate
-
-        lr_tree = jax.tree.map(lambda x: jnp.asarray(x, dtype=jnp.float32), lr_tree)
-
-        # Compute Base Optimizer Update (Preconditioned Gradient)
-        # Note: base_optimizer should output the update step d = -lr * P * g
-        # We must handle the LR scaling carefully. Standard SF assumes base_opt
-        # returns (D^-1 g).
-        base_updates, new_base_state = base_optimizer.update(
-            updates, state.base_state, params, **extra_args
-        )
-
-        if weighting_mode == WeightingMode.SCHEDULET:
-            weight_tree = lr_tree
-        elif weighting_mode == WeightingMode.PRACTICAL:
-            weight_tree = jax.tree.map(
-                lambda x: jnp.square(x) if x is not None else None, lr_tree
-            )
-        else:  # THEORETICAL
-            weight_tree = jax.tree.map(
-                lambda x: jnp.ones_like(x) if x is not None else None, lr_tree
-            )
-
-        # Accumulate weights: W_t = W_{t-1} + w_t
-        # new_weight_sum = jax.tree.map(
-        #     lambda acc, w: acc + w, state.weight_sum, weight_tree
-        # )
-        new_weight_sum = jax.tree.map(
-            lambda acc, w: (acc + w) if (acc is not None and w is not None) else None,
-            state.weight_sum,
-            weight_tree,
-        )
-
-        # c_t = w_t / W_t
-        # Safety: avoid division by zero
-        ck_tree = jax.tree.map(
-            lambda w, sum_w: (
-                jnp.where(sum_w > 0, w / sum_w, 0.0)
-                if (w is not None and sum_w is not None)
-                else None
-            ),
-            weight_tree,
-            new_weight_sum,
-        )
-
-        # Protect against b1 -> 0
-        b1_safe = jnp.maximum(state.b1, 1e-8)
-
-        # Schedule-Free Update Dynamics
-        # y_t = params (input)
-        # z_t = z_{t-1} - gamma * (Base Update)
-        # Note: 'base_updates' from chain usually includes LR scaling.
-        # If base_optimizer includes scale_by_learning_rate, base_updates is actual step.
-        z_next = jax.tree.map(lambda z, u: z + u, state.z, base_updates)
-
-        # We recover x_t from y_t: x_t = (y_t - (1-b1)z_{t-1}) / b1
-        x_curr = jax.tree.map(
-            lambda y, z: (y - (1.0 - b1_safe) * z) / b1_safe, params, state.z
-        )
-
-        # x_{t+1} = (1 - c_{t+1}) x_t + c_{t+1} z_{t+1}
-        x_next = jax.tree.map(
-            lambda x, z, ck: (
-                (1.0 - ck) * x + ck * z if ck is not None else x
-            ),  # Fallback to x (param) if ck is None
-            x_curr,
-            z_next,
-            ck_tree,
-        )
-
-        # y_{t+1} = (1-b1) z_{t+1} + b1 x_{t+1}
-        y_next = jax.tree.map(
-            lambda x, z: b1_safe * x + (1.0 - b1_safe) * z, x_next, z_next
-        )
-
-        # Final Update diff
-        final_updates = jax.tree.map(lambda n, o: n - o, y_next, params)
-
-        new_state = ScheduleFreeState(
-            b1=state.b1,
-            weight_sum=new_weight_sum,
-            step_count=numerics.safe_increment(state.step_count),
-            base_state=new_base_state,
-            z=z_next,
         )
 
         return final_updates, new_state
@@ -530,9 +451,11 @@ def schedule_free_prism(
         p_lr = prism_schedule(count)
         a_lr = adam_schedule(count)
 
-        # return jax.tree.map(lambda l: p_lr if l == "prism" else a_lr, labels)
+        # Explicitly preserve None leaves to prevent structural mismatch with params
         return jax.tree.map(
-            lambda l: None if l is None else (p_lr if l == "prism" else a_lr), labels
+            lambda l: None if l is None else (p_lr if l == "prism" else a_lr),
+            labels,
+            is_leaf=lambda x: x is None,
         )
 
     # We pass the prism_schedule to the wrapper solely for calculating `c_t`.
@@ -801,11 +724,16 @@ def schedule_free_eval_params(state: base.OptState, params: base.Params):
         The parameters to use for evaluation (the 'x' sequence).
     """
     # Using ScheduleFreeState as a type hint above results in pytype errors in tests.
-    b1 = getattr(state, "b1")
-    z = getattr(state, "z")
+    b1 = getattr(state, "b1", None)
+    z = getattr(state, "z", None)
     if b1 is None or z is None:
         raise ValueError(
             "schedule_free_eval_params requires a ScheduleFreeState as input."
         )
     b1_safe = jnp.maximum(b1, 1e-8)
-    return jax.tree.map(lambda yi, zi: (yi - (1.0 - b1_safe) * zi) / b1_safe, params, z)
+    return jax.tree.map(
+        lambda yi, zi: (yi - (1.0 - b1_safe) * zi) / b1_safe if zi is not None else yi,
+        params,
+        z,
+        is_leaf=lambda x: x is None,
+    )
