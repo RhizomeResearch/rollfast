@@ -1,13 +1,14 @@
 import jax
 import jax.numpy as jnp
 import pytest
+
 from rollfast.optim.adam import adamw
 from rollfast.optim.prism import prism
 from rollfast.optim.psgd import kron
 from rollfast.schedules.schedulefree import (
     schedule_free_adam,
-    schedule_free_prism,
     schedule_free_kron,
+    schedule_free_prism,
 )
 from rollfast.utils import apply_updates, apply_updates_prefix
 
