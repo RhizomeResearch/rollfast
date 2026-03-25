@@ -165,14 +165,16 @@ def _get_dimension_numbers(
     if weight_dimension_numbers is None:
 
         def _get_default_spec(x):
-            if isinstance(x, _masking.MaskedNode):
+            if isinstance(x, _masking.MaskedNode) or x is None:
                 return None
-            return PrismDimensionNumbers() if x.ndim == 2 else None
+            return (
+                PrismDimensionNumbers() if hasattr(x, "ndim") and x.ndim == 2 else None
+            )
 
         return jax.tree.map(
             _get_default_spec,
             params,
-            is_leaf=lambda x: isinstance(x, _masking.MaskedNode),
+            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
 
     if callable(weight_dimension_numbers):
