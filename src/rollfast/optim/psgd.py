@@ -1098,6 +1098,8 @@ def scale_by_kron(
         )
         needs_scale_init = jnp.array(False, dtype=jnp.bool_)
 
+        # Bypass expression compilation for non-differentiable/masked leaves to prevent
+        # t.shape attribute resolution failures. Downstream functions ignore the None sentinel.
         expressions = [
             _init_Q_exprs(
                 t[0] if s else t,
@@ -1109,6 +1111,8 @@ def scale_by_kron(
                 precond_dtype,
                 existing_Q=jax.tree.map(lambda d: d[0], Q) if s else Q,
             )
+            if not _is_psgd_leaf(t)
+            else None
             for t, s, Q in zip(updates_flat, scanned_layers_flat, Qs_flat)
         ]
 
@@ -1209,7 +1213,9 @@ def scale_by_kron(
                         s,
                         partial(
                             _update_wrapper,
-                            total_numel=g.size,
+                            # Eager attribute evaluation during partial binding crashes on None.
+                            # The 0 sentinel is safe as _update_wrapper returns early for _is_psgd_leaf.
+                            total_numel=g.size if not _is_psgd_leaf(g) else 0,
                             exprs=exprs,
                             layer_key=lk,
                         ),
