@@ -178,7 +178,9 @@ def _get_dimension_numbers(
         )
 
     if callable(weight_dimension_numbers):
-        dim_num_fn = cast(Callable[[base.Params], DimNumsTree], weight_dimension_numbers)
+        dim_num_fn = cast(
+            Callable[[base.Params], DimNumsTree], weight_dimension_numbers
+        )
         return dim_num_fn(params)
 
     return weight_dimension_numbers
@@ -293,7 +295,9 @@ def _normalize_axes(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Normalizes dimension specs to tuples of positive integers."""
     reduction_axis = dim_nums.reduction_axis
-    reduction_axis = (reduction_axis,) if isinstance(reduction_axis, int) else reduction_axis
+    reduction_axis = (
+        (reduction_axis,) if isinstance(reduction_axis, int) else reduction_axis
+    )
     reduction_axes = tuple(ax % x.ndim for ax in reduction_axis)
 
     output_axis = dim_nums.output_axis
