@@ -1,6 +1,4 @@
-import jax
 import jax.numpy as jnp
-import optax
 from rollfast.optim.aurora import scale_by_aurora, aurora
 
 def test_scale_by_aurora():

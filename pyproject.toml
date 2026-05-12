@@ -51,7 +51,7 @@ dev = [
 ]
 
 [tool.ruff.lint]
-ignore = ["F722"]
+ignore = ["E731", "E741", "F722"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/conftest.py" = ["E402"]
+"tests/test_equimo_integration.py" = ["F401"]

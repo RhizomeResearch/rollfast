@@ -1,6 +1,4 @@
-import jax
 import jax.numpy as jnp
-import optax
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import aurora
 

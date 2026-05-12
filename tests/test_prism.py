@@ -1,6 +1,4 @@
-import jax
 import jax.numpy as jnp
-import optax
 from rollfast.optim.prism import scale_by_prism, prism
 
 def test_scale_by_prism():

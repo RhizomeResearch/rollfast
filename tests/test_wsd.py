@@ -1,4 +1,3 @@
-import jax.numpy as jnp
 from rollfast.schedules.wsd import wsd_schedule
 
 def test_wsd_schedule():

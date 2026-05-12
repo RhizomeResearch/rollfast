@@ -1,6 +1,4 @@
-import jax
 import jax.numpy as jnp
-import optax
 from rollfast.optim.psgd import scale_by_kron, kron
 
 def test_scale_by_kron():

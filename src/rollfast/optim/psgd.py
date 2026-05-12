@@ -548,8 +548,6 @@ def _update_precond_generic(
     keys = jax.random.split(key, len(Q))
 
     for i, q in enumerate(Q):
-        dtype_in = q.dtype
-
         l = L[i] if L is not None else None
 
         # Term 1 is always X @ X^H (Gram matrix of inputs)
@@ -598,7 +596,6 @@ def _update_precond_generic(
 
         else:
             d = q.shape[0]
-            dtype = q.dtype
 
             # Lipschitz Estimation
             if mode == "EQ":

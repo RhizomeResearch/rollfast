@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 import optax
 from rollfast.schedules.schedulefree import schedule_free, schedule_free_prism, schedule_free_kron, schedule_free_aurora, schedule_free_eval_params
