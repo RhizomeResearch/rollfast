@@ -16,10 +16,12 @@ pytestmark = pytest.mark.skipif(
 
 if EQUINOX_EQUIMO_AVAILABLE:
     from rollfast.optim.adam import adamw
+    from rollfast.optim.aurora import aurora, get_equinox_aurora_spec
     from rollfast.optim.prism import get_equinox_prism_spec, prism
     from rollfast.optim.psgd import kron
     from rollfast.schedules.schedulefree import (
         schedule_free_adam,
+        schedule_free_aurora,
         schedule_free_kron,
         schedule_free_prism,
     )
@@ -88,6 +90,16 @@ def test_prism(model_and_data):
     run_opt_step(model, tx, x, y, jr.PRNGKey(1))
 
 
+def test_aurora(model_and_data):
+    model, x, y = model_and_data
+    tx = aurora(
+        learning_rate=1e-3,
+        aurora_weight_dimension_numbers=get_equinox_aurora_spec,
+        polar_ns_iters=2,
+    )
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
 def test_kron(model_and_data):
     model, x, y = model_and_data
     tx = kron(learning_rate=1e-3, preconditioner_update_probability=1.0)
@@ -100,6 +112,17 @@ def test_schedule_free_prism(model_and_data):
         learning_rate=1e-3,
         total_steps=10,
         prism_weight_dimension_numbers=get_equinox_prism_spec,
+    )
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_schedule_free_aurora(model_and_data):
+    model, x, y = model_and_data
+    tx = schedule_free_aurora(
+        learning_rate=1e-3,
+        total_steps=10,
+        aurora_weight_dimension_numbers=get_equinox_aurora_spec,
+        polar_ns_iters=2,
     )
     run_opt_step(model, tx, x, y, jr.PRNGKey(1))
 

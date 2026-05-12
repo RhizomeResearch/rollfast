@@ -3,8 +3,9 @@
 `rollfast` is a high-performance optimization library for JAX, designed to
 implement cutting-edge optimizers that go beyond standard Euclidean gradient
 descent. It provides production-ready implementations of optimizers like
-**PSGD** (Preconditioned Stochastic Gradient Descent) and **PRISM** (Anisotropic
-Spectral Shaping), along with a robust **Schedule-Free** wrapper.
+**PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
+Spectral Shaping), and **Aurora** (leverage-aware rectangular matrix
+optimization), along with a robust **Schedule-Free** wrapper.
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
 `rollfast` prioritizes memory efficiency (via scanned layers and Kronecker
@@ -31,7 +32,23 @@ weight matrices directly.
 - **Reference**: *PRISM: Structured Optimization via Anisotropic Spectral
   Shaping* (Yang, 2026) and *Bidirectional-PRISM: Kronecker-Factored Optimization via Anisotropic Spectral Shaping* (Cesista, 2026).
 
-### 2. PSGD Kron (Lie Group Preconditioning)
+### 2. Aurora (Leverage-Aware Matrix Optimization)
+
+Aurora optimizes matrix-shaped parameters by applying polar-style updates with
+leverage-aware balancing for rectangular matrices. This gives rectangular layers
+row/column-aware update geometry instead of treating every element
+independently.
+
+- **Mechanism**: Uses Newton-Schulz polar iterations, with practical diagonal
+  balancing for rectangular matrices. `riemannian_aurora` provides a more
+  expensive balanced-Stiefel variant for reference-quality updates.
+- **Partitioning**: Automatically applies Aurora to matrix leaves and AdamW to
+  vectors/scalars. Explicit dimension specs can opt convolution kernels or other
+  high-rank tensors into Aurora.
+- **Reference**: *Aurora: A Leverage-Aware Optimizer for Rectangular Matrices*
+  (Dewulf et al., 2026).
+
+### 3. PSGD Kron (Lie Group Preconditioning)
 
 PSGD reformulates preconditioner estimation as a strongly convex optimization
 problem on Lie groups. It updates the preconditioner $Q$ (where $P = Q^T Q$)
@@ -41,7 +58,7 @@ using multiplicative updates that avoid explicit matrix inversion.
   triangular or orthogonal group.
 - **Reference**: *Stochastic Hessian Fittings with Lie Groups* (Li, 2024).
 
-### 3. Schedule-Free Optimization
+### 4. Schedule-Free Optimization
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
@@ -51,7 +68,7 @@ base optimizer) and an averaged sequence $x$ (used for evaluation). Available fo
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
-### 4. Magma (Momentum-Aligned Gradient Masking)
+### 5. Magma (Momentum-Aligned Gradient Masking)
 
 While training large language models (LLMs) typically relies almost exclusively
 on dense adaptive optimizers, `rollfast` implements a stochastic masking
@@ -117,7 +134,49 @@ optimizer = prism(
 )
 ```
 
-### 2. Schedule-Free Optimization
+### 2. Aurora
+
+Aurora uses the same automatic matrix/AdamW partitioning pattern as PRISM: 2D
+leaves are optimized with Aurora, while vectors and scalars fall back to AdamW.
+
+```python
+import jax.numpy as jnp
+from rollfast import aurora
+
+params = {
+    'linear': {'w': jnp.zeros((256, 128)), 'b': jnp.zeros((256,))},
+}
+
+# 'w' will be optimized by Aurora
+# 'b' will be optimized by AdamW
+optimizer = aurora(
+    learning_rate=3e-4,
+    b1=0.95,
+    pp_iterations=2,
+    pp_beta=0.5,
+    polar_ns_iters=12,
+    weight_decay=0.025,
+)
+
+opt_state = optimizer.init(params)
+```
+
+For convolution kernels or other high-rank tensors, pass an explicit dimension
+spec. The Equinox Aurora helper returns compatible specs for Aurora.
+
+```python
+from rollfast import aurora, get_equinox_aurora_spec
+
+optimizer = aurora(
+    learning_rate=3e-4,
+    aurora_weight_dimension_numbers=get_equinox_aurora_spec,
+)
+```
+
+Use `riemannian_aurora` when you want the more expensive balanced-Stiefel
+variant.
+
+### 3. Schedule-Free Optimization
 
 The `schedule_free_*` functions wrap base optimizers with the Schedule-Free logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
 
@@ -140,7 +199,7 @@ eval_params = schedule_free_eval_params(opt_state, params)
 
 *Note: We also provide `schedule_free_kron` and `schedule_free_adam`.*
 
-### 3. PSGD Kron
+### 4. PSGD Kron
 
 The classic Kronecker-factored PSGD optimizer.
 
@@ -274,6 +333,20 @@ WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
 | `shape_nesterov`     | `True`     | If True, shapes Nesterov momentum; otherwise shapes raw momentum.                           |
 | `adam_learning_rate` | `None`     | Optional override for the Adam branch learning rate. Defaults to `learning_rate` if None.   |
 
+### Aurora Specifics
+
+| Parameter                         | Default        | Description                                                                                         |
+| :-------------------------------- | :------------- | :-------------------------------------------------------------------------------------------------- |
+| `b1`                              | `0.95`         | Momentum used before Aurora shaping.                                                               |
+| `pp_iterations`                   | `2`            | Practical diagonal-balancing iterations for rectangular matrices.                                   |
+| `pp_beta`                         | `0.5`          | Exponent for Aurora's row-balance multiplier updates.                                               |
+| `polar_ns_iters`                  | `12`           | Newton-Schulz iterations used to approximate the polar factor.                                      |
+| `polar_compute_dtype`             | `jnp.bfloat16` | Compute dtype for the polar iterations.                                                            |
+| `aurora_weight_dimension_numbers` | `None`         | Optional PyTree/callable spec for reshaping high-rank tensors into matrices. Defaults to 2D leaves. |
+
+`riemannian_aurora` also exposes `outer_steps`, `cg_steps`, `riemannian_eta`,
+and `retraction_steps` for its balanced-Stiefel solve.
+
 ### PSGD Specifics
 
 | Parameter                   | Default | Description                                                                                                                                                 |
@@ -334,6 +407,18 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
   Title = {Bidirectional-PRISM: Kronecker-Factored Optimization via Anisotropic Spectral Shaping},
   Year = {2026},
   Url = {https://leloykun.github.io/ponder/shampoo-prism/},
+}
+```
+
+**Aurora:**
+
+```bibtex
+@article{dewulf2026aurora,
+  title   = {Aurora: A Leverage-Aware Optimizer for Rectangular Matrices},
+  author  = {Dewulf, Alec and Pai, Dhruv and Yang, Li and Zhang, Ashley
+             and Keigwin, Ben},
+  year    = {2026},
+  url     = {https://tilderesearch.com/blog/aurora}
 }
 ```
 

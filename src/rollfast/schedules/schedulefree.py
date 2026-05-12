@@ -7,6 +7,12 @@ import optax
 from optax._src import base, combine, numerics, transform
 
 from rollfast.optim.adam import adamw
+from rollfast.optim.aurora import (
+    AuroraWeightDimNumOrFn,
+    _is_dim_leaf,
+    scale_by_aurora,
+    scale_by_riemannian_aurora,
+)
 from rollfast.optim.prism import (
     WeightDimNumOrFn,
     _get_dimension_numbers,
@@ -710,6 +716,182 @@ def schedule_free_adam(
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
+    )
+
+
+def schedule_free_aurora(
+    learning_rate: float,
+    total_steps: int,
+    warmup_fraction: float = 0.1,
+    decay_fraction: float = 0.1,
+    weighting_mode: Union[str, Any] = "practical",
+    sf_b1: float = 0.90,
+    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    aurora_b1: float = 0.0,
+    pp_iterations: int = 2,
+    pp_beta: float = 0.5,
+    riemannian: bool = False,
+    outer_steps: int = 3,
+    cg_steps: int = 20,
+    riemannian_eta: float = 0.1,
+    retraction_steps: int = 2,
+    polar_ns_iters: int = 12,
+    polar_compute_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+    polar_output_dtype: jax.typing.DTypeLike = jnp.float32,
+    precision: jax.lax.PrecisionLike = jax.lax.Precision.DEFAULT,
+    eps: float = 1e-7,
+    shape_nesterov: bool = True,
+    weight_decay: float = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
+    raw_global_grad_clip: Optional[float] = None,
+    permissive_spike_protection: bool = True,
+    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    axis_name: Optional[str] = None,
+    guard_nonfinite: bool = True,
+    key: jax.Array = jax.random.PRNGKey(42),
+    adam_learning_rate: Optional[float] = None,
+    adam_b1: float = 0.0,
+    adam_b2: float = 0.999,
+    adam_eps: float = 1e-8,
+    aurora_weight_dimension_numbers: AuroraWeightDimNumOrFn | None = None,
+) -> base.GradientTransformationExtraArgs:
+    """Schedule-Free Aurora with Adam fallback for non-matrix leaves."""
+    if adam_learning_rate is None:
+        adam_learning_rate = learning_rate
+
+    aurora_schedule = wsd_schedule(
+        peak_lr=learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+    if adam_learning_rate == learning_rate:
+        adam_schedule = aurora_schedule
+    else:
+        adam_schedule = wsd_schedule(
+            peak_lr=adam_learning_rate,
+            total_steps=total_steps,
+            warmup_fraction=warmup_fraction,
+            decay_fraction=decay_fraction,
+        )
+
+    key_aurora, key_adam = jax.random.split(key, 2)
+
+    def get_resolved_dim_nums(params):
+        return _get_dimension_numbers(aurora_weight_dimension_numbers, params)
+
+    def param_labels(params):
+        dim_nums = get_resolved_dim_nums(params)
+        return jax.tree.map(
+            lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
+            dim_nums,
+            params,
+            is_leaf=_is_dim_leaf,
+        )
+
+    def aurora_weight_dim_nums_fn(params):
+        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+
+    if riemannian:
+        scale = scale_by_riemannian_aurora(
+            b1=aurora_b1,
+            outer_steps=outer_steps,
+            cg_steps=cg_steps,
+            riemannian_eta=riemannian_eta,
+            retraction_steps=retraction_steps,
+            polar_ns_iters=polar_ns_iters,
+            polar_compute_dtype=polar_compute_dtype,
+            polar_output_dtype=polar_output_dtype,
+            precision=precision,
+            eps=eps,
+            nesterov=False,
+            shape_nesterov=shape_nesterov,
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            use_magma=False,
+            weight_decay=0.0,
+            weight_decay_mask=None,
+            axis_name=axis_name,
+            guard_nonfinite=guard_nonfinite,
+            key=key_aurora,
+        )
+    else:
+        scale = scale_by_aurora(
+            b1=aurora_b1,
+            pp_iterations=pp_iterations,
+            pp_beta=pp_beta,
+            polar_ns_iters=polar_ns_iters,
+            polar_compute_dtype=polar_compute_dtype,
+            polar_output_dtype=polar_output_dtype,
+            precision=precision,
+            eps=eps,
+            nesterov=False,
+            shape_nesterov=shape_nesterov,
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            use_magma=False,
+            weight_decay=0.0,
+            weight_decay_mask=None,
+            axis_name=axis_name,
+            guard_nonfinite=guard_nonfinite,
+            key=key_aurora,
+        )
+
+    aurora_components = [scale]
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero:
+        aurora_components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+    aurora_components.append(transform.scale_by_learning_rate(aurora_schedule))
+
+    base_opt = combine.partition(
+        transforms={
+            "aurora": combine.chain(*aurora_components),
+            "adam": adamw(
+                learning_rate=adam_schedule,
+                b1=adam_b1,
+                b2=adam_b2,
+                eps=adam_eps,
+                weight_decay=weight_decay,
+                weight_decay_mask=weight_decay_mask,
+                mu_dtype=mu_dtype,
+                use_magma=False,
+                axis_name=axis_name,
+                key=key_adam,
+            ),
+        },
+        param_labels=param_labels,
+    )
+
+    def dual_schedule_fn(count, params):
+        labels = param_labels(params)
+        a_lr = aurora_schedule(count)
+        adam_lr = adam_schedule(count)
+        return jax.tree.map(
+            lambda label: (
+                None if label is None else (a_lr if label == "aurora" else adam_lr)
+            ),
+            labels,
+            is_leaf=lambda x: x is None,
+        )
+
+    return schedule_free(
+        base_optimizer=base_opt,
+        learning_rate=dual_schedule_fn,
+        b1=sf_b1,
+        weighting_mode=weighting_mode,
+        state_dtype=state_dtype,
+        key=key,
     )
 
 

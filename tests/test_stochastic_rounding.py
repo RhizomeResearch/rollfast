@@ -3,10 +3,12 @@ import jax.numpy as jnp
 import pytest
 
 from rollfast.optim.adam import adamw
+from rollfast.optim.aurora import aurora
 from rollfast.optim.prism import prism
 from rollfast.optim.psgd import kron
 from rollfast.schedules.schedulefree import (
     schedule_free_adam,
+    schedule_free_aurora,
     schedule_free_kron,
     schedule_free_prism,
 )
@@ -15,6 +17,7 @@ from rollfast.utils import apply_updates, apply_updates_prefix
 # Base optimizers and their kwargs
 base_optimizers = [
     (adamw, {"learning_rate": 1e-3}),
+    (aurora, {"learning_rate": 1e-3, "polar_ns_iters": 2}),
     (prism, {"learning_rate": 1e-3, "ns_iters": 2}),
     (kron, {"learning_rate": 1e-3, "preconditioner_update_probability": 1.0}),
 ]
@@ -22,6 +25,10 @@ base_optimizers = [
 # Schedule-free optimizers and their kwargs
 schedule_free_optimizers = [
     (schedule_free_adam, {"learning_rate": 1e-3, "total_steps": 10}),
+    (
+        schedule_free_aurora,
+        {"learning_rate": 1e-3, "total_steps": 10, "polar_ns_iters": 2},
+    ),
     (schedule_free_prism, {"learning_rate": 1e-3, "total_steps": 10, "ns_iters": 2}),
     (
         schedule_free_kron,
@@ -39,9 +46,14 @@ all_optimizers = base_optimizers + schedule_free_optimizers
 # Optimizers that support mu_dtype directly
 mu_dtype_optimizers = [
     (adamw, {"learning_rate": 1e-3}),
+    (aurora, {"learning_rate": 1e-3, "polar_ns_iters": 2}),
     (prism, {"learning_rate": 1e-3, "ns_iters": 2}),
     (kron, {"learning_rate": 1e-3, "preconditioner_update_probability": 1.0}),
     (schedule_free_adam, {"learning_rate": 1e-3, "total_steps": 10}),
+    (
+        schedule_free_aurora,
+        {"learning_rate": 1e-3, "total_steps": 10, "polar_ns_iters": 2},
+    ),
     (schedule_free_prism, {"learning_rate": 1e-3, "total_steps": 10, "ns_iters": 2}),
 ]
 
