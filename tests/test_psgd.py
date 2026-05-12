@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from rollfast.optim.psgd import scale_by_kron, kron
+from tests._typing import as_array_dict
 
 
 def test_scale_by_kron():
@@ -9,6 +10,7 @@ def test_scale_by_kron():
     tx = scale_by_kron(preconditioner_update_probability=1.0)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert updates["w"].shape == (4, 4)
 
@@ -19,6 +21,7 @@ def test_kron():
     tx = kron(learning_rate=0.01, preconditioner_update_probability=1.0)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert "b" in updates
     assert updates["w"].shape == (4, 4)

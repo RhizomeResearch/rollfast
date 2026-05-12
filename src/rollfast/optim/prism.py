@@ -1,5 +1,5 @@
 import math
-from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +31,6 @@ try:
         eqx.nn.ConvTranspose3d,
     )
 except ImportError:
-    eqx = None
     _EQUINOX_AVAILABLE = False
     _LINEAR_TYPES = ()
     _CONV_TYPES = ()
@@ -89,7 +88,7 @@ _is_prism_leaf = lambda x: (
 def get_equinox_prism_spec(
     model: Any,
     skip_depthwise_conv: bool = True,
-) -> WeightDimNumOrFn:
+) -> DimNumsTree:
     """
     Generates a PRISM dimension spec tree for an Equinox model.
 
@@ -108,6 +107,7 @@ def get_equinox_prism_spec(
             "The function `get_equinox_prism_spec` requires the `equinox` library. "
             "Please install it via `pip install equinox`."
         )
+    import equinox as eqx
 
     def _layer_to_spec(layer):
         target_spec = None
@@ -178,7 +178,8 @@ def _get_dimension_numbers(
         )
 
     if callable(weight_dimension_numbers):
-        return weight_dimension_numbers(params)
+        dim_num_fn = cast(Callable[[base.Params], DimNumsTree], weight_dimension_numbers)
+        return dim_num_fn(params)
 
     return weight_dimension_numbers
 
@@ -256,7 +257,10 @@ def _prism_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array
     leaves = jax.tree.leaves(grads)
     if not leaves:
         return jnp.array(0.0, dtype=jnp.float32)
-    local_sq = sum(jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves)
+    local_sq = sum(
+        (jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves),
+        start=jnp.array(0.0, dtype=jnp.float32),
+    )
     total_sq = dist_reduce(local_sq, axis_name, "sum")
     return jnp.sqrt(total_sq)
 
@@ -288,13 +292,13 @@ def _normalize_axes(
     x: jax.Array, dim_nums: PrismDimensionNumbers
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Normalizes dimension specs to tuples of positive integers."""
-    if isinstance(dim_nums.reduction_axis, int):
-        dim_nums = dim_nums._replace(reduction_axis=(dim_nums.reduction_axis,))
-    reduction_axes = tuple(ax % x.ndim for ax in dim_nums.reduction_axis)
+    reduction_axis = dim_nums.reduction_axis
+    reduction_axis = (reduction_axis,) if isinstance(reduction_axis, int) else reduction_axis
+    reduction_axes = tuple(ax % x.ndim for ax in reduction_axis)
 
-    if isinstance(dim_nums.output_axis, int):
-        dim_nums = dim_nums._replace(output_axis=(dim_nums.output_axis,))
-    output_axes = tuple(ax % x.ndim for ax in dim_nums.output_axis)
+    output_axis = dim_nums.output_axis
+    output_axis = (output_axis,) if isinstance(output_axis, int) else output_axis
+    output_axes = tuple(ax % x.ndim for ax in output_axis)
     return reduction_axes, output_axes
 
 
@@ -831,7 +835,7 @@ def scale_by_prism(
         else:
             resolved_dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
-        count_inc = numerics.safe_increment(state.count)
+        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
 
         # Pre-Preconditioning Clipping (Global)
         is_spike = jnp.array(False, dtype=jnp.bool_)
@@ -972,7 +976,12 @@ def scale_by_prism(
         _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
         if _may_have_wd and params is not None:
             wd_step = (
-                weight_decay(state.count) if callable(weight_decay) else weight_decay
+                cast(
+                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
+                    weight_decay,
+                )(state.count)
+                if callable(weight_decay)
+                else weight_decay
             )
             _wd_mask = None
             if weight_decay_mask is not None:

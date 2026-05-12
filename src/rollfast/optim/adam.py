@@ -1,7 +1,7 @@
 # This code is coming mostly from Optax itself.
 # I just modified it to add support for Magma
 # and stochastic rounding
-from typing import Any, Callable, NamedTuple, Optional, Union
+from typing import Any, Callable, NamedTuple, Optional, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -22,7 +22,7 @@ from rollfast.utils import (
 class ScaleByAdamState(NamedTuple):
     """State for the Adam algorithm."""
 
-    count: jax.typing.ArrayLike  # shape=(), dtype=jnp.int32.
+    count: jax.Array  # shape=(), dtype=jnp.int32.
     mu: base.Updates
     nu: base.Updates
     magma_s: Any
@@ -129,7 +129,7 @@ def scale_by_adam(
 
         mu_f32 = _tree_update_moment_f32(updates, state.mu, b1)
         nu_f32 = _tree_update_moment_sq_f32(updates, state.nu, b2)
-        count_inc = numerics.safe_increment(state.count)
+        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
 
         mu_bc_factor = 1.0 - b1**count_inc
         nu_bc_factor = 1.0 - b2**count_inc
@@ -181,7 +181,13 @@ def scale_by_adam(
             is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
 
-        wd_step = weight_decay(state.count) if callable(weight_decay) else weight_decay
+        wd_step = (
+            cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], weight_decay)(
+                state.count
+            )
+            if callable(weight_decay)
+            else weight_decay
+        )
 
         if params is not None:
             # Resolve the mask tree natively

@@ -12,6 +12,7 @@ from rollfast.schedules.schedulefree import (
     schedule_free_kron,
     schedule_free_prism,
 )
+from tests._typing import as_array_dict
 from rollfast.utils import apply_updates, apply_updates_prefix
 
 # Base optimizers and their kwargs
@@ -70,6 +71,7 @@ def test_mu_dtype_bf16(optimizer_fn, kwargs):
 
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
 
     assert "w" in updates
     assert updates["w"].shape == (4, 4)
@@ -90,6 +92,7 @@ def test_pure_bf16_apply_updates(optimizer_fn, kwargs):
 
     # Stochastic rounding
     new_params = apply_updates(params, updates, key, stochastic=True)
+    new_params = as_array_dict(new_params)
 
     assert "w" in new_params
     assert new_params["w"].dtype == jnp.bfloat16
@@ -110,6 +113,7 @@ def test_pure_bf16_apply_updates_prefix(optimizer_fn, kwargs):
 
     # Stochastic rounding with prefix
     new_params = apply_updates_prefix(params, updates, key, stochastic=True)
+    new_params = as_array_dict(new_params)
 
     assert "w" in new_params
     assert new_params["w"].dtype == jnp.bfloat16

@@ -155,7 +155,7 @@ def _tree_stochastic_cast_like(
 
 
 def _tree_update_moment_f32(
-    updates: base.Updates, moments: base.Updates, decay: float
+    updates: base.Updates, moments: base.Updates, decay: jax.typing.ArrayLike
 ) -> base.Updates:
     """
     Prevents accumulator truncation. Optax internally casts to the state's dtype.
@@ -176,7 +176,7 @@ def _tree_update_moment_f32(
 
 
 def _tree_update_moment_sq_f32(
-    updates: base.Updates, moments: base.Updates, decay: float
+    updates: base.Updates, moments: base.Updates, decay: jax.typing.ArrayLike
 ) -> base.Updates:
     """
     Prevents sub-normal variance from vanishing. Squaring an unscaled bf16 gradient
@@ -198,7 +198,7 @@ def _tree_update_moment_sq_f32(
     )
 
 
-def _compute_ema_f32(m, u, b1):
+def _compute_ema_f32(m, u, b1: jax.typing.ArrayLike):
     if m is None or u is None:
         return None
     return b1 * m.astype(jnp.float32) + (1.0 - b1) * u.astype(jnp.float32)

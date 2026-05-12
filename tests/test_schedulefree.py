@@ -7,6 +7,7 @@ from rollfast.schedules.schedulefree import (
     schedule_free_aurora,
     schedule_free_eval_params,
 )
+from tests._typing import as_array_dict
 
 
 def test_schedule_free():
@@ -16,9 +17,11 @@ def test_schedule_free():
     tx = schedule_free(base_opt, learning_rate=0.01)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
 
     eval_params = schedule_free_eval_params(state, params)
+    eval_params = as_array_dict(eval_params)
     assert "w" in eval_params
 
 
@@ -28,6 +31,7 @@ def test_schedule_free_prism():
     tx = schedule_free_prism(learning_rate=0.01, total_steps=100)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
 
 
@@ -41,6 +45,7 @@ def test_schedule_free_aurora():
     )
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
 
 
@@ -52,4 +57,5 @@ def test_schedule_free_kron():
     )
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates

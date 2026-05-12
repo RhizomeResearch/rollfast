@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import aurora
+from tests._typing import as_array_dict
 
 
 def test_magma_via_adam():
@@ -9,6 +10,7 @@ def test_magma_via_adam():
     tx = adamw(learning_rate=0.01, use_magma=True)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert updates["w"].shape == (2, 2)
 
@@ -19,5 +21,6 @@ def test_magma_via_aurora():
     tx = aurora(learning_rate=0.01, use_magma=True, polar_ns_iters=2)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert updates["w"].shape == (2, 2)

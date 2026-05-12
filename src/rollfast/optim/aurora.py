@@ -11,7 +11,7 @@ rate scaling in the same style as `rollfast.optim.adam.adamw` and
 
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -52,7 +52,6 @@ try:
         eqx.nn.ConvTranspose3d,
     )
 except ImportError:
-    eqx = None
     _AURORA_EQUINOX_AVAILABLE = False
     _AURORA_LINEAR_TYPES = ()
     _AURORA_CONV_TYPES = ()
@@ -66,7 +65,7 @@ _SIMPLE_QUINTIC_COEFFS = (2.0, -1.5, 0.5)
 def get_equinox_aurora_spec(
     model: Any,
     skip_depthwise_conv: bool = True,
-) -> AuroraWeightDimNumOrFn:
+) -> base.Params:
     """Generates an Aurora dimension spec tree for an Equinox model.
 
     This is the Aurora analogue of `get_equinox_prism_spec`.
@@ -92,6 +91,7 @@ def get_equinox_aurora_spec(
             "The function `get_equinox_aurora_spec` requires the `equinox` "
             "library. Please install it via `pip install equinox`."
         )
+    import equinox as eqx
 
     def _layer_to_spec(layer):
         target_spec = None
@@ -194,7 +194,7 @@ def _tree_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
     if not sq_terms:
         local_sq = jnp.array(0.0, dtype=jnp.float32)
     else:
-        local_sq = sum(sq_terms)
+        local_sq = sum(sq_terms, start=jnp.array(0.0, dtype=jnp.float32))
     total_sq = dist_reduce(local_sq, axis_name, "sum")
     return jnp.sqrt(total_sq)
 
@@ -570,8 +570,12 @@ def _scale_by_aurora_impl(
         mu_dtype = jnp.float32
     else:
         mu_dtype = utils.canonicalize_dtype(mu_dtype)
-    polar_compute_dtype = utils.canonicalize_dtype(polar_compute_dtype)
-    polar_output_dtype = utils.canonicalize_dtype(polar_output_dtype)
+    polar_compute_dtype = cast(
+        jax.typing.DTypeLike, utils.canonicalize_dtype(polar_compute_dtype)
+    )
+    polar_output_dtype = cast(
+        jax.typing.DTypeLike, utils.canonicalize_dtype(polar_output_dtype)
+    )
 
     def init_fn(params):
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)
@@ -614,7 +618,7 @@ def _scale_by_aurora_impl(
         else:
             resolved_dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
-        count_inc = numerics.safe_increment(state.count)
+        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
 
         if raw_global_grad_clip is not None:
             g_norm = _tree_global_norm(updates, axis_name=axis_name)
@@ -748,7 +752,12 @@ def _scale_by_aurora_impl(
         _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
         if _may_have_wd and params is not None:
             wd_step = (
-                weight_decay(state.count) if callable(weight_decay) else weight_decay
+                cast(
+                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
+                    weight_decay,
+                )(state.count)
+                if callable(weight_decay)
+                else weight_decay
             )
             _wd_mask = None
             if weight_decay_mask is not None:

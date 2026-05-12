@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from rollfast.optim.adam import scale_by_adam, adamw
+from tests._typing import as_array_dict
 
 
 def test_scale_by_adam():
@@ -8,6 +9,7 @@ def test_scale_by_adam():
     tx = scale_by_adam()
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert updates["w"].shape == (2, 2)
 
@@ -18,5 +20,6 @@ def test_adamw():
     tx = adamw(learning_rate=0.01)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert updates["w"].shape == (2, 2)

@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 from rollfast.optim.prism import scale_by_prism, prism
+from tests._typing import as_array_dict
 
 
 def test_scale_by_prism():
@@ -8,6 +9,7 @@ def test_scale_by_prism():
     tx = scale_by_prism()
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert updates["w"].shape == (4, 4)
 
@@ -18,6 +20,7 @@ def test_prism():
     tx = prism(learning_rate=0.01)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
     assert "w" in updates
     assert "b" in updates
     assert updates["w"].shape == (4, 4)

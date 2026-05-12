@@ -1,7 +1,8 @@
 import string
+from collections.abc import Callable as CallableABC
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, List, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -89,7 +90,10 @@ def _compute_global_norm(
     if not leaves:
         return jnp.array(0.0)
 
-    local_sq = sum(jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves)
+    local_sq = sum(
+        (jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves),
+        start=jnp.array(0.0, dtype=jnp.float32),
+    )
     total_sq = dist_reduce(local_sq, axis_name, "sum")
     return jnp.sqrt(total_sq)
 
@@ -108,7 +112,10 @@ def _compute_global_rms_scale(
     if not valid_pgs:
         return jnp.array(1.0, dtype=jnp.float32)
 
-    local_sq = sum(jnp.sum(numerics.abs_sq(pg)) for pg in valid_pgs)
+    local_sq = sum(
+        (jnp.sum(numerics.abs_sq(pg)) for pg in valid_pgs),
+        start=jnp.array(0.0, dtype=jnp.float32),
+    )
     local_numel = sum(pg.size for pg in valid_pgs)
 
     total_sq = dist_reduce(local_sq, axis_name, "sum")
@@ -126,7 +133,7 @@ def _compute_global_rms_scale(
 def _compute_init_scale_from_grads(
     grads: List[jax.Array],
     damping: float,
-    dtype: jnp.dtype = jnp.float32,
+    dtype: jax.typing.DTypeLike = jnp.float32,
 ) -> jax.Array:
     """Computes whitening init scale from first gradients.
 
@@ -342,7 +349,7 @@ def _init_Q_exprs(
     memory_save_mode,
     dtype,
     existing_Q=None,
-) -> Tuple[List[jax.Array], Tuple[str, Tuple[str, ...], str]]:
+) -> Any:
     """Initialize preconditioner Q and einsum expressions for a tensor t.
 
     Splits a tensor shape into factors. Small dimensions become diagonal vectors;
@@ -715,9 +722,9 @@ def _balance_Q(Q: List[jax.Array], axis_name: Optional[str] = None) -> List[jax.
 
 def scale_by_kron(
     b1: float = 0.9,
-    preconditioner_update_probability: Union[
-        float, Callable[[int], float]
-    ] = precond_update_prob_schedule(),
+    preconditioner_update_probability: base.ScalarOrSchedule = (
+        precond_update_prob_schedule()
+    ),
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
@@ -991,10 +998,10 @@ def scale_by_kron(
             key=key,
         )
 
-    def update_fn(updates: base.Updates, state: KronState, params: base.Params = None):
+    def update_fn(updates, state, params=None):
         raw_gradients = updates
 
-        count_inc = safe_int32_increment(state.count)
+        count_inc = cast(jax.Array, safe_int32_increment(state.count))
 
         if use_magma:
             key, key_next, magma_key = jax.random.split(state.key, 3)
@@ -1016,8 +1023,13 @@ def scale_by_kron(
             scanned_layers_ = jax.tree.map(lambda _: False, updates)
 
         update_prob_in = preconditioner_update_probability
-        if isinstance(preconditioner_update_probability, Callable):
-            update_prob_in = preconditioner_update_probability(count_inc)
+        if isinstance(preconditioner_update_probability, CallableABC):
+            update_prob_fn = cast(
+                Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
+                preconditioner_update_probability,
+            )
+            update_prob_in = update_prob_fn(count_inc)
+        update_prob = jnp.asarray(update_prob_in, dtype=jnp.float32)
 
         mu_to_save = None
         mu_f32 = None
@@ -1261,10 +1273,10 @@ def scale_by_kron(
                 return new_Qs, new_Ls
 
         key, key_dec, key_upd = jax.random.split(key, 3)
-        do_update = jax.random.uniform(key_dec) < update_prob_in
+        do_update = jax.random.uniform(key_dec) < update_prob
 
         # Use >= 1.0 to be safe against tiny float precision issues, though == 1.0 usually works for manually set schedules.
-        is_early_training = update_prob_in >= 1.0
+        is_early_training = update_prob >= 1.0
         permissive = jnp.logical_and(permissive_spike_protection, is_early_training)
         # protect curvature state but still keep updates early in the training
         # Note: raw_global_grad_clip is static (Python variable), so 'is not None' is safe.
@@ -1363,7 +1375,12 @@ def scale_by_kron(
         _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
         if _may_have_wd and params is not None:
             wd_step = (
-                weight_decay(state.count) if callable(weight_decay) else weight_decay
+                cast(
+                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
+                    weight_decay,
+                )(state.count)
+                if callable(weight_decay)
+                else weight_decay
             )
             _wd_mask = None
             if weight_decay_mask is not None:
@@ -1443,13 +1460,13 @@ def scale_by_kron(
 
 
 def kron(
-    learning_rate: Union[float, Callable[[int], float]] = 0.001,
+    learning_rate: base.ScalarOrSchedule = 0.001,
     b1: float = 0.9,
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
-    preconditioner_update_probability: Union[
-        float, Callable[[int], float]
-    ] = precond_update_prob_schedule(),
+    preconditioner_update_probability: base.ScalarOrSchedule = (
+        precond_update_prob_schedule()
+    ),
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
@@ -1493,7 +1510,7 @@ def kron(
         On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
         arXiv preprint arXiv:2602.15322.
     """
-    optimizer = [
+    optimizer: List[Any] = [
         scale_by_kron(
             b1=b1,
             preconditioner_update_probability=preconditioner_update_probability,

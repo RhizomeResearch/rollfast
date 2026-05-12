@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +29,11 @@ from rollfast.optim.psgd import (
 from rollfast.schedules.wsd import wsd_schedule
 from rollfast.utils import _stochastic_round_bf16
 
+ScheduleFreeLearningRate = Union[
+    base.ScalarOrSchedule,
+    Callable[[jax.typing.ArrayLike, Optional[base.Params]], Any],
+]
+
 
 class WeightingMode(str, Enum):
     """
@@ -55,7 +60,7 @@ class ScheduleFreeState(NamedTuple):
 
 def schedule_free(
     base_optimizer: base.GradientTransformation,
-    learning_rate: Union[base.ScalarOrSchedule, Callable[[int], base.Params]],
+    learning_rate: ScheduleFreeLearningRate,
     b1: float = 0.9,
     weighting_mode: Union[str, WeightingMode] = WeightingMode.SCHEDULET,
     state_dtype: Optional[jax.typing.DTypeLike] = None,
@@ -125,10 +130,11 @@ def schedule_free(
         next_state_key, sr_key = jax.random.split(state.key, 2)
 
         if callable(learning_rate):
+            lr_fn = cast(Any, learning_rate)
             try:
-                lr_tree = learning_rate(state.step_count, params)
+                lr_tree = lr_fn(state.step_count, params)
             except TypeError:
-                lr_tree = learning_rate(state.step_count)
+                lr_tree = lr_fn(state.step_count)
         else:
             lr_tree = learning_rate
 
@@ -259,7 +265,7 @@ def schedule_free(
         new_state = ScheduleFreeState(
             b1=state.b1,
             weight_sum=new_weight_sum,
-            step_count=numerics.safe_increment(state.step_count),
+            step_count=cast(jax.Array, numerics.safe_increment(state.step_count)),
             base_state=new_base_state,
             z=z_next,
             key=next_state_key,
@@ -491,9 +497,9 @@ def schedule_free_kron(
     weight_decay: float = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     # PSGD Kron parameters
-    preconditioner_update_probability: Union[
-        float, Callable[[int], float]
-    ] = precond_update_prob_schedule(),
+    preconditioner_update_probability: base.ScalarOrSchedule = (
+        precond_update_prob_schedule()
+    ),
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
@@ -583,7 +589,7 @@ def schedule_free_kron(
 
     # CRITICAL: b1 must be 0.0 because Schedule-Free handles momentum via the z-sequence.
     # CRITICAL: whiten_grad must be True because there is no internal momentum buffer to whiten.
-    base_opt_components = [
+    base_opt_components: list[Any] = [
         scale_by_kron(
             b1=0.0,
             whiten_grad=True,
