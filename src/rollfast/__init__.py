@@ -4,6 +4,13 @@ from .optim.aurora import (
     get_equinox_aurora_spec as get_equinox_aurora_spec,
     riemannian_aurora as riemannian_aurora,
 )
+from .optim.hyperball import (
+    adamw_hyperball as adamw_hyperball,
+    aurora_hyperball as aurora_hyperball,
+    kron_hyperball as kron_hyperball,
+    prism_hyperball as prism_hyperball,
+    riemannian_aurora_hyperball as riemannian_aurora_hyperball,
+)
 from .optim.prism import (
     get_equinox_prism_spec as get_equinox_prism_spec,
     prism as prism,
@@ -22,4 +29,4 @@ from .utils import (
     apply_updates_prefix as apply_updates_prefix,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
