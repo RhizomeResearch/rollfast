@@ -29,4 +29,4 @@ from .utils import (
     apply_updates_prefix as apply_updates_prefix,
 )
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"

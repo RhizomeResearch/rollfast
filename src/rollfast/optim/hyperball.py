@@ -123,6 +123,11 @@ def _default_rank2_hyperball_mask(params: base.Params) -> base.Params:
     )
 
 
+def _is_mask_callable(mask: Any) -> bool:
+    callable_leaves = jax.tree.leaves(jax.tree.map(callable, mask))
+    return callable(mask) and len(callable_leaves) > 0 and all(callable_leaves)
+
+
 def _resolve_mask(
     mask: MaskOrFn,
     params: base.Params,
@@ -130,9 +135,9 @@ def _resolve_mask(
 ) -> base.Params:
     if mask is None:
         return default_fn(params)
-    if callable(mask):
+    if _is_mask_callable(mask):
         return cast(Callable[[base.Params], Any], mask)(params)
-    return mask
+    return cast(base.Params, mask)
 
 
 def _mask_leaf_value(mask_leaf: Any) -> jax.Array:

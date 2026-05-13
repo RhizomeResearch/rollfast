@@ -1,5 +1,6 @@
-from typing import cast
+from typing import Any, cast
 
+import jax
 import jax.numpy as jnp
 import optax
 import pytest
@@ -16,6 +17,23 @@ from rollfast.optim.hyperball import (
     scale_by_hyperball,
 )
 from tests._typing import ArrayDict, as_array_dict
+
+
+@jax.tree_util.register_pytree_node_class
+class CallableTree:
+    def __init__(self, w, b):
+        self.w = w
+        self.b = b
+
+    def __call__(self, *_args, **_kwargs):
+        raise AssertionError("callable PyTree masks must not be invoked")
+
+    def tree_flatten(self):
+        return (self.w, self.b), None
+
+    @classmethod
+    def tree_unflatten(cls, _aux_data, children):
+        return cls(*children)
 
 
 def _params() -> ArrayDict:
@@ -79,6 +97,33 @@ def test_apply_hyperball_fallback_weight_decay_is_opt_in():
     updates = as_array_dict(updates)
 
     assert jnp.allclose(updates["b"], -0.1 * (directions["b"] + 0.5 * params["b"]))
+
+
+def test_apply_hyperball_accepts_callable_pytree_masks():
+    params = CallableTree(
+        w=jnp.arange(1, 17, dtype=jnp.float32).reshape(4, 4),
+        b=jnp.ones((4,), dtype=jnp.float32),
+    )
+    directions = CallableTree(
+        w=jnp.ones((4, 4), dtype=jnp.float32) * 0.1,
+        b=jnp.ones((4,), dtype=jnp.float32) * 0.25,
+    )
+    mask = CallableTree(w=True, b=False)
+    tx = apply_hyperball(
+        learning_rate=0.01,
+        weight_decay=0.5,
+        weight_decay_mask=mask,
+        hyperball_mask=mask,
+        fallback_weight_decay=True,
+    )
+
+    state = tx.init(cast(Any, params))
+    updates, _ = tx.update(cast(Any, directions), state, cast(Any, params))
+    updates = cast(CallableTree, updates)
+
+    assert updates.w.shape == (4, 4)
+    assert updates.b.shape == (4,)
+    assert jnp.allclose(updates.b, -0.01 * directions.b)
 
 
 def test_apply_hyperball_caution_uses_extra_grad_args():

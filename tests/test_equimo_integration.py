@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import pytest
@@ -17,6 +18,13 @@ pytestmark = pytest.mark.skipif(
 if EQUINOX_EQUIMO_AVAILABLE:
     from rollfast.optim.adam import adamw
     from rollfast.optim.aurora import aurora, get_equinox_aurora_spec
+    from rollfast.optim.hyperball import (
+        adamw_hyperball,
+        aurora_hyperball,
+        kron_hyperball,
+        prism_hyperball,
+        riemannian_aurora_hyperball,
+    )
     from rollfast.optim.prism import get_equinox_prism_spec, prism
     from rollfast.optim.psgd import kron
     from rollfast.schedules.schedulefree import (
@@ -75,6 +83,15 @@ def run_opt_step(model, tx, x, y, key):
     return model, loss
 
 
+def get_equinox_weight_decay_mask(model):
+    params, _ = eqx.partition(model, eqx.is_inexact_array)
+    return jax.tree.map(
+        lambda p: False if p is None else getattr(p, "ndim", 0) >= 2,
+        params,
+        is_leaf=lambda p: p is None,
+    )
+
+
 def test_adamw(model_and_data):
     model, x, y = model_and_data
     tx = adamw(learning_rate=1e-3, use_magma=True)
@@ -103,6 +120,66 @@ def test_aurora(model_and_data):
 def test_kron(model_and_data):
     model, x, y = model_and_data
     tx = kron(learning_rate=1e-3, preconditioner_update_probability=1.0)
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_adamw_hyperball(model_and_data):
+    model, x, y = model_and_data
+    tx = adamw_hyperball(learning_rate=1e-3, use_magma=True)
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_prism_hyperball(model_and_data):
+    model, x, y = model_and_data
+    tx = prism_hyperball(
+        learning_rate=1e-3,
+        prism_weight_dimension_numbers=get_equinox_prism_spec,
+    )
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_aurora_hyperball(model_and_data):
+    model, x, y = model_and_data
+    tx = aurora_hyperball(
+        learning_rate=1e-3,
+        aurora_weight_dimension_numbers=get_equinox_aurora_spec,
+        polar_ns_iters=2,
+    )
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_aurora_hyperball_with_equinox_weight_decay_mask(model_and_data):
+    model, x, y = model_and_data
+    weight_decay_mask = get_equinox_weight_decay_mask(model)
+    tx = aurora_hyperball(
+        learning_rate=lambda step: jnp.asarray(1e-3),
+        weight_decay=0.01,
+        weight_decay_mask=weight_decay_mask,
+        adam_learning_rate=lambda step: jnp.asarray(1e-3),
+        aurora_weight_dimension_numbers=get_equinox_prism_spec,
+        polar_ns_iters=2,
+    )
+
+    assert callable(weight_decay_mask)
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_riemannian_aurora_hyperball(model_and_data):
+    model, x, y = model_and_data
+    tx = riemannian_aurora_hyperball(
+        learning_rate=1e-3,
+        aurora_weight_dimension_numbers=get_equinox_aurora_spec,
+        outer_steps=1,
+        cg_steps=2,
+        retraction_steps=1,
+        polar_ns_iters=2,
+    )
+    run_opt_step(model, tx, x, y, jr.PRNGKey(1))
+
+
+def test_kron_hyperball(model_and_data):
+    model, x, y = model_and_data
+    tx = kron_hyperball(learning_rate=1e-3, preconditioner_update_probability=1.0)
     run_opt_step(model, tx, x, y, jr.PRNGKey(1))
 
 
