@@ -5,7 +5,8 @@ implement cutting-edge optimizers that go beyond standard Euclidean gradient
 descent. It provides production-ready implementations of optimizers like
 **PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
 Spectral Shaping), and **Aurora** (leverage-aware rectangular matrix
-optimization), along with a robust **Schedule-Free** wrapper.
+optimization), plus **Hyperball** norm-preserving weight decay and a robust
+**Schedule-Free** wrapper.
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
 `rollfast` prioritizes memory efficiency (via scanned layers and Kronecker
@@ -58,7 +59,27 @@ using multiplicative updates that avoid explicit matrix inversion.
   triangular or orthogonal group.
 - **Reference**: *Stochastic Hessian Fittings with Lie Groups* (Li, 2024).
 
-### 4. Schedule-Free Optimization
+### 4. Hyperball Optimization
+
+Hyperball replaces ordinary decoupled weight decay with a terminal projection
+that keeps selected parameters on the L2 sphere defined by their initialization
+norm. Given an unscaled optimizer direction, Hyperball adds the decay direction,
+normalizes the result, takes a step proportional to the initial norm, and
+projects the parameter back to that sphere.
+
+- **Mechanism**: `apply_hyperball` is a terminal Optax transform; it should be
+  the final transform in a chain and should not be followed by a learning-rate
+  scale transform.
+- **Wrappers**: `adamw_hyperball`, `kron_hyperball`, `prism_hyperball`,
+  `aurora_hyperball`, and `riemannian_aurora_hyperball` replace decoupled
+  weight decay in the corresponding optimizer families.
+- **Partitioning**: By default, Hyperball applies to rank >= 2 leaves. PRISM and
+  Aurora wrappers apply Hyperball to the same leaves routed to the structured
+  optimizer branch, while fallback leaves use Adam-style updates.
+- **Reference**: *Fantastic Pretraining Optimizers and Where to Find Them 2.1:
+  Hyperball Optimization* (Wen et al., 2025).
+
+### 5. Schedule-Free Optimization
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
@@ -68,7 +89,7 @@ base optimizer) and an averaged sequence $x$ (used for evaluation). Available fo
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
-### 5. Magma (Momentum-Aligned Gradient Masking)
+### 6. Magma (Momentum-Aligned Gradient Masking)
 
 While training large language models (LLMs) typically relies almost exclusively
 on dense adaptive optimizers, `rollfast` implements a stochastic masking
@@ -176,7 +197,39 @@ optimizer = aurora(
 Use `riemannian_aurora` when you want the more expensive balanced-Stiefel
 variant.
 
-### 3. Schedule-Free Optimization
+### 3. Hyperball
+
+Hyperball wrappers use the same base optimizer arguments as their non-Hyperball
+counterparts, but interpret `weight_decay` as the Hyperball decay coefficient on
+selected leaves.
+
+```python
+from rollfast.optim.hyperball import prism_hyperball
+
+optimizer = prism_hyperball(
+    learning_rate=1e-3,
+    weight_decay=0.01,
+    mode='bidirectional',
+    inv_steps=8,
+    hyperball_mask=None,       # Defaults to the PRISM-routed leaves
+    fallback_weight_decay=False
+)
+```
+
+For direct Optax composition, use `apply_hyperball` as the final transform in
+the chain.
+
+```python
+import optax
+from rollfast.optim.hyperball import apply_hyperball
+
+optimizer = optax.chain(
+    optax.scale_by_adam(),
+    apply_hyperball(learning_rate=1e-3, weight_decay=0.01)
+)
+```
+
+### 4. Schedule-Free Optimization
 
 The `schedule_free_*` functions wrap base optimizers with the Schedule-Free logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
 
@@ -199,7 +252,7 @@ eval_params = schedule_free_eval_params(opt_state, params)
 
 *Note: We also provide `schedule_free_kron` and `schedule_free_adam`.*
 
-### 4. PSGD Kron
+### 5. PSGD Kron
 
 The classic Kronecker-factored PSGD optimizer.
 
@@ -347,6 +400,16 @@ WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
 `riemannian_aurora` also exposes `outer_steps`, `cg_steps`, `riemannian_eta`,
 and `retraction_steps` for its balanced-Stiefel solve.
 
+### Hyperball Specifics
+
+| Parameter                 | Default | Description                                                                                                            |
+| :------------------------ | :------ | :--------------------------------------------------------------------------------------------------------------------- |
+| `hyperball_mask`          | `None`  | Boolean PyTree/callable selecting leaves projected by Hyperball. Defaults to rank >= 2 leaves, or the structured branch for PRISM/Aurora wrappers. |
+| `fallback_weight_decay`   | `False` | If True, non-Hyperball leaves receive ordinary decoupled AdamW-style decay.                                            |
+| `caution`                 | `False` | Applies cautious update masking before Hyperball normalization.                                                        |
+| `cautious_weight_decay`   | `False` | Applies the decay term elementwise only where `sign(param) == sign(direction)`.                                        |
+| `hyperball_eps` / `eps`   | `1e-12` | Minimum norm divisor used by the projection. Wrapper functions expose this as `hyperball_eps`; `apply_hyperball` uses `eps`. |
+
 ### PSGD Specifics
 
 | Parameter                   | Default | Description                                                                                                                                                 |
@@ -448,6 +511,20 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
   author={Li, Xi-Lin},
   journal={arXiv preprint arXiv:2402.11858},
   year={2024}
+}
+```
+
+**Hyperball:**
+
+```bibtex
+@online{wen2025hyperball,
+  title   = {Fantastic Pretraining Optimizers and Where to Find Them 2.1: Hyperball Optimization},
+  author  = {Wen, Kaiyue and Dang, Xingyu and Lyu, Kaifeng and Ma, Tengyu and Liang, Percy},
+  year    = {2025},
+  month   = {12},
+  day     = {15},
+  url     = {https://tinyurl.com/muonh},
+  urldate = {2025-12-15}
 }
 ```
 
