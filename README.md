@@ -4,9 +4,10 @@
 implement cutting-edge optimizers that go beyond standard Euclidean gradient
 descent. It provides production-ready implementations of optimizers like
 **PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
-Spectral Shaping), and **Aurora** (leverage-aware rectangular matrix
-optimization), plus **Hyperball** norm-preserving weight decay and a robust
-**Schedule-Free** wrapper.
+Spectral Shaping), **Aurora** (leverage-aware rectangular matrix optimization),
+and **Pion** (spectrum-preserving orthogonal equivalence updates), plus
+**Hyperball** norm-preserving weight decay and a robust **Schedule-Free**
+wrapper.
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
 `rollfast` prioritizes memory efficiency (via scanned layers and Kronecker
@@ -79,7 +80,23 @@ projects the parameter back to that sphere.
 - **Reference**: *Fantastic Pretraining Optimizers and Where to Find Them 2.1:
   Hyperball Optimization* (Wen et al., 2025).
 
-### 5. Schedule-Free Optimization
+### 5. Pion (Spectrum-Preserving Orthogonal Equivalence)
+
+Pion updates matrix parameters by multiplying the current weight by left and
+right orthogonal transformations rather than adding an ambient-space update.
+This keeps each optimized matrix on its iso-spectral manifold, preserving its
+singular values up to the numerical error of the second-order exponential
+approximation.
+
+- **Mechanism**: Builds in-side and out-side skew-symmetric Lie-algebra
+  gradients, tracks Adam-style moments in those tangent spaces, and applies
+  RMS-normalized second-order exponential updates.
+- **Partitioning**: Automatically routes 2D matrices to Pion and routes vectors,
+  scalars, and unspecified tensors to AdamW.
+- **Reference**: *Pion: A Spectrum-Preserving Optimizer via Orthogonal
+  Equivalence Transformation* (Shi et al., 2026).
+
+### 6. Schedule-Free Optimization
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
@@ -89,7 +106,7 @@ base optimizer) and an averaged sequence $x$ (used for evaluation). Available fo
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
-### 6. Magma (Momentum-Aligned Gradient Masking)
+### 7. Magma (Momentum-Aligned Gradient Masking)
 
 While training large language models (LLMs) typically relies almost exclusively
 on dense adaptive optimizers, `rollfast` implements a stochastic masking
@@ -252,7 +269,21 @@ eval_params = schedule_free_eval_params(opt_state, params)
 
 *Note: We also provide `schedule_free_kron` and `schedule_free_adam`.*
 
-### 5. PSGD Kron
+### 5. Pion
+
+```python
+from rollfast import pion
+
+optimizer = pion(
+    learning_rate=1e-3,
+    b1=0.9,
+    b2=0.999,
+    rms_constant=1.0,
+    alternating=True,
+)
+```
+
+### 6. PSGD Kron
 
 The classic Kronecker-factored PSGD optimizer.
 
@@ -482,6 +513,18 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
              and Keigwin, Ben},
   year    = {2026},
   url     = {https://tilderesearch.com/blog/aurora}
+}
+```
+
+**Pion:**
+
+```bibtex
+@article{pion2026,
+  title   = {Pion: A Spectrum-Preserving Optimizer via Orthogonal Equivalence Transformation},
+  author  = {Shi, Kexuan and Li, Hanxuan and Qiu, Zeju and Wen, Yandong
+             and Buchholz, Simon and Liu, Weiyang},
+  journal = {arXiv preprint arXiv:2605.12492},
+  year    = {2026}
 }
 ```
 

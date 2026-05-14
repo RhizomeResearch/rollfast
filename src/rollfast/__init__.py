@@ -11,6 +11,8 @@ from .optim.hyperball import (
     prism_hyperball as prism_hyperball,
     riemannian_aurora_hyperball as riemannian_aurora_hyperball,
 )
+from .optim.pion import pion as pion
+from .optim.pion import scale_by_pion as scale_by_pion
 from .optim.prism import (
     get_equinox_prism_spec as get_equinox_prism_spec,
     prism as prism,
