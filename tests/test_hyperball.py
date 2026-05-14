@@ -15,6 +15,7 @@ from rollfast.optim.hyperball import (
     muon_hyperball,
     prism_hyperball,
     riemannian_aurora_hyperball,
+    rmnp_hyperball,
     scale_by_hyperball,
 )
 from tests._typing import ArrayDict, as_array_dict
@@ -196,6 +197,7 @@ def test_kron_hyperball_accepts_extra_grad_args():
             {"learning_rate": 0.01, "preconditioner_update_probability": 1.0},
         ),
         (muon_hyperball, {"learning_rate": 0.01, "ns_steps": 2}),
+        (rmnp_hyperball, {"learning_rate": 0.01}),
         (prism_hyperball, {"learning_rate": 0.01, "ns_iters": 2}),
         (aurora_hyperball, {"learning_rate": 0.01, "polar_ns_iters": 2}),
         (
@@ -232,6 +234,25 @@ def test_muon_hyperball_routes_vectors_to_adam_fallback():
     tx = muon_hyperball(
         learning_rate=0.01,
         ns_steps=2,
+        fallback_weight_decay=True,
+        weight_decay=0.1,
+    )
+
+    state = tx.init(params)
+    updates, state = tx.update(grads, state, params)
+    updates, next_params = _assert_shapes_and_matrix_norm(updates, params)
+
+    assert not jnp.allclose(
+        jnp.linalg.norm(next_params["b"]), jnp.linalg.norm(params["b"])
+    )
+    assert jnp.all(jnp.isfinite(updates["b"]))
+
+
+def test_rmnp_hyperball_routes_vectors_to_adam_fallback():
+    params = _params()
+    grads = _grads()
+    tx = rmnp_hyperball(
+        learning_rate=0.01,
         fallback_weight_decay=True,
         weight_decay=0.1,
     )

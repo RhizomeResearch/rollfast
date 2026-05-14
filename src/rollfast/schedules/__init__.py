@@ -9,4 +9,5 @@ from .soda import soda_adam as soda_adam
 from .soda import soda_kron as soda_kron
 from .soda import soda_muon as soda_muon
 from .soda import soda_prism as soda_prism
+from .soda import soda_rmnp as soda_rmnp
 from .wsd import wsd_schedule as wsd_schedule

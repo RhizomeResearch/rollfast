@@ -43,6 +43,7 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule,
     scale_by_kron,
 )
+from rollfast.optim.rmnp import scale_by_rmnp, scale_by_rmnp_shape
 from rollfast.utils import dist_reduce
 
 MaskOrFn = Optional[Union[Any, Callable[[base.Params], Any]]]
@@ -585,6 +586,111 @@ def muon_hyperball(
                 weight_decay=0.0,
                 weight_decay_mask=None,
                 nesterov=nesterov,
+            ),
+        },
+        param_labels=param_labels,
+    )
+
+    return combine.chain(
+        partitioned_updates,
+        apply_hyperball(
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            weight_decay_mask=weight_decay_mask,
+            hyperball_mask=resolved_hyperball_mask,
+            fallback_learning_rate=adam_learning_rate,
+            fallback_weight_decay=fallback_weight_decay,
+            caution=caution,
+            cautious_weight_decay=cautious_weight_decay,
+            eps=hyperball_eps,
+        ),
+    )
+
+
+def rmnp_hyperball(
+    learning_rate: base.ScalarOrSchedule,
+    beta: jax.typing.ArrayLike = 0.95,
+    eps: jax.typing.ArrayLike = 1e-8,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: MaskOrFn = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    *,
+    nesterov: bool = True,
+    adaptive: bool = False,
+    adam_b1: jax.typing.ArrayLike = 0.9,
+    adam_b2: jax.typing.ArrayLike = 0.999,
+    adam_eps_root: jax.typing.ArrayLike = 0.0,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
+    consistent_rms: jax.typing.ArrayLike | None = None,
+    hyperball_mask: MaskOrFn = None,
+    fallback_weight_decay: bool = False,
+    caution: bool = False,
+    cautious_weight_decay: bool = False,
+    hyperball_eps: float = 1e-12,
+    key: jax.Array = jax.random.PRNGKey(42),
+) -> base.GradientTransformationExtraArgs:
+    """RMNP/Adam partition with Hyperball replacing decoupled weight decay.
+
+    By default, Hyperball is applied to the same leaves routed to RMNP. Adam
+    fallback leaves receive ordinary Adam-style parameter deltas unless
+    `fallback_weight_decay=True`.
+    """
+    if adam_learning_rate is None:
+        adam_learning_rate = learning_rate
+
+    key_rmnp, key_adam = jax.random.split(key, 2)
+
+    def get_resolved_dim_nums(params: base.Params) -> base.Params:
+        return _get_dimension_numbers(rmnp_weight_dimension_numbers, params)
+
+    def param_labels(params: base.Params) -> base.Params:
+        dim_nums = get_resolved_dim_nums(params)
+        return jax.tree.map(
+            lambda d, p: None if p is None else ("rmnp" if d is not None else "adam"),
+            dim_nums,
+            params,
+            is_leaf=_is_prism_leaf,
+        )
+
+    def rmnp_weight_dim_nums_fn(params: base.Params) -> base.Params:
+        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+
+    default_hyperball_mask = _spec_mask_from_resolver(
+        get_resolved_dim_nums,
+        is_leaf=_is_prism_leaf,
+    )
+    resolved_hyperball_mask = (
+        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
+    )
+
+    partitioned_updates = combine.partition(
+        transforms={
+            "rmnp": combine.chain(
+                scale_by_rmnp(
+                    beta=beta,
+                    eps=eps,
+                    mu_dtype=mu_dtype,
+                    nesterov=nesterov,
+                    adaptive=adaptive,
+                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
+                    key=key_rmnp,
+                ),
+                scale_by_rmnp_shape(
+                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
+                    consistent_rms=consistent_rms,
+                ),
+            ),
+            "adam": scale_by_adam(
+                b1=adam_b1,
+                b2=adam_b2,
+                eps=eps,
+                eps_root=adam_eps_root,
+                mu_dtype=mu_dtype,
+                weight_decay=0.0,
+                weight_decay_mask=None,
+                nesterov=nesterov,
+                key=key_adam,
             ),
         },
         param_labels=param_labels,
@@ -1195,6 +1301,7 @@ __all__ = [
     "adamw_hyperball",
     "kron_hyperball",
     "muon_hyperball",
+    "rmnp_hyperball",
     "prism_hyperball",
     "aurora_hyperball",
     "riemannian_aurora_hyperball",

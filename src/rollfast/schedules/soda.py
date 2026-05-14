@@ -13,6 +13,7 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule,
     kron,
 )
+from rollfast.optim.rmnp import rmnp
 from rollfast.schedules.wsd import wsd_schedule
 
 """SODA usage notes.
@@ -382,5 +383,62 @@ def soda_muon(
         adam_learning_rate=adam_schedule,
         muon_weight_dimension_numbers=muon_weight_dimension_numbers,
         consistent_rms=consistent_rms,
+    )
+    return soda(base_optimizer, state_dtype=state_dtype)
+
+
+def soda_rmnp(
+    learning_rate: float,
+    total_steps: int,
+    warmup_fraction: float = 0.1,
+    decay_fraction: float = 0.1,
+    state_dtype: jax.typing.DTypeLike | None = None,
+    beta: jax.typing.ArrayLike = 0.95,
+    eps: jax.typing.ArrayLike = 1e-8,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    nesterov: bool = True,
+    adaptive: bool = False,
+    adam_b1: jax.typing.ArrayLike = 0.9,
+    adam_b2: jax.typing.ArrayLike = 0.999,
+    adam_eps_root: jax.typing.ArrayLike = 0.0,
+    adam_learning_rate: float | None = None,
+    rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
+    consistent_rms: jax.typing.ArrayLike | None = None,
+    key: jax.Array = jax.random.PRNGKey(42),
+) -> base.GradientTransformationExtraArgs:
+    """RMNP base optimizer wrapped with SODA."""
+    rmnp_schedule = wsd_schedule(
+        peak_lr=learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+    if adam_learning_rate is None:
+        adam_schedule = rmnp_schedule
+    else:
+        adam_schedule = wsd_schedule(
+            peak_lr=adam_learning_rate,
+            total_steps=total_steps,
+            warmup_fraction=warmup_fraction,
+            decay_fraction=decay_fraction,
+        )
+
+    base_optimizer = rmnp(
+        learning_rate=rmnp_schedule,
+        beta=beta,
+        eps=eps,
+        weight_decay=0.0,
+        weight_decay_mask=None,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        adaptive=adaptive,
+        adam_b1=adam_b1,
+        adam_b2=adam_b2,
+        adam_eps_root=adam_eps_root,
+        adam_weight_decay=0.0,
+        adam_learning_rate=adam_schedule,
+        rmnp_weight_dimension_numbers=rmnp_weight_dimension_numbers,
+        consistent_rms=consistent_rms,
+        key=key,
     )
     return soda(base_optimizer, state_dtype=state_dtype)

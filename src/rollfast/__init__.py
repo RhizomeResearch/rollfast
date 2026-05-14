@@ -11,6 +11,7 @@ from .optim.hyperball import (
     muon_hyperball as muon_hyperball,
     prism_hyperball as prism_hyperball,
     riemannian_aurora_hyperball as riemannian_aurora_hyperball,
+    rmnp_hyperball as rmnp_hyperball,
 )
 from .optim.pion import pion as pion
 from .optim.pion import scale_by_pion as scale_by_pion
@@ -19,6 +20,9 @@ from .optim.prism import (
     prism as prism,
 )
 from .optim.psgd import kron as kron
+from .optim.rmnp import rmnp as rmnp
+from .optim.rmnp import scale_by_rmnp as scale_by_rmnp
+from .optim.rmnp import scale_by_rmnp_shape as scale_by_rmnp_shape
 from .schedules.schedulefree import (
     schedule_free_adam as schedule_free_adam,
     schedule_free_aurora as schedule_free_aurora,
@@ -32,6 +36,7 @@ from .schedules.soda import (
     soda_kron as soda_kron,
     soda_muon as soda_muon,
     soda_prism as soda_prism,
+    soda_rmnp as soda_rmnp,
 )
 from .schedules.wsd import wsd_schedule as wsd_schedule
 from .utils import (
