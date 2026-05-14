@@ -6,8 +6,8 @@ descent. It provides production-ready implementations of optimizers like
 **PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
 Spectral Shaping), **Aurora** (leverage-aware rectangular matrix optimization),
 and **Pion** (spectrum-preserving orthogonal equivalence updates), plus
-**Hyperball** norm-preserving weight decay and a robust **Schedule-Free**
-wrapper.
+**Hyperball** norm-preserving weight decay, **SODA**, and a robust
+**Schedule-Free** wrapper.
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
 `rollfast` prioritizes memory efficiency (via scanned layers and Kronecker
@@ -71,9 +71,9 @@ projects the parameter back to that sphere.
 - **Mechanism**: `apply_hyperball` is a terminal Optax transform; it should be
   the final transform in a chain and should not be followed by a learning-rate
   scale transform.
-- **Wrappers**: `adamw_hyperball`, `kron_hyperball`, `prism_hyperball`,
-  `aurora_hyperball`, and `riemannian_aurora_hyperball` replace decoupled
-  weight decay in the corresponding optimizer families.
+- **Wrappers**: `adamw_hyperball`, `kron_hyperball`, `muon_hyperball`,
+  `prism_hyperball`, `aurora_hyperball`, and `riemannian_aurora_hyperball`
+  replace decoupled weight decay in the corresponding optimizer families.
 - **Partitioning**: By default, Hyperball applies to rank >= 2 leaves. PRISM and
   Aurora wrappers apply Hyperball to the same leaves routed to the structured
   optimizer branch, while fallback leaves use Adam-style updates.
@@ -96,7 +96,20 @@ approximation.
 - **Reference**: *Pion: A Spectrum-Preserving Optimizer via Orthogonal
   Equivalence Transformation* (Shi et al., 2026).
 
-### 6. Schedule-Free Optimization
+### 6. SODA (Optimistic Dual Averaging Wrapper)
+
+SODA wraps an existing base optimizer and replaces tuned weight decay with a
+parameter-free initialization-centered anchor term that decays as `1 / (k + 2)`.
+
+- **Mechanism**: Adds `(z0 - params) / (k + 2)` to the base optimizer update,
+  where `z0` is the initialization. The base optimizer should include its
+  learning-rate schedule and should not include weight decay.
+- **Wrappers**: `soda_adam`, `soda_prism`, `soda_kron`, and `soda_muon` are
+  provided. `soda_muon` uses `optax.contrib.muon` as its base optimizer.
+- **Reference**: *Optimistic Dual Averaging Unifies Modern Optimizers*
+  (Pethick et al., 2026).
+
+### 7. Schedule-Free Optimization
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
@@ -106,7 +119,7 @@ base optimizer) and an averaged sequence $x$ (used for evaluation). Available fo
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
-### 7. Magma (Momentum-Aligned Gradient Masking)
+### 8. Magma (Momentum-Aligned Gradient Masking)
 
 While training large language models (LLMs) typically relies almost exclusively
 on dense adaptive optimizers, `rollfast` implements a stochastic masking
@@ -233,6 +246,18 @@ optimizer = prism_hyperball(
 )
 ```
 
+Muon is available through Optax's contrib implementation:
+
+```python
+from rollfast import muon_hyperball
+
+optimizer = muon_hyperball(
+    learning_rate=1e-3,
+    weight_decay=0.01,
+    ns_steps=5,
+)
+```
+
 For direct Optax composition, use `apply_hyperball` as the final transform in
 the chain.
 
@@ -283,7 +308,29 @@ optimizer = pion(
 )
 ```
 
-### 6. PSGD Kron
+### 6. SODA
+
+```python
+from rollfast import soda_prism, soda_muon
+
+optimizer = soda_prism(
+    learning_rate=1e-3,
+    total_steps=10000,
+    mode="bidirectional",
+    inv_steps=8,
+)
+
+muon_optimizer = soda_muon(
+    learning_rate=1e-3,
+    total_steps=10000,
+    ns_steps=5,
+)
+```
+
+SODA convenience wrappers disable base optimizer weight decay and add the
+initialization-centered `1 / (k + 2)` anchor term from the paper.
+
+### 7. PSGD Kron
 
 The classic Kronecker-factored PSGD optimizer.
 
@@ -543,6 +590,17 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
   Title = {Schedulers for Schedule-free: Theoretically inspired hyperparameters},
   Year = {2025},
   Eprint = {arXiv:2511.07767},
+}
+```
+
+**SODA:**
+
+```bibtex
+@misc{pethick2026optimistic,
+  Author = {Thomas Pethick and Wanyun Xie and Roman Machacek and Volkan Cevher},
+  Title = {Optimistic Dual Averaging Unifies Modern Optimizers},
+  Year = {2026},
+  Eprint = {arXiv:2605.11172},
 }
 ```
 

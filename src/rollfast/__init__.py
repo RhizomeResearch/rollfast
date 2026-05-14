@@ -8,6 +8,7 @@ from .optim.hyperball import (
     adamw_hyperball as adamw_hyperball,
     aurora_hyperball as aurora_hyperball,
     kron_hyperball as kron_hyperball,
+    muon_hyperball as muon_hyperball,
     prism_hyperball as prism_hyperball,
     riemannian_aurora_hyperball as riemannian_aurora_hyperball,
 )
@@ -24,6 +25,13 @@ from .schedules.schedulefree import (
     schedule_free_eval_params as schedule_free_eval_params,
     schedule_free_kron as schedule_free_kron,
     schedule_free_prism as schedule_free_prism,
+)
+from .schedules.soda import (
+    soda as soda,
+    soda_adam as soda_adam,
+    soda_kron as soda_kron,
+    soda_muon as soda_muon,
+    soda_prism as soda_prism,
 )
 from .schedules.wsd import wsd_schedule as wsd_schedule
 from .utils import (
