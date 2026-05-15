@@ -16,6 +16,23 @@ def test_scale_by_pion():
     assert state.m_in["w"].shape == (1, 4, 4)
 
 
+def test_scale_by_pion_schedule_uses_current_count_before_increment():
+    params = {"w": jnp.eye(3, dtype=jnp.float32)}
+    grads = {"w": jnp.arange(9, dtype=jnp.float32).reshape(3, 3) / 10.0}
+    tx = scale_by_pion(
+        learning_rate=lambda count: jnp.where(count == 0, 0.0, 1.0),
+        b1=0.0,
+        b2=0.0,
+    )
+    state = tx.init(params)
+
+    first_updates, state = tx.update(grads, state, params)
+    second_updates, state = tx.update(grads, state, params)
+
+    assert jnp.allclose(first_updates["w"], jnp.zeros_like(params["w"]))
+    assert not jnp.allclose(second_updates["w"], jnp.zeros_like(params["w"]))
+
+
 def test_pion_partitions_vectors_to_adam():
     params = {
         "w": jnp.eye(4, dtype=jnp.float32),

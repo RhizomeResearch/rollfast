@@ -249,7 +249,7 @@ def scale_by_pion(
                 rms_constant,
                 eps,
                 alternating,
-                count_inc,
+                state.count,
                 precision,
             ),
             updates,
