@@ -13,9 +13,11 @@ from .optim.hyperball import (
     riemannian_aurora_hyperball as riemannian_aurora_hyperball,
     rmnp_hyperball as rmnp_hyperball,
 )
+from .optim.dimension_numbers import MatrixDimensionNumbers as MatrixDimensionNumbers
+from .optim.dimension_numbers import WeightDimNumOrFn as WeightDimNumOrFn
+from .optim.orthogonalization import MUON_NS_COEFFS as MUON_NS_COEFFS
 from .optim.pion import pion as pion
 from .optim.pion import scale_by_pion as scale_by_pion
-from .optim.orthogonalization import MUON_NS_COEFFS as MUON_NS_COEFFS
 from .optim.prism import (
     get_equinox_prism_spec as get_equinox_prism_spec,
     prism as prism,

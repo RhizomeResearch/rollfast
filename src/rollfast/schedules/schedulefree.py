@@ -13,11 +13,13 @@ from rollfast.optim.aurora import (
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
-from rollfast.optim.prism import (
+from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
     _get_dimension_numbers,
-    _is_prism_leaf,
+    _is_dimension_numbers_leaf,
     _mask_dimension_numbers,
+)
+from rollfast.optim.prism import (
     scale_by_prism,
 )
 from rollfast.optim.psgd import (
@@ -386,7 +388,7 @@ def schedule_free_prism(
             lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
         # return _make_param_labels(dim_nums)
 

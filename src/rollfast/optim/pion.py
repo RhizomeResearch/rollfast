@@ -7,12 +7,12 @@ from optax._src import base, combine, numerics, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
-from rollfast.optim.prism import (
-    PrismDimensionNumbers,
+from rollfast.optim.dimension_numbers import (
+    MatrixDimensionNumbers,
     WeightDimNumOrFn,
-    _compute_prism_reshape,
     _get_dimension_numbers,
-    _is_prism_leaf,
+    _compute_matrix_reshape,
+    _is_dimension_numbers_leaf,
     _mask_dimension_numbers,
 )
 from rollfast.utils import _tree_stochastic_cast
@@ -35,7 +35,7 @@ Weight decay is intentionally applied only to the AdamW fallback branch in
 ``pion``. Applying additive decay to Pion-managed matrices would change the
 singular spectrum and work against the optimizer's core invariant. For
 higher-rank tensors such as convolution kernels, provide explicit
-``PrismDimensionNumbers`` so the preserved matrix spectrum matches the intended
+``MatrixDimensionNumbers`` so the preserved matrix spectrum matches the intended
 input/output axes.
 """
 
@@ -53,7 +53,7 @@ class ScaleByPionState(NamedTuple):
 
 def _zeros_for_pion(
     param: Any,
-    dim_nums: PrismDimensionNumbers | None,
+    dim_nums: MatrixDimensionNumbers | None,
     dtype: jax.typing.DTypeLike,
 ) -> tuple[Any, Any, Any, Any]:
     if isinstance(param, _masking.MaskedNode):
@@ -66,7 +66,7 @@ def _zeros_for_pion(
             f"Pion optimized parameters must have rank >= 2, got {param.ndim=}."
         )
 
-    reshape_fn, _ = _compute_prism_reshape(param, dim_nums)
+    reshape_fn, _ = _compute_matrix_reshape(param, dim_nums)
     matrix = reshape_fn(param)
     batch, rows, cols = matrix.shape
     m_in = jnp.zeros((batch, cols, cols), dtype=dtype)
@@ -104,7 +104,7 @@ def _pion_matrix_update(
     v_in_prev: Any,
     m_out_prev: Any,
     v_out_prev: Any,
-    dim_nums: PrismDimensionNumbers | None,
+    dim_nums: MatrixDimensionNumbers | None,
     learning_rate: base.ScalarOrSchedule,
     b1: float,
     b2: float,
@@ -120,7 +120,7 @@ def _pion_matrix_update(
     if grad is None or param is None or dim_nums is None:
         return grad, m_in_prev, v_in_prev, m_out_prev, v_out_prev
 
-    reshape_fn, inverse_fn = _compute_prism_reshape(param, dim_nums)
+    reshape_fn, inverse_fn = _compute_matrix_reshape(param, dim_nums)
     W = reshape_fn(param).astype(jnp.float32)
     G = reshape_fn(grad).astype(jnp.float32)
 
@@ -204,7 +204,7 @@ def scale_by_pion(
             lambda p, d: _zeros_for_pion(p, d, mu_dtype),
             params,
             dim_nums,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
         m_in = jax.tree.map(
             lambda x: x[0], states, is_leaf=lambda x: isinstance(x, tuple)
@@ -259,7 +259,7 @@ def scale_by_pion(
             state.m_out,
             state.v_out,
             dim_nums,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
         new_updates = jax.tree.map(
@@ -337,7 +337,7 @@ def pion(
             lambda d, p: None if p is None else ("pion" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def pion_weight_dim_nums_fn(params):

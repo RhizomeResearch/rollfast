@@ -350,8 +350,8 @@ optimizer = rmnp(
 ```
 
 For Equinox modules or convolution kernels, pass explicit dimension specs with
-`rmnp_weight_dimension_numbers` so row normalization uses the intended flattened
-matrix layout.
+`MatrixDimensionNumbers` via `rmnp_weight_dimension_numbers` so row
+normalization uses the intended flattened matrix layout.
 
 ### 7. SODA
 

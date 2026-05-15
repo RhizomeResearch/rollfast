@@ -30,12 +30,14 @@ from rollfast.optim.aurora import (
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
-from rollfast.optim.orthogonalization import MUON_NS_COEFFS
-from rollfast.optim.prism import (
+from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
     _get_dimension_numbers,
-    _is_prism_leaf,
+    _is_dimension_numbers_leaf,
     _mask_dimension_numbers,
+)
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS
+from rollfast.optim.prism import (
     scale_by_prism,
 )
 from rollfast.optim.psgd import (
@@ -651,7 +653,7 @@ def rmnp_hyperball(
             lambda d, p: None if p is None else ("rmnp" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def rmnp_weight_dim_nums_fn(params: base.Params) -> base.Params:
@@ -659,7 +661,7 @@ def rmnp_hyperball(
 
     default_hyperball_mask = _spec_mask_from_resolver(
         get_resolved_dim_nums,
-        is_leaf=_is_prism_leaf,
+        is_leaf=_is_dimension_numbers_leaf,
     )
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else default_hyperball_mask
@@ -887,7 +889,7 @@ def prism_hyperball(
             lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def prism_weight_dim_nums_fn(params: base.Params) -> base.Params:
@@ -895,7 +897,7 @@ def prism_hyperball(
 
     default_hyperball_mask = _spec_mask_from_resolver(
         get_resolved_dim_nums,
-        is_leaf=_is_prism_leaf,
+        is_leaf=_is_dimension_numbers_leaf,
     )
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else default_hyperball_mask
@@ -1020,7 +1022,7 @@ def _partitioned_aurora_hyperball(
             lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def aurora_weight_dim_nums_fn(params: base.Params) -> base.Params:
@@ -1085,7 +1087,7 @@ def _partitioned_aurora_hyperball(
 
     default_hyperball_mask = _spec_mask_from_resolver(
         get_resolved_dim_nums,
-        is_leaf=_is_prism_leaf,
+        is_leaf=_is_dimension_numbers_leaf,
     )
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else default_hyperball_mask

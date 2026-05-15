@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from rollfast.optim.prism import PrismDimensionNumbers
+from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.optim.rmnp import rmnp, scale_by_rmnp, scale_by_rmnp_shape
 
 
@@ -52,7 +52,7 @@ def test_rmnp_custom_dimension_numbers_for_conv_kernel():
     params = {"kernel": jnp.ones((8, 3, 3, 4), dtype=jnp.float32)}
     grads = {"kernel": jnp.ones_like(params["kernel"]) * 0.01}
     specs = {
-        "kernel": PrismDimensionNumbers(
+        "kernel": MatrixDimensionNumbers(
             reduction_axis=(1, 2, 3),
             output_axis=0,
         )

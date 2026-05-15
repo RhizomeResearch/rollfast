@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import optax
 
 from rollfast.optim.pion import pion, scale_by_pion
-from rollfast.optim.prism import PrismDimensionNumbers
+from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 
 
 def test_scale_by_pion():
@@ -45,7 +45,7 @@ def test_pion_custom_dimension_numbers_for_conv_kernel():
     params = {"kernel": jnp.ones((8, 3, 3, 4), dtype=jnp.float32)}
     grads = {"kernel": jnp.ones_like(params["kernel"]) * 0.01}
     specs = {
-        "kernel": PrismDimensionNumbers(
+        "kernel": MatrixDimensionNumbers(
             reduction_axis=(1, 2, 3),
             output_axis=0,
         )

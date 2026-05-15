@@ -6,8 +6,9 @@ import optax
 from optax._src import base
 
 from rollfast.optim.adam import adamw
+from rollfast.optim.dimension_numbers import WeightDimNumOrFn
 from rollfast.optim.orthogonalization import MUON_NS_COEFFS
-from rollfast.optim.prism import WeightDimNumOrFn, prism
+from rollfast.optim.prism import prism
 from rollfast.optim.psgd import (
     GradClipMode,
     PreconditionerMode,

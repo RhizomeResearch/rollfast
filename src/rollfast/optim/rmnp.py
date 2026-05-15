@@ -7,12 +7,12 @@ from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
-from rollfast.optim.prism import (
-    PrismDimensionNumbers,
+from rollfast.optim.dimension_numbers import (
+    MatrixDimensionNumbers,
     WeightDimNumOrFn,
-    _compute_prism_reshape,
     _get_dimension_numbers,
-    _is_prism_leaf,
+    _compute_matrix_reshape,
+    _is_dimension_numbers_leaf,
     _mask_dimension_numbers,
     _normalize_axes,
 )
@@ -24,7 +24,7 @@ RMNP is a Muon-style matrix optimizer that replaces Newton-Schulz
 orthogonalization with row-wise L2 normalization of the momentum matrix. This
 makes the matrix branch linear in the number of parameters, but it also means
 the row axis is part of the algorithm. For ordinary 2D leaves the default
-``PrismDimensionNumbers(reduction_axis=0, output_axis=1)`` normalizes rows in
+``MatrixDimensionNumbers(reduction_axis=0, output_axis=1)`` normalizes rows in
 that flattened matrix layout. For Equinox ``Linear`` weights, convolution
 kernels, transposed weights, or embeddings whose semantic axes differ from that
 layout, pass explicit ``rmnp_weight_dimension_numbers``.
@@ -94,10 +94,10 @@ def _update_moment(
 
 def _row_normalize_matrix(
     x: jax.Array,
-    dim_nums: PrismDimensionNumbers,
+    dim_nums: MatrixDimensionNumbers,
     eps: jax.typing.ArrayLike,
 ) -> jax.Array:
-    reshape_fn, inverse_fn = _compute_prism_reshape(x, dim_nums)
+    reshape_fn, inverse_fn = _compute_matrix_reshape(x, dim_nums)
     matrix = reshape_fn(x).astype(jnp.float32)
     eps32 = jnp.asarray(eps, dtype=jnp.float32)
     row_norm = jnp.linalg.norm(matrix, axis=-1, keepdims=True)
@@ -107,7 +107,7 @@ def _row_normalize_matrix(
 
 def _rmnp_leaf_update(
     update: Any,
-    dim_nums: PrismDimensionNumbers | None,
+    dim_nums: MatrixDimensionNumbers | None,
     eps: jax.typing.ArrayLike,
 ) -> Any:
     if _is_aux_leaf(update) or dim_nums is None:
@@ -121,7 +121,7 @@ def _rmnp_leaf_update(
 
 def _shape_scale_leaf(
     update: Any,
-    dim_nums: PrismDimensionNumbers | None,
+    dim_nums: MatrixDimensionNumbers | None,
     consistent_rms: jax.typing.ArrayLike | None,
 ) -> Any:
     if _is_aux_leaf(update) or dim_nums is None:
@@ -206,7 +206,7 @@ def scale_by_rmnp(
             lambda u, d: _rmnp_leaf_update(u, d, eps),
             direction,
             dim_nums,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
         if adaptive:
             rmnp_updates = jax.tree.map(
@@ -243,7 +243,7 @@ def scale_by_rmnp_shape(
             lambda u, d: _shape_scale_leaf(u, d, consistent_rms),
             updates,
             dim_nums,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
         return scaled_updates, state
 
@@ -284,7 +284,7 @@ def rmnp(
             lambda d, p: None if p is None else ("rmnp" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def rmnp_weight_dim_nums_fn(params):
