@@ -1,3 +1,5 @@
+from typing import cast
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -17,6 +19,7 @@ def test_scale_by_rmnp_row_normalizes_matrix_momentum():
     tx = scale_by_rmnp(beta=0.0, nesterov=False)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = cast(dict[str, jax.Array], updates)
 
     assert updates["w"].shape == params["w"].shape
     assert jnp.allclose(jnp.linalg.norm(updates["w"], axis=1), jnp.ones((2,)))
@@ -27,6 +30,7 @@ def test_scale_by_rmnp_shape_matches_muon_width_scaling():
     tx = scale_by_rmnp_shape()
     state = tx.init(updates)
     scaled, state = tx.update(updates, state)
+    scaled = cast(dict[str, jax.Array], scaled)
 
     assert jnp.allclose(scaled["w"], jnp.ones((2, 8)) * 2.0)
 
@@ -40,6 +44,7 @@ def test_rmnp_partitions_vectors_to_adam():
     tx = rmnp(learning_rate=0.01)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = cast(dict[str, jax.Array], updates)
 
     assert updates["w"].shape == (4, 4)
     assert updates["b"].shape == (4,)
@@ -60,6 +65,7 @@ def test_rmnp_custom_dimension_numbers_for_conv_kernel():
     tx = rmnp(learning_rate=0.01, rmnp_weight_dimension_numbers=specs)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
+    updates = cast(dict[str, jax.Array], updates)
 
     assert updates["kernel"].shape == params["kernel"].shape
     assert jnp.all(jnp.isfinite(updates["kernel"]))
@@ -71,6 +77,6 @@ def test_rmnp_applies_weight_decay_to_matrix_branch():
     tx = rmnp(learning_rate=0.1, weight_decay=0.2, beta=0.0, nesterov=False)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
-    next_params = optax.apply_updates(params, updates)
+    next_params = cast(dict[str, jax.Array], optax.apply_updates(params, updates))
 
     assert jnp.all(next_params["w"] < params["w"])

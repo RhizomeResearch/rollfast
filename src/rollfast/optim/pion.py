@@ -1,5 +1,5 @@
 import math
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -49,6 +49,16 @@ class ScaleByPionState(NamedTuple):
     m_out: base.Updates
     v_out: base.Updates
     key: jax.Array | None
+
+
+def _resolve_scalar(
+    value: base.ScalarOrSchedule,
+    count: jax.typing.ArrayLike,
+) -> jax.typing.ArrayLike:
+    if callable(value):
+        schedule = cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], value)
+        return schedule(count)
+    return value
 
 
 def _zeros_for_pion(
@@ -139,7 +149,7 @@ def _pion_matrix_update(
 
     rows, cols = W.shape[-2], W.shape[-1]
     target_rms = rms_constant * math.sqrt(rows * cols)
-    lr = learning_rate(count) if callable(learning_rate) else learning_rate
+    lr = _resolve_scalar(learning_rate, count)
     lr = jnp.asarray(lr, dtype=jnp.float32)
 
     def out_step():
@@ -193,15 +203,15 @@ def scale_by_pion(
     approximation. The returned Optax update is ``W_next - W`` because Optax
     applies updates by addition.
     """
-    if mu_dtype is None:
-        mu_dtype = jnp.float32
-    else:
-        mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    canonical_mu_dtype = cast(
+        jax.typing.DTypeLike,
+        jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
+    )
 
     def init_fn(params):
         dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
         states = jax.tree.map(
-            lambda p, d: _zeros_for_pion(p, d, mu_dtype),
+            lambda p, d: _zeros_for_pion(p, d, canonical_mu_dtype),
             params,
             dim_nums,
             is_leaf=_is_dimension_numbers_leaf,
@@ -274,21 +284,23 @@ def scale_by_pion(
             lambda x: x[4], out, is_leaf=lambda x: isinstance(x, tuple)
         )
 
-        if mu_dtype == jnp.bfloat16:
-            key, sr_in, sr_vin, sr_out, sr_vout = jax.random.split(state.key, 5)
-            m_in = _tree_stochastic_cast(m_in, mu_dtype, sr_in)
-            v_in = _tree_stochastic_cast(v_in, mu_dtype, sr_vin)
-            m_out = _tree_stochastic_cast(m_out, mu_dtype, sr_out)
-            v_out = _tree_stochastic_cast(v_out, mu_dtype, sr_vout)
+        if canonical_mu_dtype == jnp.bfloat16:
+            key, sr_in, sr_vin, sr_out, sr_vout = jax.random.split(
+                cast(jax.Array, state.key), 5
+            )
+            m_in = _tree_stochastic_cast(m_in, canonical_mu_dtype, sr_in)
+            v_in = _tree_stochastic_cast(v_in, canonical_mu_dtype, sr_vin)
+            m_out = _tree_stochastic_cast(m_out, canonical_mu_dtype, sr_out)
+            v_out = _tree_stochastic_cast(v_out, canonical_mu_dtype, sr_vout)
         else:
             key = state.key
-            m_in = _cast_state_tree(m_in, mu_dtype)
-            v_in = _cast_state_tree(v_in, mu_dtype)
-            m_out = _cast_state_tree(m_out, mu_dtype)
-            v_out = _cast_state_tree(v_out, mu_dtype)
+            m_in = _cast_state_tree(m_in, canonical_mu_dtype)
+            v_in = _cast_state_tree(v_in, canonical_mu_dtype)
+            m_out = _cast_state_tree(m_out, canonical_mu_dtype)
+            v_out = _cast_state_tree(v_out, canonical_mu_dtype)
 
         return new_updates, ScaleByPionState(
-            count=count_inc,
+            count=cast(jax.Array, count_inc),
             m_in=m_in,
             v_in=v_in,
             m_out=m_out,

@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import jax
 import jax.numpy as jnp
 from optax.transforms import _masking
@@ -22,7 +24,7 @@ def test_get_dimension_numbers_defaults_to_rank_two_leaves():
         "none": None,
     }
 
-    dim_nums = _get_dimension_numbers(None, params)
+    dim_nums = cast(dict[str, Any], _get_dimension_numbers(None, params))
 
     assert dim_nums["matrix"] == MatrixDimensionNumbers()
     assert dim_nums["vector"] is None
@@ -32,7 +34,7 @@ def test_get_dimension_numbers_defaults_to_rank_two_leaves():
 def test_mask_dimension_numbers_replaces_none_leaves():
     dim_nums = {"matrix": MatrixDimensionNumbers(), "vector": None}
 
-    masked = _mask_dimension_numbers(dim_nums)
+    masked = cast(dict[str, Any], _mask_dimension_numbers(dim_nums))
 
     assert masked["matrix"] == MatrixDimensionNumbers()
     assert isinstance(masked["vector"], _masking.MaskedNode)

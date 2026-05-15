@@ -1,5 +1,5 @@
 import math
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -65,7 +65,9 @@ def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Par
     )
 
 
-def _bias_correction(moment: Any, beta: jax.typing.ArrayLike, count: jax.Array) -> Any:
+def _bias_correction(
+    moment: Any, beta: jax.typing.ArrayLike, count: jax.typing.ArrayLike
+) -> Any:
     correction = 1.0 - jnp.power(jnp.asarray(beta, dtype=jnp.float32), count)
     return jax.tree.map(
         lambda m: m if _is_aux_leaf(m) else m.astype(jnp.float32) / correction,
@@ -166,15 +168,15 @@ def scale_by_rmnp(
     direction; use ``rmnp`` for a full optimizer with learning-rate scaling and
     AdamW fallback.
     """
-    if mu_dtype is None:
-        mu_dtype = jnp.float32
-    else:
-        mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    canonical_mu_dtype = cast(
+        jax.typing.DTypeLike,
+        jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
+    )
 
     def init_fn(params):
         return ScaleByRmnpState(
             count=jnp.zeros([], jnp.int32),
-            mu=_zeros_like_tree(params, mu_dtype),
+            mu=_zeros_like_tree(params, canonical_mu_dtype),
             key=key,
         )
 
@@ -218,14 +220,16 @@ def scale_by_rmnp(
                 is_leaf=_is_aux_leaf,
             )
 
-        if mu_dtype == jnp.bfloat16:
-            key, sr_key = jax.random.split(state.key, 2)
-            mu = _tree_stochastic_cast(mu, mu_dtype, sr_key)
+        if canonical_mu_dtype == jnp.bfloat16:
+            key, sr_key = jax.random.split(cast(jax.Array, state.key), 2)
+            mu = _tree_stochastic_cast(mu, canonical_mu_dtype, sr_key)
         else:
             key = state.key
-            mu = _cast_state_tree(mu, mu_dtype)
+            mu = _cast_state_tree(mu, canonical_mu_dtype)
 
-        return rmnp_updates, ScaleByRmnpState(count=count_inc, mu=mu, key=key)
+        return rmnp_updates, ScaleByRmnpState(
+            count=cast(jax.Array, count_inc), mu=mu, key=key
+        )
 
     return base.GradientTransformation(init_fn, update_fn)
 

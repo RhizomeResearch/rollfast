@@ -495,12 +495,13 @@ def muon_hyperball(
     else:
         use_default_muon_specs = False
 
-        def get_resolved_dim_nums(params: base.Params) -> base.Params:
-            return (
-                muon_weight_dimension_numbers(params)
-                if callable(muon_weight_dimension_numbers)
-                else muon_weight_dimension_numbers
-            )
+        def get_resolved_dim_nums(params: base.Params) -> Any:
+            if callable(muon_weight_dimension_numbers):
+                dim_num_fn = cast(
+                    Callable[[base.Params], Any], muon_weight_dimension_numbers
+                )
+                return dim_num_fn(params)
+            return muon_weight_dimension_numbers
 
         def param_labels(params: base.Params) -> base.Params:
             dim_nums = get_resolved_dim_nums(params)
@@ -531,7 +532,11 @@ def muon_hyperball(
         if use_default_muon_specs:
             return get_resolved_dim_nums(params)
 
-        dim_nums = dim_nums_arg(params) if callable(dim_nums_arg) else dim_nums_arg
+        if callable(dim_nums_arg):
+            dim_num_fn = cast(Callable[[base.Params], Any], dim_nums_arg)
+            dim_nums = dim_num_fn(params)
+        else:
+            dim_nums = dim_nums_arg
         mask = jax.tree.map(lambda label: label == "muon", param_labels(params))
 
         def populate_subtree(dim_num, submask):
