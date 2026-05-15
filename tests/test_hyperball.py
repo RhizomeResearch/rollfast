@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
+import rollfast.optim.hyperball as hyperball_module
 from rollfast.optim.hyperball import (
     HyperballState,
     adamw_hyperball,
@@ -265,3 +266,25 @@ def test_rmnp_hyperball_routes_vectors_to_adam_fallback():
         jnp.linalg.norm(next_params["b"]), jnp.linalg.norm(params["b"])
     )
     assert jnp.all(jnp.isfinite(updates["b"]))
+
+
+def test_partitioned_hyperball_wrappers_forward_axis_name(monkeypatch):
+    captured_axis_names = []
+
+    def fake_apply_hyperball(**kwargs):
+        captured_axis_names.append(kwargs["axis_name"])
+        return optax.identity()
+
+    monkeypatch.setattr(hyperball_module, "apply_hyperball", fake_apply_hyperball)
+
+    hyperball_module.muon_hyperball(
+        learning_rate=0.01,
+        ns_steps=2,
+        axis_name="devices",
+    )
+    hyperball_module.rmnp_hyperball(
+        learning_rate=0.01,
+        axis_name="devices",
+    )
+
+    assert captured_axis_names == ["devices", "devices"]

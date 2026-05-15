@@ -456,6 +456,7 @@ def muon_hyperball(
     caution: bool = False,
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
+    axis_name: str | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Muon/Adam partition with Hyperball replacing decoupled weight decay.
 
@@ -606,6 +607,7 @@ def muon_hyperball(
             caution=caution,
             cautious_weight_decay=cautious_weight_decay,
             eps=hyperball_eps,
+            axis_name=axis_name,
         ),
     )
 
@@ -631,6 +633,7 @@ def rmnp_hyperball(
     caution: bool = False,
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """RMNP/Adam partition with Hyperball replacing decoupled weight decay.
@@ -711,6 +714,7 @@ def rmnp_hyperball(
             caution=caution,
             cautious_weight_decay=cautious_weight_decay,
             eps=hyperball_eps,
+            axis_name=axis_name,
         ),
     )
 
