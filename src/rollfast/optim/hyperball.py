@@ -30,6 +30,7 @@ from rollfast.optim.aurora import (
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS
 from rollfast.optim.prism import (
     WeightDimNumOrFn,
     _get_dimension_numbers,
@@ -432,7 +433,7 @@ def adamw_hyperball(
 
 def muon_hyperball(
     learning_rate: base.ScalarOrSchedule,
-    ns_coeffs: Any = (3.4445, -4.7750, 2.0315),
+    ns_coeffs: Any = MUON_NS_COEFFS,
     ns_steps: jax.typing.ArrayLike = 5,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,

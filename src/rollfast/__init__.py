@@ -15,6 +15,7 @@ from .optim.hyperball import (
 )
 from .optim.pion import pion as pion
 from .optim.pion import scale_by_pion as scale_by_pion
+from .optim.orthogonalization import MUON_NS_COEFFS as MUON_NS_COEFFS
 from .optim.prism import (
     get_equinox_prism_spec as get_equinox_prism_spec,
     prism as prism,

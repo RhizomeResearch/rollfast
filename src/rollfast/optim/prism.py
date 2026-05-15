@@ -9,6 +9,7 @@ from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS
 from rollfast.utils import (
     _safe_bias_correction,
     _tree_stochastic_cast,
@@ -35,7 +36,7 @@ except ImportError:
     _LINEAR_TYPES = ()
     _CONV_TYPES = ()
 
-_DEFAULT_NS_COEFFS = (3.4445, -4.7750, 2.0315)
+_DEFAULT_NS_COEFFS = MUON_NS_COEFFS
 _INVROOT_COEFFS: dict[int, list[tuple[float, float, float]]] = {
     4: [  # P^{-1/4}  (used by Bidirectional-PRISM)
         (3.85003, -10.8539, 8.61893),

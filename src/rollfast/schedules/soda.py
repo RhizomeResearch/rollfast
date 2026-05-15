@@ -6,6 +6,7 @@ import optax
 from optax._src import base
 
 from rollfast.optim.adam import adamw
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS
 from rollfast.optim.prism import WeightDimNumOrFn, prism
 from rollfast.optim.psgd import (
     GradClipMode,
@@ -334,7 +335,7 @@ def soda_muon(
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
     state_dtype: jax.typing.DTypeLike | None = None,
-    ns_coeffs: Any = (3.4445, -4.7750, 2.0315),
+    ns_coeffs: Any = MUON_NS_COEFFS,
     ns_steps: jax.typing.ArrayLike = 5,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
