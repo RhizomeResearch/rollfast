@@ -20,16 +20,16 @@ from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
-from rollfast.optim.magma import apply_magma_internal
-from rollfast.optim.prism import (
-    PrismDimensionNumbers,
+from rollfast.optim.dimension_numbers import (
+    MatrixDimensionNumbers,
     WeightDimNumOrFn,
-    _compute_prism_reshape,
+    _compute_matrix_reshape,
     _get_dimension_numbers,
-    _is_prism_leaf,
+    _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
     _mask_dimension_numbers,
 )
+from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     _safe_bias_correction,
     _tree_stochastic_cast,
@@ -56,7 +56,7 @@ except ImportError:
     _AURORA_LINEAR_TYPES = ()
     _AURORA_CONV_TYPES = ()
 
-AuroraDimensionNumbers = PrismDimensionNumbers
+AuroraDimensionNumbers = MatrixDimensionNumbers
 AuroraWeightDimNumOrFn = WeightDimNumOrFn
 
 _SIMPLE_QUINTIC_COEFFS = (2.0, -1.5, 0.5)
@@ -151,7 +151,7 @@ def _is_aux_leaf(x: Any) -> bool:
 
 
 def _is_dim_leaf(x: Any) -> bool:
-    return _is_prism_leaf(x)
+    return _is_dimension_numbers_leaf(x)
 
 
 def _is_array_like(x: Any) -> bool:
@@ -463,7 +463,7 @@ def _apply_matrix_rule(
     mu_raw: jax.Array,
     *,
     mu_nest: Optional[jax.Array],
-    dim_nums: Optional[PrismDimensionNumbers],
+    dim_nums: Optional[MatrixDimensionNumbers],
     riemannian: bool,
     pp_iterations: int,
     pp_beta: float,
@@ -511,7 +511,7 @@ def _apply_matrix_rule(
     if updates.ndim == 2 and _is_standard_2d_spec(dim_nums):
         return matrix_fn(target)
 
-    reshape_fn, inverse_fn = _compute_prism_reshape(updates, dim_nums)
+    reshape_fn, inverse_fn = _compute_matrix_reshape(updates, dim_nums)
     target_flat = reshape_fn(target)
     out_flat = jax.vmap(matrix_fn)(target_flat)
     return inverse_fn(out_flat)

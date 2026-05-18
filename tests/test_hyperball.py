@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
+import rollfast.optim.hyperball as hyperball_module
 from rollfast.optim.hyperball import (
     HyperballState,
     adamw_hyperball,
@@ -12,8 +13,10 @@ from rollfast.optim.hyperball import (
     aurora_hyperball,
     hyperball_riemannian_aurora,
     kron_hyperball,
+    muon_hyperball,
     prism_hyperball,
     riemannian_aurora_hyperball,
+    rmnp_hyperball,
     scale_by_hyperball,
 )
 from tests._typing import ArrayDict, as_array_dict
@@ -194,6 +197,8 @@ def test_kron_hyperball_accepts_extra_grad_args():
             kron_hyperball,
             {"learning_rate": 0.01, "preconditioner_update_probability": 1.0},
         ),
+        (muon_hyperball, {"learning_rate": 0.01, "ns_steps": 2}),
+        (rmnp_hyperball, {"learning_rate": 0.01}),
         (prism_hyperball, {"learning_rate": 0.01, "ns_iters": 2}),
         (aurora_hyperball, {"learning_rate": 0.01, "polar_ns_iters": 2}),
         (
@@ -222,3 +227,64 @@ def test_hyperball_optimizer_wrappers(optimizer_fn, kwargs):
 def test_public_aliases():
     assert scale_by_hyperball is apply_hyperball
     assert hyperball_riemannian_aurora is riemannian_aurora_hyperball
+
+
+def test_muon_hyperball_routes_vectors_to_adam_fallback():
+    params = _params()
+    grads = _grads()
+    tx = muon_hyperball(
+        learning_rate=0.01,
+        ns_steps=2,
+        fallback_weight_decay=True,
+        weight_decay=0.1,
+    )
+
+    state = tx.init(params)
+    updates, state = tx.update(grads, state, params)
+    updates, next_params = _assert_shapes_and_matrix_norm(updates, params)
+
+    assert not jnp.allclose(
+        jnp.linalg.norm(next_params["b"]), jnp.linalg.norm(params["b"])
+    )
+    assert jnp.all(jnp.isfinite(updates["b"]))
+
+
+def test_rmnp_hyperball_routes_vectors_to_adam_fallback():
+    params = _params()
+    grads = _grads()
+    tx = rmnp_hyperball(
+        learning_rate=0.01,
+        fallback_weight_decay=True,
+        weight_decay=0.1,
+    )
+
+    state = tx.init(params)
+    updates, state = tx.update(grads, state, params)
+    updates, next_params = _assert_shapes_and_matrix_norm(updates, params)
+
+    assert not jnp.allclose(
+        jnp.linalg.norm(next_params["b"]), jnp.linalg.norm(params["b"])
+    )
+    assert jnp.all(jnp.isfinite(updates["b"]))
+
+
+def test_partitioned_hyperball_wrappers_forward_axis_name(monkeypatch):
+    captured_axis_names = []
+
+    def fake_apply_hyperball(**kwargs):
+        captured_axis_names.append(kwargs["axis_name"])
+        return optax.identity()
+
+    monkeypatch.setattr(hyperball_module, "apply_hyperball", fake_apply_hyperball)
+
+    hyperball_module.muon_hyperball(
+        learning_rate=0.01,
+        ns_steps=2,
+        axis_name="devices",
+    )
+    hyperball_module.rmnp_hyperball(
+        learning_rate=0.01,
+        axis_name="devices",
+    )
+
+    assert captured_axis_names == ["devices", "devices"]

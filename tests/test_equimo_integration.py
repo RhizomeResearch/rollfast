@@ -43,11 +43,11 @@ def model_and_data(request):
     if model_name == "iformer":
         x = jr.normal(key, (3, 64, 64))
         y = jnp.ones((10,))
-        model = em.iformer_t(in_channels=3, num_classes=10, key=key)
+        model = em.iformer_t(in_channels=3, num_classes=10, key=key)  # ty: ignore[unresolved-attribute]
     elif model_name == "vit":
         x = jr.normal(key, (3, 64, 64))
         y = jnp.ones((10,))
-        model = em.VisionTransformer(
+        model = em.VisionTransformer(  # ty: ignore[unresolved-attribute]
             img_size=64,
             in_channels=3,
             dim=32,
@@ -60,7 +60,9 @@ def model_and_data(request):
     elif model_name == "reduceformer":
         x = jr.normal(key, (3, 64, 64))
         y = jnp.ones((10,))
-        model = em.reduceformer_backbone_b1(in_channels=3, num_classes=10, key=key)
+        model = em.reduceformer_backbone_b1(  # ty: ignore[unresolved-attribute]
+            in_channels=3, num_classes=10, key=key
+        )
     return model, x, y
 
 

@@ -1,5 +1,4 @@
-import math
-from typing import Any, Callable, NamedTuple, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +7,18 @@ from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
+from rollfast.optim.dimension_numbers import (
+    DimNumsTree,
+    MatrixDimensionNumbers,
+    WeightDimNumOrFn,
+    _compute_matrix_reshape,
+    _get_dimension_numbers,
+    _is_dimension_numbers_leaf,
+    _is_standard_2d_spec,
+    _mask_dimension_numbers,
+)
 from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS
 from rollfast.utils import (
     _safe_bias_correction,
     _tree_stochastic_cast,
@@ -35,7 +45,7 @@ except ImportError:
     _LINEAR_TYPES = ()
     _CONV_TYPES = ()
 
-_DEFAULT_NS_COEFFS = (3.4445, -4.7750, 2.0315)
+_DEFAULT_NS_COEFFS = MUON_NS_COEFFS
 _INVROOT_COEFFS: dict[int, list[tuple[float, float, float]]] = {
     4: [  # P^{-1/4}  (used by Bidirectional-PRISM)
         (3.85003, -10.8539, 8.61893),
@@ -46,43 +56,9 @@ _INVROOT_COEFFS: dict[int, list[tuple[float, float, float]]] = {
 }
 
 
-class PrismDimensionNumbers(NamedTuple):
-    """Specification for which weight axes participate in PRISM's matrix optimization.
-
-    PRISM primarily operates on 2D matrices. This specification defines how to reshape
-    higher-rank tensors (like 4D convolution kernels) into a 2D matrix format
-    (reduction_axis, output_axis) suitable for spectral processing.
-
-    Attributes:
-        reduction_axis: The axes that will be flattened into the first dimension (rows)
-            of the matrix. These dimensions are "reduced" during the matrix product.
-            Default is 0.
-        output_axis: The axes that will be flattened into the second dimension (columns)
-            of the matrix. Default is 1.
-
-    Note:
-        Any axes not specified in either `reduction_axis` or `output_axis` are treated
-        as batch dimensions. The orthogonalization will be applied independently across
-        these batch dimensions (via vmap).
-    """
-
-    reduction_axis: Sequence[int] | int = 0
-    output_axis: Sequence[int] | int = 1
-
-
-# Semantic alias for the PyTree of specs
-DimNumsTree = base.Params
-WeightDimNumOrFn = (
-    PrismDimensionNumbers | DimNumsTree | Callable[[base.Params], DimNumsTree]
-)
-ReshapeFn = Callable[[jax.Array], jax.Array]
-
-# Predicate for tree traversal that respects Partitioning masks
-_is_prism_leaf = lambda x: (
-    x is None
-    or isinstance(x, PrismDimensionNumbers)
-    or isinstance(x, _masking.MaskedNode)
-)
+PrismDimensionNumbers = MatrixDimensionNumbers
+_is_prism_leaf = _is_dimension_numbers_leaf
+_compute_prism_reshape = _compute_matrix_reshape
 
 
 def get_equinox_prism_spec(
@@ -143,49 +119,6 @@ def get_equinox_prism_spec(
     )
 
 
-def _get_dimension_numbers(
-    weight_dimension_numbers: WeightDimNumOrFn | None, params: base.Params
-) -> base.Params:
-    """Returns a PyTree of PrismDimensionNumbers | None matching the params structure.
-
-    This function resolves the `weight_dimension_numbers` argument into a concrete
-    PyTree that aligns 1:1 with the provided `params`. It handles the default case
-    (inferring 2D matrices) and ensures compatibility with `optax.combine.partition`
-    by safely handling `MaskedNode` entries.
-
-    Args:
-        weight_dimension_numbers: The dimension specification. Can be None (auto-detect),
-            a PyTree of specs, or a callable returning a PyTree.
-        params: The parameters PyTree to align with.
-
-    Returns:
-        A PyTree with the same structure as `params` containing `PrismDimensionNumbers`
-        for PRISM-optimized leaves and `None` for others.
-    """
-    if weight_dimension_numbers is None:
-
-        def _get_default_spec(x):
-            if isinstance(x, _masking.MaskedNode) or x is None:
-                return None
-            return (
-                PrismDimensionNumbers() if hasattr(x, "ndim") and x.ndim == 2 else None
-            )
-
-        return jax.tree.map(
-            _get_default_spec,
-            params,
-            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-        )
-
-    if callable(weight_dimension_numbers):
-        dim_num_fn = cast(
-            Callable[[base.Params], DimNumsTree], weight_dimension_numbers
-        )
-        return dim_num_fn(params)
-
-    return weight_dimension_numbers
-
-
 def _make_param_labels(dim_nums_tree: base.Params) -> base.Params:
     """Converts a dimension numbers tree into optimization labels.
 
@@ -201,49 +134,6 @@ def _make_param_labels(dim_nums_tree: base.Params) -> base.Params:
         dim_nums_tree,
         is_leaf=_is_prism_leaf,
     )
-
-
-def _mask_dimension_numbers(dim_nums_tree: base.Params) -> base.Params:
-    """Replaces None entries with MaskedNode for partition compatibility.
-
-    When using `optax.combine.partition`, the optimizer responsible for the 'prism'
-    label must receive a parameter tree where non-prism parameters are masked out.
-    This function prepares the dimension specification tree to match that masked structure.
-
-    Args:
-        dim_nums_tree: A PyTree of `PrismDimensionNumbers` or `None`.
-
-    Returns:
-        A PyTree where `None` leaves are replaced by `optax.transforms._masking.MaskedNode`.
-    """
-    return jax.tree.map(
-        lambda d: d if d is not None else _masking.MaskedNode(),
-        dim_nums_tree,
-        is_leaf=_is_prism_leaf,
-    )
-
-
-def _is_standard_2d_spec(dim_nums: PrismDimensionNumbers) -> bool:
-    """Checks if a spec represents the standard 2D matrix layout (reduction=0, output=1).
-
-    This check is used to trigger the fast optimization path, avoiding expensive
-    reshapes and vmaps for standard weight matrices. It robustly handles both
-    integer and tuple scalar notations (e.g., `0` vs `(0,)`).
-
-    Args:
-        dim_nums: The dimension specification to check.
-
-    Returns:
-        True if the spec corresponds to a standard 2D matrix operation, False otherwise.
-    """
-    red = dim_nums.reduction_axis
-    out = dim_nums.output_axis
-
-    # Normalize to tuples for comparison
-    red_norm = (red,) if isinstance(red, int) else tuple(red)
-    out_norm = (out,) if isinstance(out, int) else tuple(out)
-
-    return red_norm == (0,) and out_norm == (1,)
 
 
 def _prism_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
@@ -288,72 +178,6 @@ def _clip_per_tensor_rms(
     scale_factor = jnp.minimum(1.0, max_rms / (rms + 1e-9))
     u = u * scale_factor
     return jnp.clip(u, -max_val, max_val)
-
-
-def _normalize_axes(
-    x: jax.Array, dim_nums: PrismDimensionNumbers
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Normalizes dimension specs to tuples of positive integers."""
-    reduction_axis = dim_nums.reduction_axis
-    reduction_axis = (
-        (reduction_axis,) if isinstance(reduction_axis, int) else reduction_axis
-    )
-    reduction_axes = tuple(ax % x.ndim for ax in reduction_axis)
-
-    output_axis = dim_nums.output_axis
-    output_axis = (output_axis,) if isinstance(output_axis, int) else output_axis
-    output_axes = tuple(ax % x.ndim for ax in output_axis)
-    return reduction_axes, output_axes
-
-
-def _compute_prism_reshape(
-    x: jax.Array, dim_nums: PrismDimensionNumbers
-) -> tuple[ReshapeFn, ReshapeFn]:
-    """Computes reshape functions to transform a tensor into a PRISM-compatible format.
-
-    PRISM operates on (Batch, Reduction, Output) structures. This function generates
-    forward and inverse functions to map arbitrary tensors (e.g., 4D kernels) to this layout.
-
-    Args:
-        x: The template tensor (defining shape and rank).
-        dim_nums: The specification of reduction and output axes.
-
-    Returns:
-        A tuple (reshape_fn, inverse_fn).
-        - reshape_fn: Maps input -> (Batch_Dim, Reduction_Dim, Output_Dim).
-        - inverse_fn: Maps (Batch_Dim, Reduction_Dim, Output_Dim) -> input shape.
-    """
-    if x.ndim < 2:
-        raise ValueError(
-            f"PRISM optimized parameters must have rank >= 2, got {x.ndim=}"
-        )
-
-    reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-    if set(reduction_axes) & set(output_axes):
-        raise ValueError(
-            f"Reduction and output axes must be disjoint. Got {reduction_axes} and {output_axes}."
-        )
-
-    batch_axes = tuple(
-        sorted(set(range(x.ndim)) - set(reduction_axes) - set(output_axes))
-    )
-    transpose = batch_axes + reduction_axes + output_axes
-    inv_transpose = tuple(sorted(range(x.ndim), key=lambda i: transpose[i]))
-
-    axes2shape = lambda axes: tuple(x.shape[ax] for ax in axes)
-
-    flat_shape = (
-        math.prod(axes2shape(batch_axes)),
-        math.prod(axes2shape(reduction_axes)),
-        math.prod(axes2shape(output_axes)),
-    )
-    unflat_shape = (
-        axes2shape(batch_axes) + axes2shape(reduction_axes) + axes2shape(output_axes)
-    )
-
-    reshape_fn = lambda x: x.transpose(transpose).reshape(flat_shape)
-    inverse_fn = lambda x: x.reshape(unflat_shape).transpose(inv_transpose)
-    return reshape_fn, inverse_fn
 
 
 def _newton_schulz_iterator_muon(x: jax.Array, coeffs: jax.Array) -> jax.Array:

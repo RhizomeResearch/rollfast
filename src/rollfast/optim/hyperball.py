@@ -20,6 +20,7 @@ from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
+import optax.contrib._muon as optax_muon
 from optax._src import base, combine, numerics
 from optax.transforms import _masking
 
@@ -29,11 +30,14 @@ from rollfast.optim.aurora import (
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
-from rollfast.optim.prism import (
+from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
     _get_dimension_numbers,
-    _is_prism_leaf,
+    _is_dimension_numbers_leaf,
     _mask_dimension_numbers,
+)
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS
+from rollfast.optim.prism import (
     scale_by_prism,
 )
 from rollfast.optim.psgd import (
@@ -42,6 +46,7 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule,
     scale_by_kron,
 )
+from rollfast.optim.rmnp import scale_by_rmnp, scale_by_rmnp_shape
 from rollfast.utils import dist_reduce
 
 MaskOrFn = Optional[Union[Any, Callable[[base.Params], Any]]]
@@ -381,7 +386,7 @@ def adamw_hyperball(
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
     weight_decay: base.ScalarOrSchedule = 1e-4,
     weight_decay_mask: MaskOrFn = None,
     *,
@@ -419,6 +424,297 @@ def adamw_hyperball(
             weight_decay=weight_decay,
             weight_decay_mask=weight_decay_mask,
             hyperball_mask=hyperball_mask,
+            fallback_weight_decay=fallback_weight_decay,
+            caution=caution,
+            cautious_weight_decay=cautious_weight_decay,
+            eps=hyperball_eps,
+            axis_name=axis_name,
+        ),
+    )
+
+
+def muon_hyperball(
+    learning_rate: base.ScalarOrSchedule,
+    ns_coeffs: Any = MUON_NS_COEFFS,
+    ns_steps: jax.typing.ArrayLike = 5,
+    beta: jax.typing.ArrayLike = 0.95,
+    eps: jax.typing.ArrayLike = 1e-8,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: MaskOrFn = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    *,
+    nesterov: bool = True,
+    adaptive: bool = False,
+    adam_b1: jax.typing.ArrayLike = 0.9,
+    adam_b2: jax.typing.ArrayLike = 0.999,
+    adam_eps_root: jax.typing.ArrayLike = 0.0,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    muon_weight_dimension_numbers: optax_muon.WeightDimNumOrFn | None = None,
+    consistent_rms: jax.typing.ArrayLike | None = None,
+    hyperball_mask: MaskOrFn = None,
+    fallback_weight_decay: bool = False,
+    caution: bool = False,
+    cautious_weight_decay: bool = False,
+    hyperball_eps: float = 1e-12,
+    axis_name: str | None = None,
+) -> base.GradientTransformationExtraArgs:
+    """Muon/Adam partition with Hyperball replacing decoupled weight decay.
+
+    By default, Hyperball is applied to the same leaves routed to Muon. Adam
+    fallback leaves receive ordinary Adam-style parameter deltas unless
+    `fallback_weight_decay=True`.
+    """
+    if adam_learning_rate is None:
+        adam_learning_rate = learning_rate
+
+    if muon_weight_dimension_numbers is None:
+        use_default_muon_specs = True
+
+        def param_labels(params: base.Params) -> base.Params:
+            return jax.tree.map(
+                lambda p: (
+                    None
+                    if _is_aux_leaf(p)
+                    else ("muon" if getattr(p, "ndim", 0) == 2 else "adam")
+                ),
+                params,
+                is_leaf=_is_aux_leaf,
+            )
+
+        def get_resolved_dim_nums(params: base.Params) -> base.Params:
+            return jax.tree.map(
+                lambda p: (
+                    optax_muon.MuonDimensionNumbers()
+                    if not _is_aux_leaf(p) and getattr(p, "ndim", 0) == 2
+                    else _masking.MaskedNode()
+                ),
+                params,
+                is_leaf=lambda x: _is_aux_leaf(x),
+            )
+
+    else:
+        use_default_muon_specs = False
+
+        def get_resolved_dim_nums(params: base.Params) -> Any:
+            if callable(muon_weight_dimension_numbers):
+                dim_num_fn = cast(
+                    Callable[[base.Params], Any], muon_weight_dimension_numbers
+                )
+                return dim_num_fn(params)
+            return muon_weight_dimension_numbers
+
+        def param_labels(params: base.Params) -> base.Params:
+            dim_nums = get_resolved_dim_nums(params)
+
+            def populate_subtree(dim_num, subtree):
+                return jax.tree.map(
+                    lambda p: (
+                        None
+                        if _is_aux_leaf(p)
+                        else ("muon" if dim_num is not None else "adam")
+                    ),
+                    subtree,
+                    is_leaf=_is_aux_leaf,
+                )
+
+            return jax.tree.map(
+                populate_subtree,
+                dim_nums,
+                params,
+                is_leaf=lambda x: (
+                    x is None or isinstance(x, optax_muon.MuonDimensionNumbers)
+                ),
+            )
+
+        dim_nums_arg = muon_weight_dimension_numbers
+
+    def muon_weight_dim_nums_fn(params: base.Params) -> base.Params:
+        if use_default_muon_specs:
+            return get_resolved_dim_nums(params)
+
+        if callable(dim_nums_arg):
+            dim_num_fn = cast(Callable[[base.Params], Any], dim_nums_arg)
+            dim_nums = dim_num_fn(params)
+        else:
+            dim_nums = dim_nums_arg
+        mask = jax.tree.map(lambda label: label == "muon", param_labels(params))
+
+        def populate_subtree(dim_num, submask):
+            return jax.tree.map(
+                lambda m: dim_num if m else _masking.MaskedNode(),
+                submask,
+            )
+
+        return jax.tree.map(
+            populate_subtree,
+            dim_nums,
+            mask,
+            is_leaf=lambda x: (
+                x is None
+                or isinstance(x, optax_muon.MuonDimensionNumbers)
+                or isinstance(x, _masking.MaskedNode)
+            ),
+        )
+
+    default_hyperball_mask = _spec_mask_from_resolver(
+        get_resolved_dim_nums,
+        is_leaf=lambda x: (
+            x is None
+            or isinstance(x, optax_muon.MuonDimensionNumbers)
+            or isinstance(x, _masking.MaskedNode)
+        ),
+    )
+    resolved_hyperball_mask = (
+        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
+    )
+
+    partitioned_updates = combine.partition(
+        transforms={
+            "muon": combine.chain(
+                optax_muon.scale_by_muon(
+                    ns_coeffs=ns_coeffs,
+                    ns_steps=ns_steps,
+                    beta=beta,
+                    eps=eps,
+                    mu_dtype=mu_dtype,
+                    nesterov=nesterov,
+                    adaptive=adaptive,
+                    weight_dimension_numbers=muon_weight_dim_nums_fn,
+                ),
+                optax_muon.scale_by_shape(
+                    weight_dimension_numbers=muon_weight_dim_nums_fn,
+                    consistent_rms=consistent_rms,
+                ),
+            ),
+            "adam": scale_by_adam(
+                b1=adam_b1,
+                b2=adam_b2,
+                eps=eps,
+                eps_root=adam_eps_root,
+                mu_dtype=mu_dtype,
+                weight_decay=0.0,
+                weight_decay_mask=None,
+                nesterov=nesterov,
+            ),
+        },
+        param_labels=param_labels,
+    )
+
+    return combine.chain(
+        partitioned_updates,
+        apply_hyperball(
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            weight_decay_mask=weight_decay_mask,
+            hyperball_mask=resolved_hyperball_mask,
+            fallback_learning_rate=adam_learning_rate,
+            fallback_weight_decay=fallback_weight_decay,
+            caution=caution,
+            cautious_weight_decay=cautious_weight_decay,
+            eps=hyperball_eps,
+            axis_name=axis_name,
+        ),
+    )
+
+
+def rmnp_hyperball(
+    learning_rate: base.ScalarOrSchedule,
+    beta: jax.typing.ArrayLike = 0.95,
+    eps: jax.typing.ArrayLike = 1e-8,
+    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay_mask: MaskOrFn = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    *,
+    nesterov: bool = True,
+    adaptive: bool = False,
+    adam_b1: jax.typing.ArrayLike = 0.9,
+    adam_b2: jax.typing.ArrayLike = 0.999,
+    adam_eps_root: jax.typing.ArrayLike = 0.0,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
+    consistent_rms: jax.typing.ArrayLike | None = None,
+    hyperball_mask: MaskOrFn = None,
+    fallback_weight_decay: bool = False,
+    caution: bool = False,
+    cautious_weight_decay: bool = False,
+    hyperball_eps: float = 1e-12,
+    axis_name: str | None = None,
+    key: jax.Array = jax.random.PRNGKey(42),
+) -> base.GradientTransformationExtraArgs:
+    """RMNP/Adam partition with Hyperball replacing decoupled weight decay.
+
+    By default, Hyperball is applied to the same leaves routed to RMNP. Adam
+    fallback leaves receive ordinary Adam-style parameter deltas unless
+    `fallback_weight_decay=True`.
+    """
+    if adam_learning_rate is None:
+        adam_learning_rate = learning_rate
+
+    key_rmnp, key_adam = jax.random.split(key, 2)
+
+    def get_resolved_dim_nums(params: base.Params) -> base.Params:
+        return _get_dimension_numbers(rmnp_weight_dimension_numbers, params)
+
+    def param_labels(params: base.Params) -> base.Params:
+        dim_nums = get_resolved_dim_nums(params)
+        return jax.tree.map(
+            lambda d, p: None if p is None else ("rmnp" if d is not None else "adam"),
+            dim_nums,
+            params,
+            is_leaf=_is_dimension_numbers_leaf,
+        )
+
+    def rmnp_weight_dim_nums_fn(params: base.Params) -> base.Params:
+        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+
+    default_hyperball_mask = _spec_mask_from_resolver(
+        get_resolved_dim_nums,
+        is_leaf=_is_dimension_numbers_leaf,
+    )
+    resolved_hyperball_mask = (
+        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
+    )
+
+    partitioned_updates = combine.partition(
+        transforms={
+            "rmnp": combine.chain(
+                scale_by_rmnp(
+                    beta=beta,
+                    eps=eps,
+                    mu_dtype=mu_dtype,
+                    nesterov=nesterov,
+                    adaptive=adaptive,
+                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
+                    key=key_rmnp,
+                ),
+                scale_by_rmnp_shape(
+                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
+                    consistent_rms=consistent_rms,
+                ),
+            ),
+            "adam": scale_by_adam(
+                b1=adam_b1,
+                b2=adam_b2,
+                eps=eps,
+                eps_root=adam_eps_root,
+                mu_dtype=mu_dtype,
+                weight_decay=0.0,
+                weight_decay_mask=None,
+                nesterov=nesterov,
+                key=key_adam,
+            ),
+        },
+        param_labels=param_labels,
+    )
+
+    return combine.chain(
+        partitioned_updates,
+        apply_hyperball(
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            weight_decay_mask=weight_decay_mask,
+            hyperball_mask=resolved_hyperball_mask,
+            fallback_learning_rate=adam_learning_rate,
             fallback_weight_decay=fallback_weight_decay,
             caution=caution,
             cautious_weight_decay=cautious_weight_decay,
@@ -602,7 +898,7 @@ def prism_hyperball(
             lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def prism_weight_dim_nums_fn(params: base.Params) -> base.Params:
@@ -610,7 +906,7 @@ def prism_hyperball(
 
     default_hyperball_mask = _spec_mask_from_resolver(
         get_resolved_dim_nums,
-        is_leaf=_is_prism_leaf,
+        is_leaf=_is_dimension_numbers_leaf,
     )
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else default_hyperball_mask
@@ -735,7 +1031,7 @@ def _partitioned_aurora_hyperball(
             lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     def aurora_weight_dim_nums_fn(params: base.Params) -> base.Params:
@@ -800,7 +1096,7 @@ def _partitioned_aurora_hyperball(
 
     default_hyperball_mask = _spec_mask_from_resolver(
         get_resolved_dim_nums,
-        is_leaf=_is_prism_leaf,
+        is_leaf=_is_dimension_numbers_leaf,
     )
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else default_hyperball_mask
@@ -1016,6 +1312,8 @@ __all__ = [
     "scale_by_hyperball",
     "adamw_hyperball",
     "kron_hyperball",
+    "muon_hyperball",
+    "rmnp_hyperball",
     "prism_hyperball",
     "aurora_hyperball",
     "riemannian_aurora_hyperball",

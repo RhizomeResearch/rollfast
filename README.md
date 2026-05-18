@@ -4,8 +4,10 @@
 implement cutting-edge optimizers that go beyond standard Euclidean gradient
 descent. It provides production-ready implementations of optimizers like
 **PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
-Spectral Shaping), and **Aurora** (leverage-aware rectangular matrix
-optimization), plus **Hyperball** norm-preserving weight decay and a robust
+Spectral Shaping), **Aurora** (leverage-aware rectangular matrix optimization),
+and **Pion** (spectrum-preserving orthogonal equivalence updates), plus
+**RMNP** (row-momentum normalized preconditioning), **Hyperball**
+norm-preserving weight decay, **SODA**, and a robust
 **Schedule-Free** wrapper.
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
@@ -70,16 +72,62 @@ projects the parameter back to that sphere.
 - **Mechanism**: `apply_hyperball` is a terminal Optax transform; it should be
   the final transform in a chain and should not be followed by a learning-rate
   scale transform.
-- **Wrappers**: `adamw_hyperball`, `kron_hyperball`, `prism_hyperball`,
-  `aurora_hyperball`, and `riemannian_aurora_hyperball` replace decoupled
-  weight decay in the corresponding optimizer families.
+- **Wrappers**: `adamw_hyperball`, `kron_hyperball`, `muon_hyperball`,
+  `rmnp_hyperball`, `prism_hyperball`, `aurora_hyperball`, and
+  `riemannian_aurora_hyperball`
+  replace decoupled weight decay in the corresponding optimizer families.
 - **Partitioning**: By default, Hyperball applies to rank >= 2 leaves. PRISM and
   Aurora wrappers apply Hyperball to the same leaves routed to the structured
   optimizer branch, while fallback leaves use Adam-style updates.
 - **Reference**: *Fantastic Pretraining Optimizers and Where to Find Them 2.1:
   Hyperball Optimization* (Wen et al., 2025).
 
-### 5. Schedule-Free Optimization
+### 5. Pion (Spectrum-Preserving Orthogonal Equivalence)
+
+Pion updates matrix parameters by multiplying the current weight by left and
+right orthogonal transformations rather than adding an ambient-space update.
+This keeps each optimized matrix on its iso-spectral manifold, preserving its
+singular values up to the numerical error of the second-order exponential
+approximation.
+
+- **Mechanism**: Builds in-side and out-side skew-symmetric Lie-algebra
+  gradients, tracks Adam-style moments in those tangent spaces, and applies
+  RMS-normalized second-order exponential updates.
+- **Partitioning**: Automatically routes 2D matrices to Pion and routes vectors,
+  scalars, and unspecified tensors to AdamW.
+- **Reference**: *Pion: A Spectrum-Preserving Optimizer via Orthogonal
+  Equivalence Transformation* (Shi et al., 2026).
+
+### 6. RMNP (Row-Momentum Normalized Preconditioning)
+
+RMNP is a Muon-style matrix optimizer that replaces Newton-Schulz
+orthogonalization with row-wise L2 normalization of the momentum matrix. This
+keeps the matrix branch linear in the number of parameters while preserving the
+matrix/fallback partitioning pattern used by Muon-like optimizers.
+
+- **Mechanism**: Tracks first momentum, normalizes rows in the configured matrix
+  layout, and applies Muon-style shape scaling.
+- **Partitioning**: Automatically routes 2D matrices to RMNP and routes vectors,
+  scalars, and unspecified tensors to AdamW.
+- **Wrappers**: `soda_rmnp` and `rmnp_hyperball` are provided.
+- **Reference**: *RMNP: Row-Momentum Normalized Preconditioning for Scalable
+  Matrix-Based Optimization* (Deng et al., 2026).
+
+### 7. SODA (Optimistic Dual Averaging Wrapper)
+
+SODA wraps an existing base optimizer and replaces tuned weight decay with a
+parameter-free initialization-centered anchor term that decays as `1 / (k + 2)`.
+
+- **Mechanism**: Adds `(z0 - params) / (k + 2)` to the base optimizer update,
+  where `z0` is the initialization. The base optimizer should include its
+  learning-rate schedule and should not include weight decay.
+- **Wrappers**: `soda_adam`, `soda_prism`, `soda_kron`, `soda_muon`, and
+  `soda_rmnp` are provided. `soda_muon` uses `optax.contrib.muon` as its base
+  optimizer.
+- **Reference**: *Optimistic Dual Averaging Unifies Modern Optimizers*
+  (Pethick et al., 2026).
+
+### 8. Schedule-Free Optimization
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
@@ -89,7 +137,7 @@ base optimizer) and an averaged sequence $x$ (used for evaluation). Available fo
   theoretically grounded averaging.
 - **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
 
-### 6. Magma (Momentum-Aligned Gradient Masking)
+### 9. Magma (Momentum-Aligned Gradient Masking)
 
 While training large language models (LLMs) typically relies almost exclusively
 on dense adaptive optimizers, `rollfast` implements a stochastic masking
@@ -216,6 +264,29 @@ optimizer = prism_hyperball(
 )
 ```
 
+Muon is available through Optax's contrib implementation:
+
+```python
+from rollfast import muon_hyperball
+
+optimizer = muon_hyperball(
+    learning_rate=1e-3,
+    weight_decay=0.01,
+    ns_steps=5,
+)
+```
+
+RMNP has a matching Hyperball wrapper:
+
+```python
+from rollfast import rmnp_hyperball
+
+optimizer = rmnp_hyperball(
+    learning_rate=1e-3,
+    weight_decay=0.01,
+)
+```
+
 For direct Optax composition, use `apply_hyperball` as the final transform in
 the chain.
 
@@ -252,7 +323,64 @@ eval_params = schedule_free_eval_params(opt_state, params)
 
 *Note: We also provide `schedule_free_kron` and `schedule_free_adam`.*
 
-### 5. PSGD Kron
+### 5. Pion
+
+```python
+from rollfast import pion
+
+optimizer = pion(
+    learning_rate=1e-3,
+    b1=0.9,
+    b2=0.999,
+    rms_constant=1.0,
+    alternating=True,
+)
+```
+
+### 6. RMNP
+
+```python
+from rollfast import rmnp
+
+optimizer = rmnp(
+    learning_rate=1e-3,
+    beta=0.95,
+    consistent_rms=None,
+)
+```
+
+For Equinox modules or convolution kernels, pass explicit dimension specs with
+`MatrixDimensionNumbers` via `rmnp_weight_dimension_numbers` so row
+normalization uses the intended flattened matrix layout.
+
+### 7. SODA
+
+```python
+from rollfast import soda_prism, soda_muon, soda_rmnp
+
+optimizer = soda_prism(
+    learning_rate=1e-3,
+    total_steps=10000,
+    mode="bidirectional",
+    inv_steps=8,
+)
+
+muon_optimizer = soda_muon(
+    learning_rate=1e-3,
+    total_steps=10000,
+    ns_steps=5,
+)
+
+rmnp_optimizer = soda_rmnp(
+    learning_rate=1e-3,
+    total_steps=10000,
+)
+```
+
+SODA convenience wrappers disable base optimizer weight decay and add the
+initialization-centered `1 / (k + 2)` anchor term from the paper.
+
+### 8. PSGD Kron
 
 The classic Kronecker-factored PSGD optimizer.
 
@@ -485,6 +613,30 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
 }
 ```
 
+**Pion:**
+
+```bibtex
+@article{pion2026,
+  title   = {Pion: A Spectrum-Preserving Optimizer via Orthogonal Equivalence Transformation},
+  author  = {Shi, Kexuan and Li, Hanxuan and Qiu, Zeju and Wen, Yandong
+             and Buchholz, Simon and Liu, Weiyang},
+  journal = {arXiv preprint arXiv:2605.12492},
+  year    = {2026}
+}
+```
+
+**RMNP:**
+
+```bibtex
+@article{deng2026rmnp,
+  title   = {RMNP: Row-Momentum Normalized Preconditioning for Scalable Matrix-Based Optimization},
+  author  = {Deng, Shenyang and Ouyang, Zhuoli and Pang, Tianyu and Liu, Zihang
+             and Jin, Ruochen and Yu, Shuhua and Yang, Yaoqing},
+  journal = {arXiv preprint arXiv:2603.20527},
+  year    = {2026}
+}
+```
+
 **Schedule-Free:**
 
 ```bibtex
@@ -500,6 +652,17 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
   Title = {Schedulers for Schedule-free: Theoretically inspired hyperparameters},
   Year = {2025},
   Eprint = {arXiv:2511.07767},
+}
+```
+
+**SODA:**
+
+```bibtex
+@misc{pethick2026optimistic,
+  Author = {Thomas Pethick and Wanyun Xie and Roman Machacek and Volkan Cevher},
+  Title = {Optimistic Dual Averaging Unifies Modern Optimizers},
+  Year = {2026},
+  Eprint = {arXiv:2605.11172},
 }
 ```
 
