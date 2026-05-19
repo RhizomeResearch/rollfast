@@ -214,6 +214,37 @@ def scale_by_rmnp_shape(
     )
 
 
+def _build_unscaled_rmnp_branch(
+    *,
+    beta: jax.typing.ArrayLike,
+    eps: jax.typing.ArrayLike,
+    mu_dtype: jax.typing.DTypeLike | None,
+    nesterov: bool,
+    adaptive: bool,
+    momentum_accumulator: MomentumAccumulator,
+    weight_dimension_numbers: WeightDimNumOrFn | None,
+    consistent_rms: jax.typing.ArrayLike | None,
+    key: jax.Array,
+) -> base.GradientTransformation:
+    """Build the unscaled RMNP direction branch shared by wrappers."""
+    return combine.chain(
+        scale_by_rmnp(
+            beta=beta,
+            eps=eps,
+            mu_dtype=mu_dtype,
+            nesterov=nesterov,
+            adaptive=adaptive,
+            momentum_accumulator=momentum_accumulator,
+            weight_dimension_numbers=weight_dimension_numbers,
+            key=key,
+        ),
+        scale_by_rmnp_shape(
+            weight_dimension_numbers=weight_dimension_numbers,
+            consistent_rms=consistent_rms,
+        ),
+    )
+
+
 def rmnp(
     learning_rate: base.ScalarOrSchedule,
     beta: jax.typing.ArrayLike = 0.95,
@@ -245,7 +276,7 @@ def rmnp(
 
     partition = _make_matrix_partition_fns(rmnp_weight_dimension_numbers, "rmnp")
     rmnp_components = [
-        scale_by_rmnp(
+        _build_unscaled_rmnp_branch(
             beta=beta,
             eps=eps,
             mu_dtype=mu_dtype,
@@ -253,11 +284,8 @@ def rmnp(
             adaptive=adaptive,
             momentum_accumulator=momentum_accumulator,
             weight_dimension_numbers=partition.masked_specs,
-            key=key_rmnp,
-        ),
-        scale_by_rmnp_shape(
-            weight_dimension_numbers=partition.masked_specs,
             consistent_rms=consistent_rms,
+            key=key_rmnp,
         ),
     ]
     if _has_nonzero_or_scheduled(weight_decay):
