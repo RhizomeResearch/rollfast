@@ -12,7 +12,9 @@ from optax.transforms import _masking
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     _apply_weight_decay_tree,
+    _cast_state_tree,
     _has_nonzero_or_scheduled,
+    _init_magma_state,
     _resolve_mask,
     _resolve_scalar,
     _safe_bias_correction,
@@ -60,7 +62,9 @@ def scale_by_adam(
             numerical stability when backpropagating gradients through the rescaling.
         mu_dtype: Optional `dtype` to be used for the first order accumulator; if
             `None` then the `dtype` is inferred from `params` and `updates`.
-        weight_decay: Strength of the weight decay regularization (only used if use_magma=True).
+        weight_decay: Optional decoupled weight decay applied inside this transform
+            when `params` are provided. Public `adamw` only passes nonzero decay here
+            when `use_magma=True`; otherwise it applies decay as a separate transform.
         weight_decay_mask: A tree with same structure as (or a prefix of) the params PyTree,
             or a Callable that returns such a pytree given the params/updates.
             The leaves should be booleans, `True` for leaves/subtrees you want to
@@ -95,22 +99,7 @@ def scale_by_adam(
         mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # First moment
         nu = optax.tree.zeros_like(params, dtype=mu_dtype)  # Second moment
 
-        if use_magma:
-
-            def _init_s(x):
-                if x is None:
-                    return None
-                if isinstance(x, _masking.MaskedNode):
-                    return _masking.MaskedNode()
-                return jnp.array(0.5, dtype=jnp.float32)
-
-            magma_s = jax.tree.map(
-                _init_s,
-                params,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
-        else:
-            magma_s = ()
+        magma_s = _init_magma_state(params) if use_magma else ()
 
         return ScaleByAdamState(
             count=jnp.zeros([], jnp.int32),
@@ -224,8 +213,8 @@ def scale_by_adam(
             mu_stored = _tree_stochastic_cast(mu_f32, jnp.bfloat16, k1)
             nu_stored = _tree_stochastic_cast(nu_f32, jnp.bfloat16, k2)
         else:
-            mu_stored = mu_f32
-            nu_stored = nu_f32
+            mu_stored = _cast_state_tree(mu_f32, mu_dtype)
+            nu_stored = _cast_state_tree(nu_f32, mu_dtype)
 
         return final_updates, ScaleByAdamState(
             count=count_inc,

@@ -1,5 +1,8 @@
+from typing import cast
+
 import jax.numpy as jnp
-from rollfast.optim.adam import scale_by_adam, adamw
+
+from rollfast.optim.adam import ScaleByAdamState, scale_by_adam, adamw
 from tests._typing import as_array_dict
 
 
@@ -55,3 +58,16 @@ def test_scale_by_adam_weight_decay_accepts_array_mask():
 
     expected = jnp.array([[0.2, 0.0], [0.0, 0.2]], dtype=jnp.float32)
     assert jnp.allclose(updates["w"], expected)
+
+
+def test_scale_by_adam_preserves_non_bf16_state_dtype():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+    tx = scale_by_adam(mu_dtype=jnp.float16)
+    _, state = tx.update(grads, tx.init(params), params)
+    state = cast(ScaleByAdamState, state)
+    mu = as_array_dict(state.mu)
+    nu = as_array_dict(state.nu)
+
+    assert mu["w"].dtype == jnp.float16
+    assert nu["w"].dtype == jnp.float16

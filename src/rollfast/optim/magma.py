@@ -60,18 +60,32 @@ def apply_magma_internal(
     for g, mu, delta, s_prev, block_key in zip(
         leaves_g, leaves_mu, leaves_delta, leaves_s, subkeys
     ):
-        if g is None or isinstance(g, _masking.MaskedNode):
+        if (
+            g is None
+            or mu is None
+            or delta is None
+            or isinstance(g, _masking.MaskedNode)
+            or isinstance(mu, _masking.MaskedNode)
+            or isinstance(delta, _masking.MaskedNode)
+        ):
             new_delta_leaves.append(delta)
             new_s_leaves.append(s_prev)
             continue
 
-        g_f32 = g.astype(jnp.float32)
-        mu_f32 = mu.astype(jnp.float32)
+        compute_dtype = (
+            jnp.complex64
+            if jnp.issubdtype(g.dtype, jnp.complexfloating)
+            or jnp.issubdtype(mu.dtype, jnp.complexfloating)
+            else jnp.float32
+        )
+        g_acc = g.astype(compute_dtype)
+        mu_acc = mu.astype(compute_dtype)
 
-        # Block-wise inner product and norms
-        dot = jnp.sum(g_f32 * mu_f32)
-        norm_g_sq = jnp.sum(g_f32**2)
-        norm_mu_sq = jnp.sum(mu_f32**2)
+        # Block-wise real cosine similarity; vdot conjugates the first argument
+        # so complex leaves get the Hermitian inner product.
+        dot = jnp.real(jnp.vdot(g_acc, mu_acc)).astype(jnp.float32)
+        norm_g_sq = jnp.real(jnp.vdot(g_acc, g_acc)).astype(jnp.float32)
+        norm_mu_sq = jnp.real(jnp.vdot(mu_acc, mu_acc)).astype(jnp.float32)
 
         if axis_name is not None:
             dot = dist_reduce(dot, axis_name, "sum")
