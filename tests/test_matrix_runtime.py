@@ -295,3 +295,35 @@ def test_matrix_runtime_weight_decay_accepts_array_mask():
 
     expected = jnp.array([[0.2, 0.0], [0.0, 0.2]], dtype=jnp.float32)
     assert jnp.allclose(updates["w"], expected)
+
+
+def test_matrix_runtime_axis_name_global_clip_smoke():
+    def run(grad_leaf):
+        grads = {"w": grad_leaf}
+        mu = init_matrix_momentum_state(grads, jnp.float32)
+        runtime = prepare_matrix_runtime_step(
+            grads,
+            count=jnp.zeros([], dtype=jnp.int32),
+            mu=mu,
+            key=jax.random.PRNGKey(0),
+            beta=0.0,
+            nesterov=False,
+            shape_nesterov=False,
+            bias_correction=False,
+            momentum_accumulator="ema",
+            mu_dtype=jnp.float32,
+            raw_global_grad_clip=1.0,
+            permissive_spike_protection=True,
+            use_magma=False,
+            axis_name="devices",
+        )
+        return runtime.effective_updates["w"]
+
+    run = jax.pmap(run, axis_name="devices")
+    grads = jnp.ones((jax.local_device_count(), 2, 2), dtype=jnp.float32)
+    clipped = run(grads)
+    expected_scale = 1.0 / (
+        2.0 * jnp.sqrt(jnp.asarray(jax.local_device_count(), dtype=jnp.float32))
+    )
+
+    assert jnp.allclose(clipped, grads * expected_scale)

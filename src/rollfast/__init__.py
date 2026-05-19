@@ -9,12 +9,15 @@ from .optim.aurora import (
 )
 from .optim.hyperball import (
     adamw_hyperball as adamw_hyperball,
+    apply_hyperball as apply_hyperball,
     aurora_hyperball as aurora_hyperball,
+    hyperball_riemannian_aurora as hyperball_riemannian_aurora,
     kron_hyperball as kron_hyperball,
     muon_hyperball as muon_hyperball,
     prism_hyperball as prism_hyperball,
     riemannian_aurora_hyperball as riemannian_aurora_hyperball,
     rmnp_hyperball as rmnp_hyperball,
+    scale_by_hyperball as scale_by_hyperball,
 )
 from .optim.dimension_numbers import MatrixDimensionNumbers as MatrixDimensionNumbers
 from .optim.dimension_numbers import WeightDimNumOrFn as WeightDimNumOrFn
@@ -60,6 +63,7 @@ from .optim.soda import (
 from .optim.trasmuon import scale_by_trasmuon as scale_by_trasmuon
 from .optim.trasmuon import trasmuon as trasmuon
 from .schedules.schedulefree import (
+    schedule_free as schedule_free,
     schedule_free_adam as schedule_free_adam,
     schedule_free_aurora as schedule_free_aurora,
     schedule_free_eval_params as schedule_free_eval_params,

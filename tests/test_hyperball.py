@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
+import rollfast
 import rollfast.optim.hyperball as hyperball_module
 from rollfast.optim.hyperball import (
     HyperballState,
@@ -255,6 +256,9 @@ def test_hyperball_optimizer_wrappers(optimizer_fn, kwargs):
 def test_public_aliases():
     assert scale_by_hyperball is apply_hyperball
     assert hyperball_riemannian_aurora is riemannian_aurora_hyperball
+    assert rollfast.apply_hyperball is apply_hyperball
+    assert rollfast.scale_by_hyperball is apply_hyperball
+    assert rollfast.hyperball_riemannian_aurora is riemannian_aurora_hyperball
 
 
 def test_muon_hyperball_routes_vectors_to_adam_fallback():

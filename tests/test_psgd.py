@@ -1,5 +1,9 @@
+from typing import cast
+
 import jax.numpy as jnp
-from rollfast.optim.psgd import scale_by_kron, kron
+import jax
+
+from rollfast.optim.psgd import KronState, scale_by_kron, kron
 from tests._typing import as_array_dict
 
 
@@ -46,3 +50,23 @@ def test_scale_by_kron_magma_weight_decay_accepts_array_mask():
 
     assert jnp.all(updates["w"][mask["w"]] > 0)
     assert jnp.allclose(updates["w"][jnp.logical_not(mask["w"])], 0.0)
+
+
+def test_scale_by_kron_spike_skip_preserves_momentum_and_zeroes_update():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"])}
+    tx = scale_by_kron(
+        b1=0.9,
+        preconditioner_update_probability=1.0,
+        raw_global_grad_clip=0.01,
+        permissive_spike_protection=False,
+        grad_clip_max_amps=(1e9, 1e9),
+    )
+    state0 = cast(KronState, tx.init(params))
+    updates, state1 = tx.update(grads, state0, params)
+    updates = as_array_dict(updates)
+    state1 = cast(KronState, state1)
+    mu = cast(dict[str, jax.Array], state1.mu)
+
+    assert jnp.allclose(updates["w"], jnp.zeros_like(updates["w"]))
+    assert jnp.allclose(mu["w"], jnp.zeros_like(mu["w"]))

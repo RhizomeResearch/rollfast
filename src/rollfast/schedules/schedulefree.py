@@ -806,7 +806,61 @@ def schedule_free_kron(
     polyak_f_star: float = 0.0,
     polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
 ) -> base.GradientTransformationExtraArgs:
-    """Schedule-Free PSGD Kron optimizer, optionally using SF+."""
+    """Schedule-Free PSGD Kron optimizer, optionally using SF+.
+
+    Uses the shared `rollfast.schedules.schedulefree` wrapper.
+
+    Args:
+        learning_rate: Peak learning rate.
+        total_steps: Total training steps (required for WSD schedule generation).
+        warmup_fraction: Fraction of steps for warmup.
+        decay_fraction: Fraction of steps for decay.
+        weighting_mode: The weighting strategy (Practical, Theoretical, Schedulet).
+        sf_b1: Schedule-free interpolation parameter (replaces momentum).
+        state_dtype: Dtype for schedule-free z-sequence.
+        weight_decay: Weight decay applied to the optimizer.
+        weight_decay_mask: Mask for weight decay.
+        preconditioner_update_probability: Probability (or schedule) of updating
+            the preconditioner matrix Q at each step.
+        max_size_triangular: Max size for a dimension to be considered for
+            dense/triangular preconditioning. Larger dims become diagonal.
+        max_skew_triangular: Max aspect ratio skew for dense factors.
+        min_ndim_triangular: Minimum tensor rank required for dense preconditioning.
+        memory_save_mode: Strategy to force diagonal approximations to save RAM.
+            Values: [None, 'one_diag', 'all_diag'].
+        update_preconditioner_first: Update Q before applying it to the gradient.
+        preconditioner_lr: Learning rate for the preconditioner matrix Q.
+        preconditioner_init_scale: Initial scale for Q. If None, computed on-the-fly.
+        precond_dtype: Dtype for preconditioner storage (e.g. float32, bfloat16).
+        precond_update_precision: JAX precision for Q update matmuls.
+        precond_grads_precision: JAX precision for gradient application matmuls.
+        scanned_layers: PyTree mask indicating layers that are vmapped/scanned.
+        lax_map_scanned_layers: Use lax.map for scanning (saves memory vs vmap).
+        lax_map_batch_size: Batch size for lax.map.
+        preconditioner_mode: Update rule for Q. See PreconditionerMode enum.
+        beta_lipschitz: EMA factor for Lipschitz constant estimation.
+        track_lipschitz: Enable adaptive step size for Q based on Lipschitz.
+        damping: Numerical damping for stability.
+        grad_clip_max_amps: (max_rms, max_val) for gradient clipping.
+        grad_clip_mode: Strategy for clipping ('per_tensor_rms' or 'global_rms').
+        raw_global_grad_clip: Threshold for global gradient norm clipping (spike protection).
+        permissive_spike_protection: If True, allows updates during spikes if prob=1.0.
+        newton_schulz_iters: Iterations for NS mode (default 5).
+        axis_name: Axis name for distributed (SPMD) reduction.
+        key: PRNG key for stochastic elements.
+
+    Returns:
+        A Schedule-Free gradient transformation.
+
+    References:
+        Defazio, A., Yang, X. A., Mehta, H., Mishchenko, K., Khaled, A., & Cutkosky, A. (2024).
+        The Road Less Scheduled.
+        arXiv preprint arXiv:2405.15682.
+
+        Pun, Y.-M., Buchholz, M., & Gower, R. M. (2025).
+        Schedulers for Schedule-free: Theoretically inspired hyperparameters.
+        arXiv preprint arXiv:2511.07767.
+    """
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -1194,7 +1248,7 @@ def schedule_free_aurora(
 
 
 def schedule_free_eval_params(state: base.OptState, params: base.Params):
-    """Params for evaluation of :func:`optax.contrib.schedule_free`.
+    """Params for evaluation from Rollfast's Schedule-Free state.
 
     Args:
         state: The optimizer state (must be a ScheduleFreeState).

@@ -6,6 +6,8 @@ import jax.numpy as jnp
 import optax
 import pytest
 from optax._src import base
+import rollfast
+import rollfast.schedules as schedules
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.schedules.schedulefree import (
     ScheduleFreeState,
@@ -32,6 +34,12 @@ def test_schedule_free():
     eval_params = schedule_free_eval_params(state, params)
     eval_params = as_array_dict(eval_params)
     assert "w" in eval_params
+
+
+def test_public_schedule_free_exports():
+    assert rollfast.schedule_free is schedule_free
+    assert schedules.schedule_free is schedule_free
+    assert "schedule_free" in schedules.__all__
 
 
 def test_schedule_free_plain_base_optimizer_ignores_extra_args():

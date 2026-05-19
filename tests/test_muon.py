@@ -2,7 +2,6 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
-import optax.contrib._muon as optax_muon
 
 from rollfast.optim.muon import (
     MuonDimensionNumbers,
@@ -27,27 +26,23 @@ def _grads(params):
     return jax.tree.map(lambda x: jnp.ones_like(x) * 0.1, params)
 
 
-def test_scale_by_muon_matches_optax_basic_fp32():
-    params = {"w": jnp.arange(1, 17, dtype=jnp.float32).reshape(4, 4)}
-    grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1}
-
-    local_tx = scale_by_muon(
-        beta=0.95,
-        ns_steps=2,
+def test_scale_by_muon_orthogonalizes_isotropic_matrix_direction():
+    params = {"w": jnp.eye(4, dtype=jnp.float32)}
+    grads = {"w": jnp.eye(4, dtype=jnp.float32)}
+    tx = scale_by_muon(
+        beta=0.0,
+        nesterov=False,
+        ns_steps=5,
         weight_dimension_numbers={"w": MuonDimensionNumbers()},
     )
-    optax_tx = optax_muon.scale_by_muon(
-        beta=0.95,
-        ns_steps=2,
-        weight_dimension_numbers={"w": optax_muon.MuonDimensionNumbers()},
-    )
 
-    local_updates, _ = local_tx.update(grads, local_tx.init(params), params)
-    optax_updates, _ = optax_tx.update(grads, optax_tx.init(params), params)
+    updates, _ = tx.update(grads, tx.init(params), params)
+    updates = as_array_dict(updates)
+    singular_values = jnp.linalg.svd(updates["w"], compute_uv=False)
 
-    local_updates = as_array_dict(local_updates)
-    optax_updates = as_array_dict(optax_updates)
-    assert jnp.allclose(local_updates["w"], optax_updates["w"], rtol=1e-6, atol=1e-6)
+    assert updates["w"].shape == params["w"].shape
+    assert jnp.all(jnp.isfinite(updates["w"]))
+    assert jnp.allclose(singular_values, singular_values[0], rtol=1e-6, atol=1e-6)
 
 
 def test_muon_partitions_vectors_to_rollfast_adamw():

@@ -307,11 +307,16 @@ Equinox dependency with `pip install "rollfast[equinox]"` before using it.
 import equinox as eqx
 
 model = ... # Your Equinox model
+specs = get_equinox_prism_spec(model)
 optimizer = prism(
     learning_rate=1e-3,
-    prism_weight_dimension_numbers=get_equinox_prism_spec
+    prism_weight_dimension_numbers=specs,
 )
 ```
+
+You may also pass `get_equinox_prism_spec` itself as a callable dimension spec;
+Rollfast will call it with the parameter/model PyTree supplied to `init` and
+`update`.
 
 ### 3. Aurora
 
@@ -347,11 +352,15 @@ the optional Equinox dependency.
 ```python
 from rollfast import aurora, get_equinox_aurora_spec
 
+model = ... # Your Equinox model
 optimizer = aurora(
     learning_rate=3e-4,
-    aurora_weight_dimension_numbers=get_equinox_aurora_spec,
+    aurora_weight_dimension_numbers=get_equinox_aurora_spec(model),
 )
 ```
+
+As with PRISM, `aurora_weight_dimension_numbers` also accepts the helper itself
+as a callable spec.
 
 Use `riemannian_aurora` when you want the more expensive balanced-Stiefel
 variant. Aurora does not use Muon/PRISM `ns_coeffs`; tune
@@ -772,7 +781,7 @@ and `retraction_steps` for its balanced-Stiefel solve.
 
 | Parameter                 | Default | Description                                                                                                            |
 | :------------------------ | :------ | :--------------------------------------------------------------------------------------------------------------------- |
-| `hyperball_mask`          | `None`  | Boolean PyTree/callable selecting leaves projected by Hyperball. Defaults to rank >= 2 leaves, or the structured branch for PRISM/Aurora wrappers. |
+| `hyperball_mask`          | `None`  | Boolean PyTree/callable selecting leaves projected by Hyperball. Defaults to rank >= 2 leaves, or the structured branch for Muon/PRISM/RMNP/Aurora wrappers. |
 | `fallback_weight_decay`   | `False` | If True, non-Hyperball leaves receive ordinary decoupled AdamW-style decay.                                            |
 | `caution`                 | `False` | Applies cautious update masking before Hyperball normalization.                                                        |
 | `cautious_weight_decay`   | `False` | Applies the decay term elementwise only where `sign(param) == sign(direction)`.                                        |
@@ -831,9 +840,12 @@ ______________________________________________________________________
 
 ## Development Validation
 
-Before release, run the focused unit suite and the repository validation checks:
+Before release, run the focused unit suite, the slower optional integration
+checks, and the repository validation checks:
 
 ```bash
+uv run pytest -q -m "not slow and not integration"
+uv run pytest -q -m "slow or integration"
 uv run ruff check src tests
 uv run ty check
 uv run pytest -q
