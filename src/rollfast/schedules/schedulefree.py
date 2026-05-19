@@ -310,6 +310,13 @@ def schedule_free(
 
         next_state_key, sr_key = jax.random.split(state.key, 2)
         lr_tree = _resolve_learning_rate(state.step_count, params)
+        lr_leaves = jax.tree.leaves(lr_tree, is_leaf=lambda x: x is None)
+        if any(x is not None and x.shape != () for x in lr_leaves):
+            raise ValueError(
+                "schedule_free learning-rate leaves must be scalar values. "
+                "Return one scalar or a PyTree of scalar leaves from callable "
+                "learning-rate schedules."
+            )
 
         function_value = extra_args.get("function_value", None)
         if function_value is None:

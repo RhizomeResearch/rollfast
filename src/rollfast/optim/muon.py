@@ -27,6 +27,7 @@ from rollfast.optim.dimension_numbers import (
     _make_matrix_partition_fns,
     _normalize_axes,
     _resolve_update_dimension_numbers,
+    _validate_matrix_operand,
 )
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.optim.orthogonalization import (
@@ -149,6 +150,7 @@ def _call_orthogonalize(
 ) -> jax.Array:
     if _is_aux_leaf(x) or dim_nums is None:
         return x
+    _validate_matrix_operand(x, dim_nums, "scale_by_muon")
     return orthogonalize_fn(x, ns_coeffs, ns_steps, preconditioning, eps, dim_nums)
 
 
@@ -214,6 +216,12 @@ def scale_by_muon(
             params=params,
             updates=updates,
             transform_name="scale_by_muon",
+        )
+        jax.tree.map(
+            lambda u, d: _validate_matrix_operand(u, d, "scale_by_muon"),
+            updates,
+            dim_nums,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
         mu = _tree_update_moment_f32(

@@ -97,6 +97,20 @@ def test_schedule_free_does_not_swallow_two_arg_schedule_type_errors():
         tx.update(grads, tx.init(params), params)
 
 
+def test_schedule_free_rejects_array_valued_learning_rate_leaves():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"])}
+
+    def array_lr(count, params):
+        del count, params
+        return {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+
+    tx = schedule_free(optax.sgd(0.01), learning_rate=array_lr)
+
+    with pytest.raises(ValueError, match="scalar"):
+        tx.update(grads, tx.init(params), params)
+
+
 def test_schedule_free_prism():
     params = {"w": jnp.ones((4, 4))}
     grads = {"w": jnp.ones((4, 4)) * 0.1}

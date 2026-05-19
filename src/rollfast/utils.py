@@ -89,7 +89,43 @@ def _resolve_scalar(
 
 def _has_nonzero_or_scheduled(value: base.ScalarOrSchedule) -> bool:
     """Return True when a scalar-or-schedule value may affect updates."""
-    return not isinstance(value, (int, float)) or value > 0.0
+    if isinstance(value, (int, float)):
+        if value < 0.0:
+            raise ValueError("Scalar optimizer coefficients must be nonnegative.")
+        return value != 0.0
+    return True
+
+
+def _validate_positive_static_scalar(
+    name: str,
+    value: jax.typing.ArrayLike | None,
+) -> None:
+    """Validate static Python scalar knobs that must be positive."""
+    if isinstance(value, (int, float)) and value <= 0.0:
+        raise ValueError(f"{name} must be positive, got {value!r}.")
+
+
+def _validate_nonnegative_static_scalar(
+    name: str,
+    value: jax.typing.ArrayLike | None,
+) -> None:
+    """Validate static Python scalar knobs that must be nonnegative."""
+    if isinstance(value, (int, float)) and value < 0.0:
+        raise ValueError(f"{name} must be nonnegative, got {value!r}.")
+
+
+def _validate_grad_clip_max_amps(
+    grad_clip_max_amps: float | tuple[float, float] | None,
+) -> None:
+    """Validate static post-shaping clipping thresholds."""
+    if grad_clip_max_amps is None:
+        return
+    if isinstance(grad_clip_max_amps, tuple):
+        max_rms, max_val = grad_clip_max_amps
+        _validate_positive_static_scalar("grad_clip_max_amps[0]", max_rms)
+        _validate_positive_static_scalar("grad_clip_max_amps[1]", max_val)
+        return
+    _validate_positive_static_scalar("grad_clip_max_amps", grad_clip_max_amps)
 
 
 def _is_mask_callable(mask: Any) -> bool:
@@ -119,6 +155,7 @@ def _apply_weight_decay_tree(
     is_leaf: Callable[[Any], bool] = _is_aux_leaf,
 ) -> base.Updates:
     """Apply decoupled weight decay across a tree with optional array masks."""
+    _validate_nonnegative_static_scalar("weight_decay", weight_decay_step)
     if weight_decay_mask is None:
         return jax.tree.map(
             lambda u, p: _apply_weight_decay_leaf(u, p, weight_decay_step),
@@ -374,7 +411,7 @@ def _tree_momentum_lookahead(
 def apply_updates(
     params: base.Params,
     updates: base.Updates,
-    key: jax.Array,
+    key: jax.Array | None = None,
     stochastic: bool = True,
 ) -> base.Params:
     """Applies an update to the corresponding parameters with optional stochastic
@@ -406,7 +443,7 @@ def apply_updates(
     # Skip PRNG work entirely when deterministic — avoids materializing
     # len(leaves) unused uint32[2] arrays on device.
     if stochastic:
-        keys = jax.random.split(key, len(leaves))
+        keys = jax.random.split(cast(jax.Array, key), len(leaves))
         keys_tree = jax.tree.unflatten(treedef, list(keys))
     else:
         keys_tree = jax.tree.unflatten(treedef, [None] * len(leaves))
@@ -443,7 +480,7 @@ def apply_updates(
 def apply_updates_prefix(
     model: base.Params,
     updates: base.Updates,
-    key: jax.Array,
+    key: jax.Array | None = None,
     stochastic: bool = True,
 ) -> base.Params:
     """Equinox-compatible apply_updates: `updates` may be a prefix of `model`.
@@ -477,7 +514,7 @@ def apply_updates_prefix(
     update_leaves, update_treedef = jax.tree.flatten(updates, is_leaf=is_leaf_fn)
 
     if stochastic:
-        keys = jax.random.split(key, len(update_leaves))
+        keys = jax.random.split(cast(jax.Array, key), len(update_leaves))
         keys_tree = jax.tree.unflatten(update_treedef, list(keys))
     else:
         keys_tree = jax.tree.unflatten(update_treedef, [None] * len(update_leaves))

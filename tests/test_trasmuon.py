@@ -3,6 +3,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.optim.trasmuon import ScaleByTrasMuonState, scale_by_trasmuon, trasmuon
@@ -89,6 +90,35 @@ def test_scale_by_trasmuon_heavy_ball_momentum_accumulator():
     mu = cast(dict[str, jax.Array], state.mu)
 
     assert jnp.allclose(mu["w"], grads["w"])
+
+
+def test_scale_by_trasmuon_rejects_direct_fallback_leaves():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.ones_like, params)
+    tx = scale_by_trasmuon(beta1=0.0, beta2=0.0, ns_iters=2)
+
+    with pytest.raises(ValueError, match="scale_by_trasmuon.*matrix dimension specs"):
+        tx.update(grads, tx.init(params), params)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"clip_alpha": -1.0},
+        {"energy_beta": 1.0},
+        {"clip_beta": -0.1},
+        {"clip_min": 1.1},
+        {"trigger": 0.0},
+        {"warmup_steps": -1},
+        {"mix": 1.1},
+    ],
+)
+def test_scale_by_trasmuon_rejects_invalid_clip_parameters(kwargs):
+    with pytest.raises(ValueError):
+        scale_by_trasmuon(**kwargs)
 
 
 def test_scale_by_trasmuon_bf16_momentum_state():

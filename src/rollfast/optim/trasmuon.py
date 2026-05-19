@@ -21,6 +21,7 @@ from rollfast.optim.dimension_numbers import (
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
+    _validate_matrix_operand,
 )
 from rollfast.optim.muon import (
     MuonDimensionNumbers,
@@ -39,6 +40,8 @@ from rollfast.utils import (
     _is_aux_leaf,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
+    _validate_nonnegative_static_scalar,
+    _validate_positive_static_scalar,
     _zeros_like_tree,
 )
 
@@ -149,6 +152,7 @@ def _trasmuon_leaf_update(
 ) -> tuple[Any, Any, Any, Any, Any]:
     if _is_aux_leaf(mu) or dim_nums is None:
         return mu, v_row, energy_ref, clip_ema, clip_last
+    _validate_matrix_operand(mu, dim_nums, "scale_by_trasmuon")
     if mu.ndim < 2:
         raise ValueError(
             f"TrasMuon optimized parameters must have rank >= 2, got {mu.ndim=}."
@@ -250,6 +254,25 @@ def scale_by_trasmuon(
         raise ValueError(f"ns_iters must be >= 1, got {ns_iters}")
     if update_period < 1:
         raise ValueError(f"update_period must be >= 1, got {update_period}")
+    if warmup_steps < 0:
+        raise ValueError(f"warmup_steps must be nonnegative, got {warmup_steps}")
+    _validate_nonnegative_static_scalar("beta2", beta2)
+    if isinstance(beta2, (int, float)) and beta2 >= 1.0:
+        raise ValueError(f"beta2 must be in [0, 1), got {beta2!r}.")
+    _validate_nonnegative_static_scalar("clip_alpha", clip_alpha)
+    _validate_nonnegative_static_scalar("energy_beta", energy_beta)
+    if isinstance(energy_beta, (int, float)) and energy_beta >= 1.0:
+        raise ValueError(f"energy_beta must be in [0, 1), got {energy_beta!r}.")
+    _validate_nonnegative_static_scalar("clip_beta", clip_beta)
+    if isinstance(clip_beta, (int, float)) and clip_beta >= 1.0:
+        raise ValueError(f"clip_beta must be in [0, 1), got {clip_beta!r}.")
+    _validate_nonnegative_static_scalar("clip_min", clip_min)
+    if isinstance(clip_min, (int, float)) and clip_min > 1.0:
+        raise ValueError(f"clip_min must be <= 1, got {clip_min!r}.")
+    _validate_positive_static_scalar("trigger", trigger)
+    _validate_nonnegative_static_scalar("mix", mix)
+    if isinstance(mix, (int, float)) and mix > 1.0:
+        raise ValueError(f"mix must be <= 1, got {mix!r}.")
 
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
@@ -297,6 +320,12 @@ def scale_by_trasmuon(
             params=params,
             updates=updates,
             transform_name="scale_by_trasmuon",
+        )
+        jax.tree.map(
+            lambda u, d: _validate_matrix_operand(u, d, "scale_by_trasmuon"),
+            updates,
+            dim_nums,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
         mu = _tree_update_moment_f32(

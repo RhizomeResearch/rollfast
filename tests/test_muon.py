@@ -104,6 +104,18 @@ def test_scale_by_muon_shape_callable_spec_requires_params():
         tx.update(updates, tx.init(updates))
 
 
+def test_scale_by_muon_rejects_direct_fallback_leaves():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = _grads(params)
+    tx = scale_by_muon(ns_steps=2)
+
+    with pytest.raises(ValueError, match="scale_by_muon.*matrix dimension specs"):
+        tx.update(grads, tx.init(params), params)
+
+
 def test_muon_bf16_momentum_storage_uses_bf16_state_with_finite_updates():
     params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
     grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1}
