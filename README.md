@@ -48,9 +48,10 @@ weight matrices directly.
   approximate SVD, applying "innovation" updates to the singular vectors while
   damping singular values.
 - **Modes**: Supports `original` (Newton-Schulz iterations on an augmented matrix) and `bidirectional` (Shampoo-style bilateral shaping of both left and right singular-vector spaces). `ns_coeffs` applies to `original`; `bidirectional` uses separate inverse-root coefficients.
-- **Partitioning**: Automatically partitions parameters. High-rank tensors
-  (Linear/Conv weights) are optimized via PRISM; vectors (biases, layernorms) are
-  optimized via AdamW.
+- **Partitioning**: Automatically routes 2D matrix leaves to PRISM and routes
+  vectors, scalars, and unspecified tensors to AdamW. Use
+  `prism_weight_dimension_numbers` or `get_equinox_prism_spec` to opt
+  high-rank/Conv tensors into PRISM.
 - **Reference**: *PRISM: Structured Optimization via Anisotropic Spectral
   Shaping* (Yang, 2026) and *Bidirectional-PRISM: Kronecker-Factored Optimization via Anisotropic Spectral Shaping* (Cesista, 2026).
 

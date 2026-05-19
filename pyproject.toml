@@ -4,7 +4,8 @@ version = "0.4.2"
 description = "JAX implementation of experimental optimizers and schedulers."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "clementpoiret", email = "clement@linux.com" }
 ]

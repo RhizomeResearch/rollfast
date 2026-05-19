@@ -161,6 +161,11 @@ def test_apply_hyperball_rejects_nonpositive_eps():
         apply_hyperball(learning_rate=0.01, eps=0.0)
 
 
+def test_apply_hyperball_rejects_negative_weight_decay():
+    with pytest.raises(ValueError, match="weight_decay.*nonnegative"):
+        apply_hyperball(learning_rate=0.01, weight_decay=-0.1)
+
+
 def test_kron_hyperball():
     params = _params()
     grads = _grads()

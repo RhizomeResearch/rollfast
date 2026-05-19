@@ -32,7 +32,7 @@ from rollfast.optim.psgd import (
     scale_by_kron,
 )
 from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
-from rollfast.utils import _stochastic_round_bf16
+from rollfast.utils import _stochastic_round_bf16, _validate_nonnegative_static_scalar
 
 ScheduleFreeLearningRate = Union[
     base.ScalarOrSchedule,
@@ -142,6 +142,7 @@ def _append_decayed_weights_and_lr(
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]],
     learning_rate: base.ScalarOrSchedule,
 ) -> list[Any]:
+    _validate_nonnegative_static_scalar("weight_decay", weight_decay)
     _wd_is_nonzero = (
         weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
     )

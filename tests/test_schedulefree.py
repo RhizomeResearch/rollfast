@@ -157,6 +157,11 @@ def test_schedule_free_kron_does_not_expose_mu_dtype():
     assert "mu_dtype" not in inspect.signature(schedule_free_kron).parameters
 
 
+def test_schedule_free_kron_rejects_negative_weight_decay():
+    with pytest.raises(ValueError, match="weight_decay.*nonnegative"):
+        schedule_free_kron(learning_rate=0.01, total_steps=100, weight_decay=-0.1)
+
+
 def test_schedule_free_prism_accepts_shared_ns_coeff_schedule():
     params = {"w": jnp.eye(4, dtype=jnp.float32), "b": jnp.ones((4,))}
     grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1, "b": jnp.ones((4,))}

@@ -48,6 +48,7 @@ from rollfast.utils import (
     _is_aux_leaf,
     _resolve_mask,
     _resolve_scalar,
+    _validate_nonnegative_static_scalar,
     dist_reduce,
 )
 
@@ -277,6 +278,8 @@ def apply_hyperball(
     """
     if eps <= 0.0:
         raise ValueError(f"eps must be positive, got {eps}")
+    if isinstance(weight_decay, (int, float)):
+        _validate_nonnegative_static_scalar("weight_decay", weight_decay)
 
     def init_fn(params: base.Params) -> HyperballState:
         return HyperballState(
