@@ -12,9 +12,13 @@ try:
 except ImportError:
     EQUINOX_EQUIMO_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(
-    not EQUINOX_EQUIMO_AVAILABLE, reason="equinox or equimo not available"
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not EQUINOX_EQUIMO_AVAILABLE, reason="equinox or equimo not available"
+    ),
+]
 
 if EQUINOX_EQUIMO_AVAILABLE:
     from rollfast.optim.adam import adamw

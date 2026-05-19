@@ -190,7 +190,8 @@ parameter-free initialization-centered anchor term that decays as `1 / (k + 2)`.
 
 A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
-base optimizer) and an averaged sequence $x$ (used for evaluation). Available for PRISM, PSGD Kron, and Adam.
+base optimizer) and an averaged sequence $x$ (used for evaluation). Available
+for PRISM, Aurora, PSGD Kron, and Adam.
 
 - **Features**: Supports "Practical", "Schedulet", "Theoretical", and "Power" (SF+) weighting modes for
   theoretically grounded averaging. Optionally supports the newer **ScheduleFree+** components (e.g., Polyak step sizes).
@@ -216,6 +217,13 @@ ______________________________________________________________________
 
 ```bash
 pip install rollfast
+```
+
+Equinox integration helpers such as `get_equinox_prism_spec` and
+`get_equinox_aurora_spec` require Equinox, which is optional:
+
+```bash
+pip install "rollfast[equinox]"
 ```
 
 ## Usage
@@ -283,7 +291,7 @@ optimizer = prism(
     mode='bidirectional', # or 'original'
     ns_iters=5,           # Newton-Schulz iterations (for 'original' mode)
     ns_coeffs="standard", # only used by 'original' mode
-    inv_steps=8,          # Polynomial iterations (for 'bidirectional' mode)
+    inv_steps=6,          # Polynomial iterations (for 'bidirectional' mode)
     gamma=1.0,            # Innovation damping
     weight_decay=0.01
 )
@@ -291,7 +299,9 @@ optimizer = prism(
 opt_state = optimizer.init(params)
 ```
 
-**Equinox Integration:** `rollfast` natively supports Equinox. You can use `get_equinox_prism_spec` to automatically construct the exact dimension specification PyTree matching your model.
+**Equinox Integration:** `get_equinox_prism_spec` automatically constructs the
+dimension specification PyTree matching an Equinox model. Install the optional
+Equinox dependency with `pip install "rollfast[equinox]"` before using it.
 
 ```python
 import equinox as eqx
@@ -331,7 +341,8 @@ opt_state = optimizer.init(params)
 ```
 
 For convolution kernels or other high-rank tensors, pass an explicit dimension
-spec. The Equinox Aurora helper returns compatible specs for Aurora.
+spec. The Equinox Aurora helper returns compatible specs for Aurora and requires
+the optional Equinox dependency.
 
 ```python
 from rollfast import aurora, get_equinox_aurora_spec
@@ -360,7 +371,7 @@ optimizer = prism_hyperball(
     learning_rate=1e-3,
     weight_decay=0.01,
     mode='bidirectional',
-    inv_steps=8,
+    inv_steps=6,
     hyperball_mask=None,       # Defaults to the PRISM-routed leaves
     fallback_weight_decay=False
 )
@@ -410,10 +421,14 @@ optimizer = optax.chain(
 
 ### 5. Schedule-Free Optimization
 
-The `schedule_free_*` functions wrap base optimizers with the Schedule-Free logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
+The `schedule_free_*` functions wrap base optimizers with the Schedule-Free
+logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
 
 ```python
-from rollfast import schedule_free_prism, schedule_free_eval_params
+import jax.numpy as jnp
+import optax
+
+from rollfast import schedule_free_eval_params, schedule_free_prism
 
 optimizer = schedule_free_prism(
     learning_rate=1.0,   # Peak LR for internal steps
@@ -424,7 +439,14 @@ optimizer = schedule_free_prism(
     gamma=0.8,           # PRISM specific arg
 )
 
-# In Schedule-Free, updates are applied to the z-sequence parameters.
+params = {"linear": {"w": jnp.zeros((128, 128)), "b": jnp.zeros((128,))}}
+grads = {"linear": {"w": jnp.ones((128, 128)), "b": jnp.ones((128,))}}
+opt_state = optimizer.init(params)
+
+# During training, apply updates to the z-sequence parameters.
+updates, opt_state = optimizer.update(grads, opt_state, params)
+params = optax.apply_updates(params, updates)
+
 # For evaluation/validation, use the averaged x-sequence parameters:
 eval_params = schedule_free_eval_params(opt_state, params)
 ```
@@ -549,7 +571,7 @@ optimizer = soda_prism(
     learning_rate=1e-3,
     total_steps=10000,
     mode="bidirectional",
-    inv_steps=8,
+    inv_steps=6,
 )
 
 muon_optimizer = soda_muon(
@@ -725,7 +747,7 @@ their own interpolation state and do not expose this option.
 | `mode`               | `original` | `original` (Newton-Schulz augmented) or `bidirectional` (Shampoo-style bilateral shaping).  |
 | `ns_iters`           | `5`        | Newton-Schulz iterations. Higher values provide better orthogonality but cost more compute. |
 | `ns_coeffs`          | Muon default | Shared Newton-Schulz coefficients for `mode="original"`; ignored by `mode="bidirectional"`, which uses inverse-root coefficients. |
-| `inv_steps`          | `8`        | Polynomial iterations for mode `bidirectional`.                                             |
+| `inv_steps`          | `6`        | Polynomial iterations for mode `bidirectional`.                                             |
 | `gamma`              | `1.0`      | Damping coefficient for the innovation term. Controls the "anisotropy" of spectral shaping. |
 | `shape_nesterov`     | `True`     | If True, shapes Nesterov momentum; otherwise shapes raw momentum.                           |
 | `momentum_accumulator` | `"ema"`  | `"ema"` for exponential moving average momentum, or `"heavy_ball"` for heavy-ball accumulation. |
@@ -786,8 +808,9 @@ and prevent vanishing progress.
 | Parameter   | Default | Description                                                                                                                                                                                                                                                            |
 | :---------- | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `use_magma` | `False` | Enables Momentum-aligned gradient masking. Operates at the PyTree leaf level to ensure strict cryptographic PRNG independence and JAX topological isomorphism.                                                                                                         |
+| `magma_p`   | `0.5`   | Bernoulli masking probability. A value of `1.0` keeps every leaf active while still applying the alignment score; `0.0` suppresses Magma-managed leaves.                                                                                                               |
 | `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\sigma(\text{cossim} / \tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
-| `key`       | `42`    | Stateful PRNG seed initialized for Magma's Bernoulli sampling. `rollfast` dynamically cycles this key across shards and layers to prevent cryptographic correlation and ensure statistical independence from the base optimizer's noise injections (e.g., Procrustes). |
+| `key`       | `jax.random.PRNGKey(42)` | PRNG key used to initialize Magma's stateful Bernoulli sampling stream. Pass an explicit JAX key when composing multiple Magma-enabled branches and split keys per branch when deterministic independence matters. |
 
 #### Preconditioner Modes
 
@@ -805,6 +828,16 @@ The geometry of the preconditioner update $dQ$ is controlled via
 | `HYPER`     | Hyperbolic                          | Multiplicative hyperbolic update.                                                                                                 |
 
 ______________________________________________________________________
+
+## Development Validation
+
+Before release, run the focused unit suite and the repository validation checks:
+
+```bash
+uv run ruff check src tests
+uv run ty check
+uv run pytest -q
+```
 
 ## Citations
 

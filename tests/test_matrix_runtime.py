@@ -6,6 +6,7 @@ import pytest
 from optax.transforms import _masking
 
 from rollfast.optim._matrix_runtime import (
+    apply_matrix_post_shape_lookahead,
     finish_matrix_runtime_step,
     init_matrix_magma_state,
     init_matrix_momentum_state,
@@ -126,6 +127,95 @@ def test_matrix_runtime_permissive_raw_global_clip_updates_momentum():
     assert bool(runtime.should_skip) is False
     assert jnp.allclose(effective_updates["w"], grads["w"] / 5.0)
     assert jnp.allclose(mu_f32["w"], grads["w"] / 5.0)
+
+
+def test_matrix_runtime_bias_corrected_nesterov_target_is_value_level():
+    grads = {"w": jnp.ones((2, 2), dtype=jnp.float32) * 2.0}
+    mu = init_matrix_momentum_state(grads, jnp.float32)
+
+    runtime = prepare_matrix_runtime_step(
+        grads,
+        count=jnp.zeros([], dtype=jnp.int32),
+        mu=mu,
+        key=jax.random.PRNGKey(0),
+        beta=0.5,
+        nesterov=True,
+        shape_nesterov=True,
+        bias_correction=True,
+        momentum_accumulator="ema",
+        mu_dtype=jnp.float32,
+        raw_global_grad_clip=None,
+        permissive_spike_protection=True,
+        use_magma=False,
+        axis_name=None,
+    )
+    mu_f32 = cast(dict[str, jax.Array], runtime.mu_f32)
+    target_for_shape = cast(dict[str, jax.Array], runtime.target_for_shape)
+
+    assert jnp.allclose(mu_f32["w"], jnp.ones_like(grads["w"]))
+    assert jnp.allclose(target_for_shape["w"], jnp.ones_like(grads["w"]) * (8.0 / 3.0))
+
+
+def test_matrix_runtime_post_shape_lookahead_uses_effective_updates():
+    grads = {"w": jnp.ones((2, 2), dtype=jnp.float32) * 2.0}
+    mu = init_matrix_momentum_state(grads, jnp.float32)
+
+    runtime = prepare_matrix_runtime_step(
+        grads,
+        count=jnp.zeros([], dtype=jnp.int32),
+        mu=mu,
+        key=jax.random.PRNGKey(0),
+        beta=0.5,
+        nesterov=False,
+        shape_nesterov=False,
+        bias_correction=False,
+        momentum_accumulator="ema",
+        mu_dtype=jnp.float32,
+        raw_global_grad_clip=None,
+        permissive_spike_protection=True,
+        use_magma=False,
+        axis_name=None,
+    )
+    shaped = {"w": jnp.ones((2, 2), dtype=jnp.float32) * 10.0}
+
+    looked_ahead = apply_matrix_post_shape_lookahead(
+        shaped,
+        runtime,
+        beta=0.5,
+        nesterov=True,
+        shape_nesterov=False,
+        momentum_accumulator="ema",
+    )
+    looked_ahead = cast(dict[str, jax.Array], looked_ahead)
+
+    assert jnp.allclose(looked_ahead["w"], jnp.ones_like(grads["w"]) * 6.0)
+
+
+def test_matrix_runtime_heavy_ball_nesterov_target():
+    grads = {"w": jnp.ones((2, 2), dtype=jnp.float32) * 2.0}
+    mu = init_matrix_momentum_state(grads, jnp.float32)
+
+    runtime = prepare_matrix_runtime_step(
+        grads,
+        count=jnp.zeros([], dtype=jnp.int32),
+        mu=mu,
+        key=jax.random.PRNGKey(0),
+        beta=0.5,
+        nesterov=True,
+        shape_nesterov=True,
+        bias_correction=True,
+        momentum_accumulator="heavy_ball",
+        mu_dtype=jnp.float32,
+        raw_global_grad_clip=None,
+        permissive_spike_protection=True,
+        use_magma=False,
+        axis_name=None,
+    )
+    mu_f32 = cast(dict[str, jax.Array], runtime.mu_f32)
+    target_for_shape = cast(dict[str, jax.Array], runtime.target_for_shape)
+
+    assert jnp.allclose(mu_f32["w"], grads["w"])
+    assert jnp.allclose(target_for_shape["w"], jnp.ones_like(grads["w"]) * 3.0)
 
 
 def test_matrix_runtime_scheduled_weight_decay_uses_pre_increment_count():

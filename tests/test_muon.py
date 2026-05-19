@@ -157,6 +157,27 @@ def test_scale_by_muon_magma_weight_decay_mask():
     assert jnp.allclose(updates["skip"], jnp.zeros_like(updates["skip"]))
 
 
+def test_scale_by_muon_magma_scheduled_weight_decay_uses_pre_increment_count():
+    params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
+    grads = jax.tree.map(jnp.zeros_like, params)
+    tx = scale_by_muon(
+        beta=0.0,
+        nesterov=False,
+        ns_steps=2,
+        use_magma=True,
+        magma_p=1.0,
+        weight_decay=lambda count: jnp.where(count == 0, 0.2, 0.9),
+    )
+
+    updates, state = tx.update(grads, tx.init(params), params)
+    next_updates, _ = tx.update(grads, state, params)
+    updates = as_array_dict(updates)
+    next_updates = as_array_dict(next_updates)
+
+    assert jnp.allclose(updates["w"], jnp.ones_like(params["w"]) * 0.1)
+    assert jnp.allclose(next_updates["w"], jnp.ones_like(params["w"]) * 0.45)
+
+
 def test_muon_magma_wrapper_masks_matrix_and_adam_fallback_weight_decay():
     params = {
         "w": jnp.ones((4, 4), dtype=jnp.float32),
