@@ -47,6 +47,16 @@ def test_get_dimension_numbers_defaults_to_rank_two_leaves():
     assert dim_nums["none"] is None
 
 
+def test_bare_dimension_numbers_are_single_leaf_only():
+    spec = MatrixDimensionNumbers(reduction_axis=1, output_axis=0)
+    params = jnp.ones((2, 3), dtype=jnp.float32)
+
+    assert _get_dimension_numbers(spec, params) == spec
+
+    with pytest.raises(ValueError, match="bare MatrixDimensionNumbers"):
+        _get_dimension_numbers(spec, {"w": params})
+
+
 def test_mask_dimension_numbers_replaces_none_leaves():
     dim_nums = {"matrix": MatrixDimensionNumbers(), "vector": None}
 
@@ -166,6 +176,25 @@ def test_explicit_dimension_spec_tree_works_without_params_at_update():
 
     assert updates["w"].shape == params["w"].shape
     assert jnp.all(jnp.isfinite(updates["w"]))
+
+
+def test_bare_dimension_spec_works_without_params_for_single_leaf_update():
+    params = jnp.ones((2, 3, 4), dtype=jnp.float32)
+    grads = jnp.ones_like(params) * 0.1
+    tx = scale_by_prism(
+        ns_iters=2,
+        grad_clip_max_amps=None,
+        weight_dimension_numbers=MatrixDimensionNumbers(
+            reduction_axis=1,
+            output_axis=2,
+        ),
+    )
+
+    updates, _ = tx.update(grads, tx.init(params))
+    updates = cast(jax.Array, updates)
+
+    assert updates.shape == params.shape
+    assert jnp.all(jnp.isfinite(updates))
 
 
 def test_callable_dimension_specs_require_params_at_update():

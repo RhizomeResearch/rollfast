@@ -571,6 +571,10 @@ convolution kernels or other high-rank tensors, either use the public wrapper so
 unsupported leaves route to AdamW, or pass an explicit PyTree/callable
 `weight_dimension_numbers` spec to the direct transform.
 
+A bare `MatrixDimensionNumbers(...)` is only for a single array leaf. It is not
+broadcast across PyTrees; for structured params, pass a matching PyTree of
+specs/`None` or a callable such as `get_equinox_prism_spec`.
+
 ### 10. SODA
 
 ```python

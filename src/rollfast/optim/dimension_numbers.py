@@ -27,21 +27,10 @@ DimNumsTree = base.Params
 WeightDimNumOrFn = (
     MatrixDimensionNumbers | DimNumsTree | Callable[[base.Params], DimNumsTree]
 )
-# NOTE: `MatrixDimensionNumbers` as a single bare value is currently accepted by
-# the public type alias because PRISM exposed that shape before these helpers were
-# factorized. The implementation below still treats any non-callable, non-None
-# value as an already-aligned PyTree, so passing one bare spec to a partitioned
-# wrapper with dict/tree params raises a tree-structure mismatch instead of
-# broadcasting that spec to every eligible array leaf.
-#
-# Before changing this, discuss the intended interface with Clement:
-# - Option A: keep the inherited behavior and remove the bare
-#   `MatrixDimensionNumbers` case from the alias/docs, making callers pass a
-#   PyTree or callable when they want explicit routing.
-# - Option B: make a bare spec mean "use this spec for every non-auxiliary array
-#   leaf", probably with rank checks in `_compute_matrix_reshape`.
-# The important bit is to choose one meaning and make PRISM, Aurora, Muon, RMNP,
-# TrasMuon, NorMuon, and Pion agree.
+# A bare MatrixDimensionNumbers is intentionally single-leaf only. It is useful
+# for direct transforms over one array, but it is not broadcast over PyTrees:
+# structured params must use a matching spec tree or callable so routing remains
+# explicit for biases, embeddings, convolution kernels, and fallback leaves.
 MaskOrFn: TypeAlias = Any | Callable[[base.Params], Any] | None
 ReshapeFn = Callable[[jax.Array], jax.Array]
 
@@ -61,6 +50,10 @@ def _is_dimension_numbers_leaf(x: Any) -> bool:
         or isinstance(x, MatrixDimensionNumbers)
         or isinstance(x, _masking.MaskedNode)
     )
+
+
+def _is_array_like_leaf(x: Any) -> bool:
+    return hasattr(x, "shape") and hasattr(x, "dtype")
 
 
 def _get_dimension_numbers(
@@ -87,6 +80,15 @@ def _get_dimension_numbers(
             Callable[[base.Params], DimNumsTree], weight_dimension_numbers
         )
         return dim_num_fn(params)
+
+    if isinstance(weight_dimension_numbers, MatrixDimensionNumbers):
+        if _is_array_like_leaf(params):
+            return weight_dimension_numbers
+        raise ValueError(
+            "A bare MatrixDimensionNumbers can only be used with a single array "
+            "leaf. For PyTree params, pass a matching PyTree of specs/None or a "
+            "callable dimension-spec function; bare specs are not broadcast."
+        )
 
     return weight_dimension_numbers
 
