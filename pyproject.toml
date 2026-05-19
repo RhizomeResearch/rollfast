@@ -49,7 +49,6 @@ build-backend = "uv_build"
 dev = [
     "equimo>=0.5.0a17",
     "equinox>=0.13.6",
-    "pre-commit>=4.5.1",
     "pytest>=9.0.2",
     "ruff>=0.15.7",
     "ty>=0.0.24",

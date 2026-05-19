@@ -568,14 +568,18 @@ or `contranormuon_weight_dimension_numbers` for high-rank tensors.
 The direct transforms such as `scale_by_rmnp`, `scale_by_normuon`,
 `scale_by_trasmuon`, and `scale_by_pion` are low-level matrix-branch
 primitives. They do not include the AdamW fallback used by public wrappers such
-as `rmnp`, `normuon`, `trasmuon`, and `pion`; `scale_by_pion` rejects leaves
-without Pion dimension specs because it already applies its learning rate
-internally.
+as `rmnp`, `normuon`, `trasmuon`, and `pion`; direct matrix transforms reject
+updated non-auxiliary leaves without matrix dimension specs instead of silently
+using them as fallback leaves.
 
 By default, only 2D array leaves receive matrix dimension numbers. For
 convolution kernels or other high-rank tensors, either use the public wrapper so
 unsupported leaves route to AdamW, or pass an explicit PyTree/callable
 `weight_dimension_numbers` spec to the direct transform.
+
+Matrix optimizers operate on real matrix geometry. Complex parameters should be
+routed to an Adam fallback branch or represented as real-valued tensors before
+using Muon/PRISM/Aurora/RMNP/NorMuon/TrasMuon/Pion matrix branches.
 
 A bare `MatrixDimensionNumbers(...)` is only for a single array leaf. It is not
 broadcast across PyTrees; for structured params, pass a matching PyTree of

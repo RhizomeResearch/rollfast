@@ -49,7 +49,10 @@ from .optim.prism import (
     prism as prism,
     scale_by_prism as scale_by_prism,
 )
+from .optim.psgd import GradClipMode as GradClipMode
+from .optim.psgd import PreconditionerMode as PreconditionerMode
 from .optim.psgd import kron as kron
+from .optim.psgd import precond_update_prob_schedule as precond_update_prob_schedule
 from .optim.psgd import scale_by_kron as scale_by_kron
 from .optim.rmnp import rmnp as rmnp
 from .optim.rmnp import scale_by_rmnp as scale_by_rmnp
@@ -65,6 +68,7 @@ from .optim.soda import (
 from .optim.trasmuon import scale_by_trasmuon as scale_by_trasmuon
 from .optim.trasmuon import trasmuon as trasmuon
 from .schedules.schedulefree import (
+    WeightingMode as WeightingMode,
     schedule_free as schedule_free,
     schedule_free_adam as schedule_free_adam,
     schedule_free_aurora as schedule_free_aurora,

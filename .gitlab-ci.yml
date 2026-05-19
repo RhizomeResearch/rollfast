@@ -24,6 +24,14 @@ lint:
     - uv run ruff check .
     - uv run ruff format --check .
     - uv run ty check
+    - uv run python -c "import tomllib, rollfast; version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; assert rollfast.__version__ == version, f'rollfast.__version__={rollfast.__version__} != pyproject.toml version={version}'"
+
+minimal-import:
+  stage: test
+  before_script:
+    - uv sync --no-dev
+  script:
+    - uv run --no-dev python -c "import rollfast"
 
 test:
   stage: test
