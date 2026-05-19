@@ -127,6 +127,23 @@ def test_scale_by_normuon_rejects_nonpositive_fixed_rms_scalar():
         )
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta1": -0.1},
+        {"beta1": 1.0},
+        {"beta2": -0.1},
+        {"beta2": 1.0},
+        {"eps": 0.0},
+        {"ns_iters": 0},
+        {"contra_power_iters": 0},
+    ],
+)
+def test_scale_by_normuon_rejects_invalid_static_parameters(kwargs):
+    with pytest.raises(ValueError):
+        scale_by_normuon(**kwargs)
+
+
 def test_scale_by_normuon_accepts_preconditioning_selector():
     params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
     grads = {"w": jnp.arange(16, dtype=jnp.float32).reshape(4, 4) + 1.0}

@@ -53,6 +53,24 @@ def test_scale_by_rmnp_rejects_direct_fallback_leaves():
         tx.update(grads, tx.init(params), params)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta": -0.1},
+        {"beta": 1.0},
+        {"eps": 0.0},
+    ],
+)
+def test_scale_by_rmnp_rejects_invalid_static_parameters(kwargs):
+    with pytest.raises(ValueError):
+        scale_by_rmnp(**kwargs)
+
+
+def test_scale_by_rmnp_shape_rejects_invalid_consistent_rms():
+    with pytest.raises(ValueError, match="consistent_rms"):
+        scale_by_rmnp_shape(consistent_rms=0.0)
+
+
 def test_scale_by_rmnp_heavy_ball_momentum_accumulator():
     params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
     grads = {"w": jnp.ones_like(params["w"]) * 0.1}

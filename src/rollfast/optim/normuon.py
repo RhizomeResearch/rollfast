@@ -39,11 +39,10 @@ from rollfast.utils import (
     MomentumAccumulator,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
-    _store_moment_tree,
-    _tree_bias_correction_momentum,
-    _tree_momentum_lookahead,
-    _tree_update_moment_f32,
+    _prepare_first_moment_runtime,
     _unzip_leaf_tuple_tree,
+    _validate_beta_static_scalar,
+    _validate_positive_static_scalar,
     _zeros_like_tree,
 )
 
@@ -243,6 +242,10 @@ def scale_by_normuon(
         raise ValueError(f"ns_iters must be >= 1, got {ns_iters}")
     if contra_power_iters < 1:
         raise ValueError(f"contra_power_iters must be >= 1, got {contra_power_iters}")
+    _validate_beta_static_scalar("beta1", beta1)
+    if beta2 is not None:
+        _validate_beta_static_scalar("beta2", beta2)
+    _validate_positive_static_scalar("eps", eps)
     if (
         normalization_rescale == "fixed_rms"
         and isinstance(normalization_rms, Real)
@@ -288,40 +291,19 @@ def scale_by_normuon(
             dim_nums,
             is_leaf=_is_dimension_numbers_leaf,
         )
-        count_inc = numerics.safe_increment(state.count)
-        mu = _tree_update_moment_f32(
+        runtime = _prepare_first_moment_runtime(
             updates,
             state.mu,
+            state.count,
+            state.key,
             beta1,
+            canonical_mu_dtype,
+            nesterov=nesterov,
+            bias_correction=bias_correction,
             momentum_accumulator=momentum_accumulator,
         )
-
-        if bias_correction:
-            mu_target = _tree_bias_correction_momentum(
-                mu,
-                beta1,
-                count_inc,
-                momentum_accumulator=momentum_accumulator,
-            )
-            updates_target = _tree_bias_correction_momentum(
-                updates,
-                beta1,
-                count_inc,
-                momentum_accumulator=momentum_accumulator,
-            )
-        else:
-            mu_target = mu
-            updates_target = updates
-
-        if nesterov:
-            direction = _tree_momentum_lookahead(
-                mu_target,
-                updates_target,
-                beta1,
-                momentum_accumulator=momentum_accumulator,
-            )
-        else:
-            direction = mu_target
+        count_inc = runtime.count
+        direction = runtime.direction
 
         resolved_ns_coeffs = resolve_ns_coeffs(ns_coeffs, ns_iters)
         try:
@@ -353,10 +335,11 @@ def scale_by_normuon(
         )
         new_updates, nu = _unzip_leaf_tuple_tree(result, 2)
 
-        mu, key = _store_moment_tree(mu, canonical_mu_dtype, state.key)
-
         return new_updates, ScaleByNorMuonState(
-            count=cast(jax.Array, count_inc), mu=mu, nu=nu, key=key
+            count=count_inc,
+            mu=runtime.mu_stored,
+            nu=nu,
+            key=runtime.key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)

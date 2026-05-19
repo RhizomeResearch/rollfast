@@ -20,7 +20,7 @@ from typing import Any, Callable, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
+from optax._src import base, combine, transform, utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -37,10 +37,9 @@ from rollfast.utils import (
     MomentumAccumulator,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
-    _store_moment_tree,
-    _tree_bias_correction_momentum,
-    _tree_momentum_lookahead,
-    _tree_update_moment_f32,
+    _prepare_first_moment_runtime,
+    _validate_beta_static_scalar,
+    _validate_positive_static_scalar,
     _zeros_like_tree,
 )
 
@@ -81,21 +80,6 @@ def _rmnp_leaf_update(
     return _row_normalize_matrix(update, dim_nums, eps)
 
 
-def _resolve_dimension_numbers(
-    weight_dimension_numbers: WeightDimNumOrFn | None,
-    *,
-    params: base.Params | None,
-    updates: base.Updates,
-    transform_name: str,
-) -> base.Params:
-    return _resolve_update_dimension_numbers(
-        weight_dimension_numbers,
-        params=params,
-        updates=updates,
-        transform_name=transform_name,
-    )
-
-
 def scale_by_rmnp(
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
@@ -115,6 +99,8 @@ def scale_by_rmnp(
     direction; use ``rmnp`` for a full optimizer with learning-rate scaling and
     AdamW fallback.
     """
+    _validate_beta_static_scalar("beta", beta)
+    _validate_positive_static_scalar("eps", eps)
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
@@ -128,7 +114,7 @@ def scale_by_rmnp(
         )
 
     def update_fn(updates, state, params=None):
-        dim_nums = _resolve_dimension_numbers(
+        dim_nums = _resolve_update_dimension_numbers(
             weight_dimension_numbers,
             params=params,
             updates=updates,
@@ -141,40 +127,20 @@ def scale_by_rmnp(
             is_leaf=_is_dimension_numbers_leaf,
         )
 
-        mu = _tree_update_moment_f32(
+        runtime = _prepare_first_moment_runtime(
             updates,
             state.mu,
+            state.count,
+            state.key,
             beta,
+            canonical_mu_dtype,
+            nesterov=nesterov,
+            bias_correction=True,
             momentum_accumulator=momentum_accumulator,
+            nesterov_moment_count_offset=1,
         )
-        count_inc = numerics.safe_increment(state.count)
-
-        if nesterov:
-            mu_bc = _tree_bias_correction_momentum(
-                mu,
-                beta,
-                numerics.safe_increment(count_inc),
-                momentum_accumulator=momentum_accumulator,
-            )
-            updates_bc = _tree_bias_correction_momentum(
-                updates,
-                beta,
-                count_inc,
-                momentum_accumulator=momentum_accumulator,
-            )
-            direction = _tree_momentum_lookahead(
-                mu_bc,
-                updates_bc,
-                beta,
-                momentum_accumulator=momentum_accumulator,
-            )
-        else:
-            direction = _tree_bias_correction_momentum(
-                mu,
-                beta,
-                count_inc,
-                momentum_accumulator=momentum_accumulator,
-            )
+        count_inc = runtime.count
+        direction = runtime.direction
 
         rmnp_updates = jax.tree.map(
             lambda u, d: _rmnp_leaf_update(u, d, eps),
@@ -194,10 +160,10 @@ def scale_by_rmnp(
                 is_leaf=_is_aux_leaf,
             )
 
-        mu, key = _store_moment_tree(mu, canonical_mu_dtype, state.key)
-
         return rmnp_updates, ScaleByRmnpState(
-            count=cast(jax.Array, count_inc), mu=mu, key=key
+            count=count_inc,
+            mu=runtime.mu_stored,
+            key=runtime.key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)

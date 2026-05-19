@@ -44,6 +44,8 @@ from rollfast.utils import (
     _resolve_scalar,
     _tree_stochastic_cast,
     _unzip_leaf_tuple_tree,
+    _validate_beta_static_scalar,
+    _validate_positive_static_scalar,
 )
 
 
@@ -193,6 +195,10 @@ def scale_by_pion(
     approximation. The returned Optax update is ``W_next - W`` because Optax
     applies updates by addition.
     """
+    _validate_beta_static_scalar("b1", b1)
+    _validate_beta_static_scalar("b2", b2)
+    _validate_positive_static_scalar("rms_constant", rms_constant)
+    _validate_positive_static_scalar("eps", eps)
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),

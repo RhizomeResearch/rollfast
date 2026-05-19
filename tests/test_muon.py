@@ -104,6 +104,25 @@ def test_scale_by_muon_shape_callable_spec_requires_params():
         tx.update(updates, tx.init(updates))
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta": -0.1},
+        {"beta": 1.0},
+        {"eps": 0.0},
+        {"ns_steps": 0},
+    ],
+)
+def test_scale_by_muon_rejects_invalid_static_parameters(kwargs):
+    with pytest.raises(ValueError):
+        scale_by_muon(**kwargs)
+
+
+def test_scale_by_muon_shape_rejects_invalid_consistent_rms():
+    with pytest.raises(ValueError, match="consistent_rms"):
+        scale_by_muon_shape(consistent_rms=0.0)
+
+
 def test_scale_by_muon_rejects_direct_fallback_leaves():
     params = {
         "w": jnp.ones((2, 2), dtype=jnp.float32),

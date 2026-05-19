@@ -31,7 +31,7 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule,
     scale_by_kron,
 )
-from rollfast.schedules.wsd import wsd_schedule
+from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
 from rollfast.utils import _stochastic_round_bf16
 
 ScheduleFreeLearningRate = Union[
@@ -110,30 +110,6 @@ def _call_learning_rate(
     return learning_rate(count)
 
 
-def _make_wsd_schedule_pair(
-    *,
-    learning_rate: float,
-    adam_learning_rate: Optional[float],
-    total_steps: int,
-    warmup_fraction: float,
-    decay_fraction: float,
-):
-    matrix_schedule = wsd_schedule(
-        peak_lr=learning_rate,
-        total_steps=total_steps,
-        warmup_fraction=warmup_fraction,
-        decay_fraction=decay_fraction,
-    )
-    if adam_learning_rate is None or adam_learning_rate == learning_rate:
-        return matrix_schedule, matrix_schedule
-    return matrix_schedule, wsd_schedule(
-        peak_lr=adam_learning_rate,
-        total_steps=total_steps,
-        warmup_fraction=warmup_fraction,
-        decay_fraction=decay_fraction,
-    )
-
-
 def _make_dual_schedule_fn(
     partition: Any,
     matrix_label: str,
@@ -157,6 +133,24 @@ def _make_dual_schedule_fn(
         )
 
     return dual_schedule_fn
+
+
+def _append_decayed_weights_and_lr(
+    components: list[Any],
+    *,
+    weight_decay: float,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]],
+    learning_rate: base.ScalarOrSchedule,
+) -> list[Any]:
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero:
+        components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+    components.append(transform.scale_by_learning_rate(learning_rate))
+    return components
 
 
 def schedule_free(
@@ -736,17 +730,12 @@ def schedule_free_prism(
         ),
     ]
 
-    _wd_is_nonzero = (
-        inner_weight_decay > 0.0
-        if isinstance(inner_weight_decay, (int, float))
-        else True
+    _append_decayed_weights_and_lr(
+        prism_components,
+        weight_decay=inner_weight_decay,
+        weight_decay_mask=inner_weight_decay_mask,
+        learning_rate=prism_schedule,
     )
-    if _wd_is_nonzero:
-        prism_components.append(
-            transform.add_decayed_weights(inner_weight_decay, inner_weight_decay_mask)
-        )
-
-    prism_components.append(transform.scale_by_learning_rate(prism_schedule))
 
     base_opt = combine.partition(
         transforms={
@@ -953,17 +942,12 @@ def schedule_free_kron(
         )
     ]
 
-    _wd_is_nonzero = (
-        inner_weight_decay > 0.0
-        if isinstance(inner_weight_decay, (int, float))
-        else True
+    _append_decayed_weights_and_lr(
+        base_opt_components,
+        weight_decay=inner_weight_decay,
+        weight_decay_mask=inner_weight_decay_mask,
+        learning_rate=lr_schedule,
     )
-    if _wd_is_nonzero:
-        base_opt_components.append(
-            transform.add_decayed_weights(inner_weight_decay, inner_weight_decay_mask)
-        )
-
-    base_opt_components.append(transform.scale_by_learning_rate(lr_schedule))
     base_optimizer = combine.chain(*base_opt_components)
 
     return schedule_free(
@@ -1215,16 +1199,12 @@ def schedule_free_aurora(
         )
 
     aurora_components = [scale]
-    _wd_is_nonzero = (
-        inner_weight_decay > 0.0
-        if isinstance(inner_weight_decay, (int, float))
-        else True
+    _append_decayed_weights_and_lr(
+        aurora_components,
+        weight_decay=inner_weight_decay,
+        weight_decay_mask=inner_weight_decay_mask,
+        learning_rate=aurora_schedule,
     )
-    if _wd_is_nonzero:
-        aurora_components.append(
-            transform.add_decayed_weights(inner_weight_decay, inner_weight_decay_mask)
-        )
-    aurora_components.append(transform.scale_by_learning_rate(aurora_schedule))
 
     base_opt = combine.partition(
         transforms={
@@ -1295,3 +1275,16 @@ def schedule_free_eval_params(state: base.OptState, params: base.Params):
         z,
         is_leaf=lambda x: x is None,
     )
+
+
+__all__ = [
+    "ScheduleFreeLearningRate",
+    "ScheduleFreeState",
+    "WeightingMode",
+    "schedule_free",
+    "schedule_free_adam",
+    "schedule_free_aurora",
+    "schedule_free_eval_params",
+    "schedule_free_kron",
+    "schedule_free_prism",
+]

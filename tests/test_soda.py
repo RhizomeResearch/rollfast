@@ -20,10 +20,18 @@ from tests._typing import as_array_dict
 
 def test_public_soda_wrappers_are_exported_from_optim_soda():
     assert rollfast.soda is soda_module.soda
+    assert rollfast.soda_adam is soda_module.soda_adam
+    assert rollfast.soda_kron is soda_module.soda_kron
     assert rollfast.soda_prism is soda_module.soda_prism
     assert rollfast.soda_muon is soda_module.soda_muon
     assert rollfast.soda_rmnp is soda_module.soda_rmnp
+    assert "soda_adam" in rollfast.__all__
+    assert "soda_kron" in rollfast.__all__
+    assert "soda_adam" in soda_module.__all__
+    assert "soda_kron" in soda_module.__all__
     assert not hasattr(schedules, "soda")
+    assert not hasattr(schedules, "soda_adam")
+    assert not hasattr(schedules, "soda_kron")
     assert not hasattr(schedules, "soda_prism")
     assert not hasattr(schedules, "soda_muon")
     assert not hasattr(schedules, "soda_rmnp")
@@ -223,4 +231,51 @@ def test_soda_rmnp_accepts_heavy_ball_momentum_accumulator():
     updates = as_array_dict(updates)
 
     assert updates["w"].shape == (4, 4)
+    assert jnp.all(jnp.isfinite(updates["w"]))
+
+
+@pytest.mark.parametrize(
+    "make_tx",
+    [
+        lambda: soda_adam(learning_rate=0.01, total_steps=20, mu_dtype=jnp.bfloat16),
+        lambda: soda_prism(
+            learning_rate=0.01,
+            total_steps=20,
+            ns_iters=2,
+            mu_dtype=jnp.bfloat16,
+        ),
+        lambda: soda_kron(
+            learning_rate=0.01,
+            total_steps=20,
+            preconditioner_update_probability=1.0,
+            mu_dtype=jnp.bfloat16,
+        ),
+        lambda: soda_muon(
+            learning_rate=0.01,
+            total_steps=20,
+            ns_steps=2,
+            mu_dtype=jnp.bfloat16,
+        ),
+        lambda: soda_rmnp(
+            learning_rate=0.01,
+            total_steps=20,
+            mu_dtype=jnp.bfloat16,
+        ),
+    ],
+)
+def test_soda_wrappers_accept_bf16_mu_dtype(make_tx):
+    params = {"w": jnp.ones((4, 4), dtype=jnp.bfloat16)}
+    grads = {"w": jnp.ones_like(params["w"]) * jnp.asarray(0.1, jnp.bfloat16)}
+    tx = make_tx()
+    updates, _ = tx.update(grads, tx.init(params), params)
+    updates = as_array_dict(updates)
+    next_params = rollfast.apply_updates(
+        params,
+        updates,
+        key=jax.random.PRNGKey(0),
+    )
+    next_params = as_array_dict(next_params)
+
+    assert updates["w"].shape == params["w"].shape
+    assert next_params["w"].dtype == jnp.bfloat16
     assert jnp.all(jnp.isfinite(updates["w"]))

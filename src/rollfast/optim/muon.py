@@ -14,7 +14,7 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
+from optax._src import base, combine, transform, utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -45,12 +45,11 @@ from rollfast.utils import (
     _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
+    _prepare_first_moment_runtime,
     _resolve_mask,
     _resolve_scalar,
-    _store_moment_tree,
-    _tree_bias_correction_momentum,
-    _tree_momentum_lookahead,
-    _tree_update_moment_f32,
+    _validate_beta_static_scalar,
+    _validate_positive_static_scalar,
     _zeros_like_tree,
 )
 
@@ -100,11 +99,32 @@ def _scale_update_for_consistent_rms(
     )
 
 
+def _scale_muon_shape_tree(
+    updates: base.Updates,
+    dim_nums: base.Params,
+    consistent_rms: jax.typing.ArrayLike | None,
+) -> base.Updates:
+    if consistent_rms is None:
+        return jax.tree.map(
+            _scale_update_for_width_transfer,
+            updates,
+            dim_nums,
+            is_leaf=_is_dimension_numbers_leaf,
+        )
+    return jax.tree.map(
+        lambda u, d: _scale_update_for_consistent_rms(u, d, consistent_rms),
+        updates,
+        dim_nums,
+        is_leaf=_is_dimension_numbers_leaf,
+    )
+
+
 def scale_by_muon_shape(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
 ) -> base.GradientTransformation:
     """Scale Muon updates by width-transfer or consistent-RMS shape factors."""
+    _validate_positive_static_scalar("consistent_rms", consistent_rms)
 
     def update_fn(updates, state, params=None):
         dim_nums = _resolve_update_dimension_numbers(
@@ -113,21 +133,7 @@ def scale_by_muon_shape(
             updates=updates,
             transform_name="scale_by_muon_shape",
         )
-        if consistent_rms is None:
-            scaled_updates = jax.tree.map(
-                _scale_update_for_width_transfer,
-                updates,
-                dim_nums,
-                is_leaf=_is_dimension_numbers_leaf,
-            )
-        else:
-            scaled_updates = jax.tree.map(
-                lambda u, d: _scale_update_for_consistent_rms(u, d, consistent_rms),
-                updates,
-                dim_nums,
-                is_leaf=_is_dimension_numbers_leaf,
-            )
-        return scaled_updates, state
+        return _scale_muon_shape_tree(updates, dim_nums, consistent_rms), state
 
     return base.GradientTransformation(base.init_empty_state, update_fn)
 
@@ -183,6 +189,12 @@ def scale_by_muon(
     complete pre-learning-rate base update, including shape scaling and decay,
     is passed through Magma. Plain Muon keeps those as separate transforms.
     """
+    if isinstance(ns_steps, (int, float)) and ns_steps < 1:
+        raise ValueError(f"ns_steps must be >= 1, got {ns_steps!r}.")
+    _validate_beta_static_scalar("beta", beta)
+    _validate_positive_static_scalar("eps", eps)
+    if shape_updates:
+        _validate_positive_static_scalar("consistent_rms", consistent_rms)
     if use_magma:
         validate_magma_args(magma_p, magma_tau)
     elif _has_nonzero_or_scheduled(weight_decay):
@@ -223,40 +235,23 @@ def scale_by_muon(
             is_leaf=_is_dimension_numbers_leaf,
         )
 
-        mu = _tree_update_moment_f32(
+        runtime = _prepare_first_moment_runtime(
             updates,
             state.mu,
+            state.count,
+            state.key,
             beta,
+            canonical_mu_dtype,
+            nesterov=nesterov,
+            bias_correction=True,
             momentum_accumulator=momentum_accumulator,
+            nesterov_moment_count_offset=1,
+            reserve_sr_key=use_magma,
+            extra_key_count=1 if use_magma else 0,
         )
-        count_inc = numerics.safe_increment(state.count)
-
-        if nesterov:
-            mu_bc = _tree_bias_correction_momentum(
-                mu,
-                beta,
-                numerics.safe_increment(count_inc),
-                momentum_accumulator=momentum_accumulator,
-            )
-            grad_bc = _tree_bias_correction_momentum(
-                updates,
-                beta,
-                count_inc,
-                momentum_accumulator=momentum_accumulator,
-            )
-            mu_hat = _tree_momentum_lookahead(
-                mu_bc,
-                grad_bc,
-                beta,
-                momentum_accumulator=momentum_accumulator,
-            )
-        else:
-            mu_hat = _tree_bias_correction_momentum(
-                mu,
-                beta,
-                count_inc,
-                momentum_accumulator=momentum_accumulator,
-            )
+        mu = runtime.mu
+        count_inc = runtime.count
+        mu_hat = runtime.direction
 
         muon_updates = jax.tree.map(
             lambda x, dim_num: _call_orthogonalize(
@@ -285,20 +280,11 @@ def scale_by_muon(
             )
 
         if shape_updates:
-            if consistent_rms is None:
-                muon_updates = jax.tree.map(
-                    _scale_update_for_width_transfer,
-                    muon_updates,
-                    dim_nums,
-                    is_leaf=_is_dimension_numbers_leaf,
-                )
-            else:
-                muon_updates = jax.tree.map(
-                    lambda u, d: _scale_update_for_consistent_rms(u, d, consistent_rms),
-                    muon_updates,
-                    dim_nums,
-                    is_leaf=_is_dimension_numbers_leaf,
-                )
+            muon_updates = _scale_muon_shape_tree(
+                muon_updates,
+                dim_nums,
+                consistent_rms,
+            )
 
         if use_magma and _has_nonzero_or_scheduled(weight_decay) and params is None:
             raise ValueError(
@@ -316,16 +302,8 @@ def scale_by_muon(
                 _resolve_mask(weight_decay_mask, params),
             )
 
-        if canonical_mu_dtype == jnp.bfloat16 or use_magma:
-            split_count = 3 if use_magma else 2
-            split_keys = jax.random.split(cast(jax.Array, state.key), split_count)
-            next_key = split_keys[0]
-            sr_key = split_keys[1]
-            magma_key = split_keys[2] if use_magma else None
-        else:
-            next_key = state.key
-            sr_key = None
-            magma_key = None
+        next_key = runtime.key
+        magma_key = runtime.extra_keys[0] if use_magma else None
 
         if use_magma:
             muon_updates, new_magma_s = apply_magma_internal(
@@ -341,16 +319,9 @@ def scale_by_muon(
         else:
             new_magma_s = state.magma_s
 
-        mu_stored, _ = _store_moment_tree(
-            mu,
-            canonical_mu_dtype,
-            next_key,
-            sr_key=sr_key,
-        )
-
         return muon_updates, MuonState(
-            count=cast(jax.Array, count_inc),
-            mu=mu_stored,
+            count=count_inc,
+            mu=runtime.mu_stored,
             ns_coeffs=state.ns_coeffs,
             magma_s=new_magma_s,
             key=next_key,

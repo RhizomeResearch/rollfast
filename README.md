@@ -2,7 +2,7 @@
 
 `rollfast` is a high-performance optimization library for JAX, designed to
 implement cutting-edge optimizers that go beyond standard Euclidean gradient
-descent. It provides production-ready implementations of optimizers like
+descent. It provides experimental implementations of optimizers like
 **Muon** (orthogonalized momentum), **PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
 Spectral Shaping), **Aurora** (leverage-aware rectangular matrix optimization),
 and **Pion** (spectrum-preserving orthogonal equivalence updates), plus
@@ -432,10 +432,13 @@ optimizer = optax.chain(
 
 ### 5. Schedule-Free Optimization
 
-The `schedule_free_*` functions wrap base optimizers with the Schedule-Free
-logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
-Their `update` method needs the current `params`, because Schedule-Free
-interpolates between the averaged iterate and its internal z-sequence.
+The `schedule_free_*` convenience functions wrap base optimizers with the
+Schedule-Free logic and generate an internal WSD (Warmup-Stable-Decay) schedule
+for the step size. The generic `schedule_free` wrapper takes an already scaled
+base optimizer and an explicit learning-rate scalar or schedule used for
+averaging weights. Their `update` method needs the current `params`, because
+Schedule-Free interpolates between the averaged iterate and its internal
+z-sequence.
 
 ```python
 import jax.numpy as jnp
@@ -588,7 +591,7 @@ specs/`None` or a callable such as `get_equinox_prism_spec`.
 ### 10. SODA
 
 ```python
-from rollfast import soda_prism, soda_muon, soda_rmnp
+from rollfast import soda_adam, soda_kron, soda_muon, soda_prism, soda_rmnp
 
 optimizer = soda_prism(
     learning_rate=1e-3,
@@ -604,6 +607,16 @@ muon_optimizer = soda_muon(
 )
 
 rmnp_optimizer = soda_rmnp(
+    learning_rate=1e-3,
+    total_steps=10000,
+)
+
+adam_optimizer = soda_adam(
+    learning_rate=1e-3,
+    total_steps=10000,
+)
+
+kron_optimizer = soda_kron(
     learning_rate=1e-3,
     total_steps=10000,
 )
@@ -840,11 +853,12 @@ explicitly forward those arguments. Composition wrappers can intentionally keep
 Magma out of their public API or apply it only to their base optimizer branch;
 check the wrapper signature rather than assuming every wrapper exposes Magma.
 
-When Magma is enabled on AdamW, PRISM, Aurora, or PSGD/Kron with weight decay,
-the decay contribution is part of the base update passed through Magma. Hyperball
-and SODA wrappers are different compositions: Hyperball replaces ordinary
-decoupled decay with a terminal projection, while SODA disables base weight decay
-in its convenience wrappers and adds its initialization anchor separately.
+When Magma is enabled on AdamW, Muon, PRISM, Aurora, or PSGD/Kron with weight
+decay, the decay contribution is part of the base update passed through Magma.
+Hyperball and SODA wrappers are different compositions: Hyperball replaces
+ordinary decoupled decay with a terminal projection, while SODA disables base
+weight decay in its convenience wrappers and adds its initialization anchor
+separately.
 
 **Architectural Warning:** Magma introduces intentional update bias (damping)
 that scales down the expected update magnitude. At equilibrium, you may need to

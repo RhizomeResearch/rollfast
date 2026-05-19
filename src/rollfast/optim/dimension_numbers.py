@@ -219,6 +219,56 @@ def _make_matrix_partition_fns(
     )
 
 
+def _make_equinox_matrix_spec(
+    model: Any,
+    *,
+    eqx_module: Any,
+    linear_types: tuple[type[Any], ...],
+    conv_types: tuple[type[Any], ...],
+    dimension_numbers_type: type[MatrixDimensionNumbers],
+    skip_depthwise_conv: bool,
+    strict_conv_in_channels: bool,
+) -> DimNumsTree:
+    """Build PRISM/Aurora dimension specs for Equinox Linear/Conv modules."""
+
+    def _is_depthwise_conv(layer: Any) -> bool:
+        groups = getattr(layer, "groups", 1)
+        if strict_conv_in_channels:
+            return groups > 1 and groups == layer.in_channels
+        in_channels = getattr(layer, "in_channels", None)
+        return groups > 1 and in_channels is not None and groups == in_channels
+
+    def _layer_to_spec(layer: Any):
+        target_spec = None
+
+        if isinstance(layer, linear_types):
+            target_spec = dimension_numbers_type(reduction_axis=1, output_axis=0)
+        elif isinstance(layer, conv_types) and not (
+            skip_depthwise_conv and _is_depthwise_conv(layer)
+        ):
+            ndim = layer.weight.ndim
+            target_spec = dimension_numbers_type(
+                reduction_axis=tuple(range(1, ndim)),
+                output_axis=0,
+            )
+
+        if target_spec is None:
+            return jax.tree.map(lambda _: None, layer)
+
+        specs = eqx_module.tree_at(lambda l: l.weight, layer, target_spec)
+        return jax.tree.map(
+            lambda x: x if isinstance(x, dimension_numbers_type) else None,
+            specs,
+            is_leaf=lambda x: isinstance(x, dimension_numbers_type),
+        )
+
+    return jax.tree.map(
+        _layer_to_spec,
+        model,
+        is_leaf=lambda x: isinstance(x, linear_types + conv_types),
+    )
+
+
 def _is_standard_2d_spec(dim_nums: MatrixDimensionNumbers) -> bool:
     """Return whether a spec is the ordinary 2D ``(reduction=0, output=1)`` layout."""
     red = dim_nums.reduction_axis

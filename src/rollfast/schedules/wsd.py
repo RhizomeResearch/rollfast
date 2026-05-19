@@ -135,6 +135,31 @@ def wsd_schedule(
     return schedule
 
 
+def _make_wsd_schedule_pair(
+    *,
+    learning_rate: float,
+    adam_learning_rate: float | None,
+    total_steps: int,
+    warmup_fraction: float,
+    decay_fraction: float,
+) -> tuple[optax.Schedule, optax.Schedule]:
+    """Build matrix/fallback WSD schedules with shared defaults."""
+    matrix_schedule = wsd_schedule(
+        peak_lr=learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+    if adam_learning_rate is None or adam_learning_rate == learning_rate:
+        return matrix_schedule, matrix_schedule
+    return matrix_schedule, wsd_schedule(
+        peak_lr=adam_learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+
+
 def power_decay_schedule(
     peak_lr: float,
     total_steps: int,
@@ -203,3 +228,10 @@ def power_decay_schedule(
         return jnp.maximum(0.0, val)
 
     return schedule
+
+
+__all__ = [
+    "ScheduleShape",
+    "power_decay_schedule",
+    "wsd_schedule",
+]

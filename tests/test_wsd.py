@@ -2,7 +2,14 @@ from typing import Any, cast
 
 import pytest
 
+import rollfast.schedules.wsd as wsd_module
 from rollfast.schedules.wsd import power_decay_schedule, wsd_schedule
+
+
+def test_wsd_module_all_lists_public_schedules():
+    assert "wsd_schedule" in wsd_module.__all__
+    assert "power_decay_schedule" in wsd_module.__all__
+    assert "_make_wsd_schedule_pair" not in wsd_module.__all__
 
 
 def test_wsd_schedule():

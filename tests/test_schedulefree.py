@@ -8,6 +8,7 @@ import pytest
 from optax._src import base
 import rollfast
 import rollfast.schedules as schedules
+import rollfast.schedules.schedulefree as schedulefree_module
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.schedules.schedulefree import (
     ScheduleFreeState,
@@ -40,6 +41,8 @@ def test_public_schedule_free_exports():
     assert rollfast.schedule_free is schedule_free
     assert schedules.schedule_free is schedule_free
     assert "schedule_free" in schedules.__all__
+    assert "schedule_free_adam" in schedulefree_module.__all__
+    assert "ScheduleFreeState" in schedulefree_module.__all__
 
 
 def test_schedule_free_plain_base_optimizer_ignores_extra_args():

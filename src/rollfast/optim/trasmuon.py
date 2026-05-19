@@ -37,9 +37,9 @@ from rollfast.utils import (
     MomentumAccumulator,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
-    _store_moment_tree,
-    _tree_update_moment_f32,
+    _prepare_first_moment_runtime,
     _unzip_leaf_tuple_tree,
+    _validate_beta_static_scalar,
     _validate_nonnegative_static_scalar,
     _validate_positive_static_scalar,
     _zeros_like_tree,
@@ -256,9 +256,9 @@ def scale_by_trasmuon(
         raise ValueError(f"update_period must be >= 1, got {update_period}")
     if warmup_steps < 0:
         raise ValueError(f"warmup_steps must be nonnegative, got {warmup_steps}")
-    _validate_nonnegative_static_scalar("beta2", beta2)
-    if isinstance(beta2, (int, float)) and beta2 >= 1.0:
-        raise ValueError(f"beta2 must be in [0, 1), got {beta2!r}.")
+    _validate_beta_static_scalar("beta1", beta1)
+    _validate_beta_static_scalar("beta2", beta2)
+    _validate_positive_static_scalar("eps", eps)
     _validate_nonnegative_static_scalar("clip_alpha", clip_alpha)
     _validate_nonnegative_static_scalar("energy_beta", energy_beta)
     if isinstance(energy_beta, (int, float)) and energy_beta >= 1.0:
@@ -328,13 +328,19 @@ def scale_by_trasmuon(
             is_leaf=_is_dimension_numbers_leaf,
         )
 
-        mu = _tree_update_moment_f32(
+        runtime = _prepare_first_moment_runtime(
             updates,
             state.mu,
+            state.count,
+            state.key,
             beta1,
+            canonical_mu_dtype,
+            nesterov=False,
+            bias_correction=False,
             momentum_accumulator=momentum_accumulator,
         )
-        count_inc = numerics.safe_increment(state.count)
+        mu = runtime.direction
+        count_inc = runtime.count
 
         resolved_ns_coeffs = resolve_ns_coeffs(ns_coeffs, ns_iters)
         tras_result = jax.tree.map(
@@ -345,7 +351,7 @@ def scale_by_trasmuon(
                 e,
                 ce,
                 cl,
-                cast(jax.Array, count_inc),
+                count_inc,
                 beta2=beta2,
                 eps=eps,
                 ns_iters=ns_iters,
@@ -372,16 +378,14 @@ def scale_by_trasmuon(
             tras_result, 5
         )
 
-        mu, key = _store_moment_tree(mu, canonical_mu_dtype, state.key)
-
         return tras_updates, ScaleByTrasMuonState(
-            count=cast(jax.Array, count_inc),
-            mu=mu,
+            count=count_inc,
+            mu=runtime.mu_stored,
             v_row=v_row,
             energy_ref=energy_ref,
             clip_ema=clip_ema,
             clip_last=clip_last,
-            key=key,
+            key=runtime.key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)

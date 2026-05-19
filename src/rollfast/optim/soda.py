@@ -43,7 +43,7 @@ from rollfast.optim.psgd import (
     kron,
 )
 from rollfast.optim.rmnp import rmnp
-from rollfast.schedules.wsd import wsd_schedule
+from rollfast.schedules.wsd import _make_wsd_schedule_pair
 from rollfast.utils import MomentumAccumulator
 
 
@@ -143,8 +143,9 @@ def soda_adam(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Adam base optimizer wrapped with SODA."""
-    lr_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    lr_schedule, _ = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=None,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
@@ -202,21 +203,13 @@ def soda_prism(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """PRISM base optimizer wrapped with SODA."""
-    prism_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    prism_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-    if adam_learning_rate is None:
-        adam_schedule = prism_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     base_optimizer = prism(
         learning_rate=prism_schedule,
@@ -293,8 +286,9 @@ def soda_kron(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """PSGD Kron base optimizer wrapped with SODA."""
-    lr_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    lr_schedule, _ = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=None,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
@@ -360,21 +354,15 @@ def soda_muon(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Rollfast Muon base optimizer wrapped with SODA."""
-    muon_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    muon_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
     if adam_learning_rate is None:
         adam_schedule = None
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     base_optimizer = muon(
         learning_rate=muon_schedule,
@@ -422,21 +410,13 @@ def soda_rmnp(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """RMNP base optimizer wrapped with SODA."""
-    rmnp_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    rmnp_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-    if adam_learning_rate is None:
-        adam_schedule = rmnp_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     base_optimizer = rmnp(
         learning_rate=rmnp_schedule,
@@ -458,3 +438,14 @@ def soda_rmnp(
         key=key,
     )
     return soda(base_optimizer, state_dtype=state_dtype)
+
+
+__all__ = [
+    "SodaState",
+    "soda",
+    "soda_adam",
+    "soda_kron",
+    "soda_muon",
+    "soda_prism",
+    "soda_rmnp",
+]

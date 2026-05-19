@@ -26,6 +26,7 @@ from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
     _compute_matrix_reshape,
+    _make_equinox_matrix_spec,
     _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
     _make_matrix_partition_fns,
@@ -103,37 +104,14 @@ def get_equinox_prism_spec(
         )
     import equinox as eqx
 
-    def _layer_to_spec(layer):
-        target_spec = None
-
-        if isinstance(layer, _LINEAR_TYPES):
-            target_spec = PrismDimensionNumbers(reduction_axis=1, output_axis=0)
-
-        elif isinstance(layer, _CONV_TYPES):
-            groups = getattr(layer, "groups", 1)
-            is_depthwise = (groups > 1) and (groups == layer.in_channels)
-
-            if not (skip_depthwise_conv and is_depthwise):
-                ndim = layer.weight.ndim
-                target_spec = PrismDimensionNumbers(
-                    reduction_axis=tuple(range(1, ndim)), output_axis=0
-                )
-
-        if target_spec is None:
-            return jax.tree.map(lambda _: None, layer)
-
-        specs = eqx.tree_at(lambda l: l.weight, layer, target_spec)
-
-        return jax.tree.map(
-            lambda x: x if isinstance(x, PrismDimensionNumbers) else None,
-            specs,
-            is_leaf=lambda x: isinstance(x, PrismDimensionNumbers),
-        )
-
-    return jax.tree.map(
-        _layer_to_spec,
+    return _make_equinox_matrix_spec(
         model,
-        is_leaf=lambda x: isinstance(x, _LINEAR_TYPES + _CONV_TYPES),
+        eqx_module=eqx,
+        linear_types=_LINEAR_TYPES,
+        conv_types=_CONV_TYPES,
+        dimension_numbers_type=PrismDimensionNumbers,
+        skip_depthwise_conv=skip_depthwise_conv,
+        strict_conv_in_channels=True,
     )
 
 

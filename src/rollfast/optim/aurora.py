@@ -32,6 +32,7 @@ from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
     _compute_matrix_reshape,
+    _make_equinox_matrix_spec,
     _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
     _make_matrix_partition_fns,
@@ -100,47 +101,14 @@ def get_equinox_aurora_spec(
         )
     import equinox as eqx
 
-    def _layer_to_spec(layer):
-        target_spec = None
-
-        if isinstance(layer, _AURORA_LINEAR_TYPES):
-            # Equinox Linear weight layout is conventionally (out_features, in_features).
-            # Aurora's reshape convention uses (reduction, output), so mirror PRISM:
-            # reduction_axis=1, output_axis=0.
-            target_spec = AuroraDimensionNumbers(
-                reduction_axis=1,
-                output_axis=0,
-            )
-
-        elif isinstance(layer, _AURORA_CONV_TYPES):
-            groups = getattr(layer, "groups", 1)
-            in_channels = getattr(layer, "in_channels", None)
-            is_depthwise = (
-                groups > 1 and in_channels is not None and groups == in_channels
-            )
-
-            if not (skip_depthwise_conv and is_depthwise):
-                ndim = layer.weight.ndim
-                target_spec = AuroraDimensionNumbers(
-                    reduction_axis=tuple(range(1, ndim)),
-                    output_axis=0,
-                )
-
-        if target_spec is None:
-            return jax.tree.map(lambda _: None, layer)
-
-        specs = eqx.tree_at(lambda l: l.weight, layer, target_spec)
-
-        return jax.tree.map(
-            lambda x: x if isinstance(x, AuroraDimensionNumbers) else None,
-            specs,
-            is_leaf=lambda x: isinstance(x, AuroraDimensionNumbers),
-        )
-
-    return jax.tree.map(
-        _layer_to_spec,
+    return _make_equinox_matrix_spec(
         model,
-        is_leaf=lambda x: isinstance(x, _AURORA_LINEAR_TYPES + _AURORA_CONV_TYPES),
+        eqx_module=eqx,
+        linear_types=_AURORA_LINEAR_TYPES,
+        conv_types=_AURORA_CONV_TYPES,
+        dimension_numbers_type=AuroraDimensionNumbers,
+        skip_depthwise_conv=skip_depthwise_conv,
+        strict_conv_in_channels=False,
     )
 
 

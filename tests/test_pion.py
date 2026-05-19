@@ -93,6 +93,22 @@ def test_scale_by_pion_rejects_direct_fallback_leaves():
         tx.update(grads, tx.init(params), params)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"b1": -0.1},
+        {"b1": 1.0},
+        {"b2": -0.1},
+        {"b2": 1.0},
+        {"eps": 0.0},
+        {"rms_constant": 0.0},
+    ],
+)
+def test_scale_by_pion_rejects_invalid_static_parameters(kwargs):
+    with pytest.raises(ValueError):
+        scale_by_pion(learning_rate=0.01, **kwargs)
+
+
 def test_pion_partitions_vectors_to_adam():
     params = {
         "w": jnp.eye(4, dtype=jnp.float32),

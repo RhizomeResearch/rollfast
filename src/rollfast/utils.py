@@ -1,4 +1,4 @@
-from typing import Any, Callable, Literal, Optional, TypeAlias, cast
+from typing import Any, Callable, Literal, NamedTuple, Optional, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
@@ -120,6 +120,15 @@ def _validate_nonnegative_static_scalar(
     """Validate static Python scalar knobs that must be nonnegative."""
     if isinstance(value, (int, float)) and value < 0.0:
         raise ValueError(f"{name} must be nonnegative, got {value!r}.")
+
+
+def _validate_beta_static_scalar(
+    name: str,
+    value: jax.typing.ArrayLike | None,
+) -> None:
+    """Validate static Python scalar knobs that must be in [0, 1)."""
+    if isinstance(value, (int, float)) and not 0.0 <= value < 1.0:
+        raise ValueError(f"{name} must be in [0, 1), got {value!r}.")
 
 
 def _validate_grad_clip_max_amps(
@@ -420,6 +429,121 @@ def _tree_momentum_lookahead(
         return decay32 * m.astype(compute_dtype) + grad_scale * g.astype(compute_dtype)
 
     return jax.tree.map(_lookahead_leaf, moments, updates, is_leaf=_is_aux_leaf)
+
+
+class FirstMomentRuntime(NamedTuple):
+    """Prepared first-moment state for Muon-family matrix transforms."""
+
+    count: jax.Array
+    mu: base.Updates
+    direction: base.Updates
+    mu_stored: base.Updates
+    key: jax.Array | None
+    sr_key: jax.Array | None
+    extra_keys: tuple[jax.Array, ...]
+
+
+def _split_first_moment_keys(
+    key: jax.Array | None,
+    dtype: jax.typing.DTypeLike,
+    *,
+    reserve_sr_key: bool,
+    extra_key_count: int,
+) -> tuple[jax.Array | None, jax.Array | None, tuple[jax.Array, ...]]:
+    target_dtype = jnp.dtype(dtype)
+    needs_sr_key = target_dtype == jnp.dtype(jnp.bfloat16) or reserve_sr_key
+    split_count = 1 + int(needs_sr_key) + extra_key_count
+    if split_count == 1:
+        return key, None, ()
+
+    split_keys = jax.random.split(cast(jax.Array, key), split_count)
+    next_key = split_keys[0]
+    sr_key = split_keys[1] if needs_sr_key else None
+    extra_start = 2 if needs_sr_key else 1
+    return next_key, sr_key, tuple(split_keys[extra_start:])
+
+
+def _prepare_first_moment_runtime(
+    updates: base.Updates,
+    moments: base.Updates,
+    count: jax.Array,
+    key: jax.Array | None,
+    decay: jax.typing.ArrayLike,
+    mu_dtype: jax.typing.DTypeLike,
+    *,
+    nesterov: bool,
+    bias_correction: bool,
+    momentum_accumulator: MomentumAccumulator,
+    nesterov_moment_count_offset: int = 0,
+    reserve_sr_key: bool = False,
+    extra_key_count: int = 0,
+) -> FirstMomentRuntime:
+    """Update first moment, form the direction, store state, and advance keys."""
+    count_inc = cast(jax.Array, numerics.safe_increment(count))
+    mu = _tree_update_moment_f32(
+        updates,
+        moments,
+        decay,
+        momentum_accumulator=momentum_accumulator,
+    )
+
+    if bias_correction:
+        moment_count = count_inc
+        if nesterov:
+            for _ in range(nesterov_moment_count_offset):
+                moment_count = cast(jax.Array, numerics.safe_increment(moment_count))
+        mu_target = _tree_bias_correction_momentum(
+            mu,
+            decay,
+            moment_count,
+            momentum_accumulator=momentum_accumulator,
+        )
+        updates_target = (
+            _tree_bias_correction_momentum(
+                updates,
+                decay,
+                count_inc,
+                momentum_accumulator=momentum_accumulator,
+            )
+            if nesterov
+            else updates
+        )
+    else:
+        mu_target = mu
+        updates_target = updates
+
+    if nesterov:
+        direction = _tree_momentum_lookahead(
+            mu_target,
+            updates_target,
+            decay,
+            momentum_accumulator=momentum_accumulator,
+        )
+    else:
+        direction = mu_target
+
+    next_key, sr_key, extra_keys = _split_first_moment_keys(
+        key,
+        mu_dtype,
+        reserve_sr_key=reserve_sr_key,
+        extra_key_count=extra_key_count,
+    )
+    mu_stored, next_key = _store_moment_tree(
+        mu,
+        mu_dtype,
+        next_key,
+        sr_key=sr_key,
+    )
+
+    return FirstMomentRuntime(
+        count=count_inc,
+        mu=mu,
+        direction=direction,
+        mu_stored=mu_stored,
+        key=next_key,
+        sr_key=sr_key,
+        extra_keys=extra_keys,
+    )
 
 
 def apply_updates(

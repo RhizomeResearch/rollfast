@@ -107,11 +107,18 @@ def test_scale_by_trasmuon_rejects_direct_fallback_leaves():
 @pytest.mark.parametrize(
     "kwargs",
     [
+        {"beta1": -0.1},
+        {"beta1": 1.0},
+        {"beta2": -0.1},
+        {"beta2": 1.0},
+        {"eps": 0.0},
+        {"ns_iters": 0},
         {"clip_alpha": -1.0},
         {"energy_beta": 1.0},
         {"clip_beta": -0.1},
         {"clip_min": 1.1},
         {"trigger": 0.0},
+        {"update_period": 0},
         {"warmup_steps": -1},
         {"mix": 1.1},
     ],
