@@ -22,6 +22,7 @@ from rollfast.optim.dimension_numbers import (
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
+    _validate_matrix_operand,
 )
 from rollfast.optim.muon import (
     MuonDimensionNumbers,
@@ -101,8 +102,9 @@ def _operator_normalize_power_iter(
 ) -> jax.Array:
     x = x.astype(jnp.float32)
     eps32 = jnp.asarray(eps, dtype=jnp.float32)
-    v = jnp.ones(x.shape[:-2] + (x.shape[-1], 1), dtype=x.dtype)
-    v = v / jnp.maximum(jnp.linalg.norm(v, axis=(-2, -1), keepdims=True), eps32)
+    col_norms = jnp.sum(numerics.abs_sq(x), axis=-2)
+    col_idx = jnp.argmax(col_norms, axis=-1)
+    v = jax.nn.one_hot(col_idx, x.shape[-1], dtype=x.dtype)[..., None]
 
     def body_fn(_, v_):
         u = x @ v_
@@ -154,6 +156,7 @@ def _normuon_leaf_update(
 ) -> tuple[Any, Any]:
     if _is_aux_leaf(direction) or dim_nums is None:
         return direction, nu
+    _validate_matrix_operand(direction, dim_nums, "scale_by_normuon")
     if direction.ndim < 2:
         raise ValueError(
             f"Muon-variant optimized parameters must have rank >= 2, got {direction.ndim=}."
@@ -278,6 +281,12 @@ def scale_by_normuon(
             params=params,
             updates=updates,
             transform_name="scale_by_normuon",
+        )
+        jax.tree.map(
+            lambda u, d: _validate_matrix_operand(u, d, "scale_by_normuon"),
+            updates,
+            dim_nums,
+            is_leaf=_is_dimension_numbers_leaf,
         )
         count_inc = numerics.safe_increment(state.count)
         mu = _tree_update_moment_f32(

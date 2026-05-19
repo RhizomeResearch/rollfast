@@ -107,6 +107,26 @@ def test_scale_by_adam_complex_ignores_real_bf16_state_dtype_for_first_moment():
     assert nu["w"].dtype == jnp.bfloat16
 
 
+def test_scale_by_adam_complex_mu_dtype_keeps_second_moment_real():
+    params = {"w": jnp.ones((2,), dtype=jnp.complex64)}
+    grads = {"w": jnp.array([1.0 + 2.0j, -3.0 + 4.0j], dtype=jnp.complex64)}
+    tx = scale_by_adam(b1=0.0, b2=0.0, mu_dtype=jnp.complex64)
+
+    _, state = tx.update(grads, tx.init(params), params)
+    state = cast(ScaleByAdamState, state)
+    mu = as_array_dict(state.mu)
+    nu = as_array_dict(state.nu)
+
+    assert mu["w"].dtype == jnp.complex64
+    assert nu["w"].dtype == jnp.float32
+    assert jnp.allclose(nu["w"], jnp.array([5.0, 25.0], dtype=jnp.float32))
+
+
+def test_adamw_rejects_negative_weight_decay():
+    with pytest.raises(ValueError, match="nonnegative"):
+        adamw(learning_rate=0.01, weight_decay=-0.1)
+
+
 def test_scale_by_adam_requires_params_for_weight_decay():
     params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
     grads = jax.tree.map(jnp.zeros_like, params)

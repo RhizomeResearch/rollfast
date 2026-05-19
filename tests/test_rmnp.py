@@ -3,6 +3,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.optim.rmnp import (
@@ -38,6 +39,18 @@ def test_scale_by_rmnp_shape_matches_muon_width_scaling():
     scaled = cast(dict[str, jax.Array], scaled)
 
     assert jnp.allclose(scaled["w"], jnp.ones((2, 8)) * 2.0)
+
+
+def test_scale_by_rmnp_rejects_direct_fallback_leaves():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.ones_like, params)
+    tx = scale_by_rmnp(beta=0.0, nesterov=False)
+
+    with pytest.raises(ValueError, match="scale_by_rmnp.*matrix dimension specs"):
+        tx.update(grads, tx.init(params), params)
 
 
 def test_scale_by_rmnp_heavy_ball_momentum_accumulator():

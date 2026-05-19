@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple, TypeAlias, cast
 
 import jax
+import jax.numpy as jnp
 from optax._src import base
 from optax.transforms import _masking
 
@@ -54,6 +55,28 @@ def _is_dimension_numbers_leaf(x: Any) -> bool:
 
 def _is_array_like_leaf(x: Any) -> bool:
     return hasattr(x, "shape") and hasattr(x, "dtype")
+
+
+def _validate_matrix_operand(
+    x: Any,
+    dim_nums: MatrixDimensionNumbers | None,
+    transform_name: str,
+) -> None:
+    """Reject leaves that a direct matrix transform cannot safely handle."""
+    if x is None or isinstance(x, _masking.MaskedNode):
+        return
+    if dim_nums is None or isinstance(dim_nums, _masking.MaskedNode):
+        raise ValueError(
+            f"`{transform_name}` only supports leaves with matrix dimension specs. "
+            "Use the public wrapper for Adam fallback leaves, or pass a "
+            "`weight_dimension_numbers` tree that marks every updated leaf."
+        )
+    if jnp.issubdtype(jnp.dtype(x.dtype), jnp.complexfloating):
+        raise ValueError(
+            f"`{transform_name}` does not support complex matrix leaves. Route "
+            "complex parameters to an Adam fallback branch or convert them to a "
+            "real-valued representation before using matrix optimizers."
+        )
 
 
 def _get_dimension_numbers(
@@ -244,6 +267,12 @@ def _compute_matrix_reshape(
     x: jax.Array, dim_nums: MatrixDimensionNumbers
 ) -> tuple[ReshapeFn, ReshapeFn]:
     """Build forward/inverse reshapes for ``(batch, reduction, output)`` layout."""
+    if jnp.issubdtype(jnp.dtype(x.dtype), jnp.complexfloating):
+        raise ValueError(
+            "Matrix optimizers do not support complex matrix leaves. Route complex "
+            "parameters to an Adam fallback branch or convert them to a real-valued "
+            "representation before using matrix optimizers."
+        )
     if x.ndim < 2:
         raise ValueError(
             f"Matrix-optimized parameters must have rank >= 2, got {x.ndim=}."

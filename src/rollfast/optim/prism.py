@@ -30,6 +30,7 @@ from rollfast.optim.dimension_numbers import (
     _is_standard_2d_spec,
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
+    _validate_matrix_operand,
 )
 from rollfast.optim.magma import validate_magma_args
 from rollfast.optim.orthogonalization import (
@@ -98,7 +99,7 @@ def get_equinox_prism_spec(
     if not _EQUINOX_AVAILABLE:
         raise ImportError(
             "The function `get_equinox_prism_spec` requires the `equinox` library. "
-            "Please install it via `pip install equinox`."
+            'Please install it via `pip install "rollfast[equinox]"`.'
         )
     import equinox as eqx
 
@@ -424,6 +425,7 @@ def _prism_ortho_step(
     # Passthrough (partitioned-away or non-matrix leaves)
     if dim_nums is None or isinstance(dim_nums, _masking.MaskedNode):
         return mu_nest if mu_nest is not None else mu_raw
+    _validate_matrix_operand(updates, dim_nums, "scale_by_prism")
 
     m_target_eff = mu_nest if mu_nest is not None else mu_raw
     is_fast_2d = updates.ndim == 2 and _is_standard_2d_spec(dim_nums)
@@ -612,6 +614,12 @@ def scale_by_prism(
             params=params,
             updates=updates,
             transform_name="scale_by_prism",
+        )
+        jax.tree.map(
+            lambda u, d: _validate_matrix_operand(u, d, "scale_by_prism"),
+            updates,
+            resolved_dim_nums,
+            is_leaf=_is_prism_leaf,
         )
 
         runtime = prepare_matrix_runtime_step(

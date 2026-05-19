@@ -23,6 +23,8 @@ from rollfast.utils import (
     _resolve_scalar,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
+    _validate_grad_clip_max_amps,
+    _validate_positive_static_scalar,
     add_tiny,
     dist_reduce,
 )
@@ -143,6 +145,14 @@ def _compute_global_rms_scale(
     return jnp.minimum(
         1.0, max_rms / jnp.maximum(global_rms, jnp.finfo(global_rms.dtype).tiny)
     )
+
+
+def _first_non_aux_dtype(leaves: list[Any]) -> jnp.dtype:
+    _is_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+    for leaf in leaves:
+        if not _is_leaf(leaf):
+            return leaf.dtype
+    return jnp.dtype(jnp.float32)
 
 
 def _compute_init_scale_from_grads(
@@ -770,6 +780,7 @@ def scale_by_kron(
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     axis_name: Optional[str] = None,
+    verbose: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Implements PSGD Kron (Preconditioned SGD with Kronecker factorization).
@@ -834,6 +845,8 @@ def scale_by_kron(
         )
     if use_magma:
         validate_magma_args(magma_p, magma_tau)
+    _validate_positive_static_scalar("raw_global_grad_clip", raw_global_grad_clip)
+    _validate_grad_clip_max_amps(grad_clip_max_amps)
 
     if mu_dtype is None:
         mu_dtype = jnp.float32
@@ -847,7 +860,7 @@ def scale_by_kron(
         raise ValueError(
             "Cannot whiten momentum (whiten_grad=False) when momentum is disabled (b1 <= 0)."
         )
-    if not whiten_grad and jax.process_index() == 0:
+    if not whiten_grad and verbose and jax.process_index() == 0:
         lr_reduction = int(((1 + b1) / (1 - b1)) ** 0.5)
         print(
             f"whiten_grad=False: Recommend reducing learning_rate by ~{lr_reduction}x"
@@ -972,7 +985,7 @@ def scale_by_kron(
         ]
         Qs_n_elements = sum([q.size for q in valid_Qs])
         Qs_size_MB = sum([q.size * q.dtype.itemsize / (2**20) for q in valid_Qs])
-        if jax.process_index() == 0:
+        if verbose and jax.process_index() == 0:
             init_msg = "on-the-fly" if lazy_init else f"{_init_scale}"
             mode_info = preconditioner_mode.value
             if preconditioner_mode == PreconditionerMode.NS:
@@ -988,7 +1001,7 @@ def scale_by_kron(
             ]
             mu_n_elements = sum([p.size for p in valid_mu])
             mu_size_MB = sum([p.size * p.dtype.itemsize / (2**20) for p in valid_mu])
-            if jax.process_index() == 0:
+            if verbose and jax.process_index() == 0:
                 print(
                     f"PSGD Momentum size: {mu_n_elements} elements, {mu_size_MB:.2f} MB"
                 )
@@ -1161,7 +1174,7 @@ def scale_by_kron(
                     else g
                     for k, g in zip(Vs_keys, precond_updates_in)
                 ]
-                eps = jnp.finfo(precond_updates_in[0].dtype).eps
+                eps = jnp.finfo(_first_non_aux_dtype(precond_updates_in)).eps
                 precond_updates_in = [
                     (g + (damping + eps * jnp.abs(g)) * v)
                     if not _is_psgd_leaf(g)
@@ -1497,6 +1510,7 @@ def kron(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: Optional[str] = None,
+    verbose: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
@@ -1546,6 +1560,7 @@ def kron(
             weight_decay=weight_decay if use_magma else 0.0,
             weight_decay_mask=weight_decay_mask if use_magma else None,
             axis_name=axis_name,
+            verbose=verbose,
             key=key,
         )
     ]

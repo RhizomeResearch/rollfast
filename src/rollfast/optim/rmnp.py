@@ -32,6 +32,7 @@ from rollfast.optim.dimension_numbers import (
     _make_matrix_partition_fns,
     _normalize_axes,
     _resolve_update_dimension_numbers,
+    _validate_matrix_operand,
 )
 from rollfast.utils import (
     MomentumAccumulator,
@@ -74,6 +75,7 @@ def _rmnp_leaf_update(
 ) -> Any:
     if _is_aux_leaf(update) or dim_nums is None:
         return update
+    _validate_matrix_operand(update, dim_nums, "scale_by_rmnp")
     if update.ndim < 2:
         raise ValueError(
             f"RMNP optimized parameters must have rank >= 2, got {update.ndim=}."
@@ -156,6 +158,12 @@ def scale_by_rmnp(
             updates=updates,
             transform_name="scale_by_rmnp",
         )
+        jax.tree.map(
+            lambda u, d: _validate_matrix_operand(u, d, "scale_by_rmnp"),
+            updates,
+            dim_nums,
+            is_leaf=_is_dimension_numbers_leaf,
+        )
 
         mu = _tree_update_moment_f32(
             updates,
@@ -201,7 +209,9 @@ def scale_by_rmnp(
         if adaptive:
             rmnp_updates = jax.tree.map(
                 lambda x, y: (
-                    x if _is_aux_leaf(x) or _is_aux_leaf(y) else jnp.sum(x * y) * y
+                    x
+                    if _is_aux_leaf(x) or _is_aux_leaf(y)
+                    else jnp.sum(x.conj() * y) * y
                 ),
                 direction,
                 rmnp_updates,

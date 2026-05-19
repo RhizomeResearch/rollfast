@@ -5,7 +5,6 @@ from typing import Any, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
-import optax
 from optax._src import base, numerics
 
 from rollfast.optim.magma import apply_magma_internal
@@ -22,6 +21,8 @@ from rollfast.utils import (
     _tree_momentum_lookahead,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
+    _validate_grad_clip_max_amps,
+    _validate_positive_static_scalar,
     _zeros_like_tree,
     add_tiny,
     dist_reduce,
@@ -139,6 +140,7 @@ def prepare_matrix_runtime_step(
     axis_name: Optional[str],
 ) -> MatrixRuntimeStep:
     """Prepare clipped gradients, momentum, and shaping targets for one step."""
+    _validate_positive_static_scalar("raw_global_grad_clip", raw_global_grad_clip)
     next_key, sr_key, magma_key = _split_runtime_keys(key, use_magma)
     count_inc = cast(jax.Array, numerics.safe_increment(count))
 
@@ -216,7 +218,7 @@ def prepare_matrix_runtime_step(
     if mu_dtype == jnp.bfloat16:
         mu_cast = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key)
     else:
-        mu_cast = optax.tree.cast(mu_f32, mu_dtype)
+        mu_cast = _cast_state_tree(mu_f32, mu_dtype)
 
     target_for_shape = (
         mu_target
@@ -273,6 +275,7 @@ def finish_matrix_runtime_step(
     guard_fn: Optional[Callable[[jax.Array], jax.Array]] = None,
 ) -> tuple[base.Updates, base.Params]:
     """Apply shared post-processing after optimizer-specific matrix shaping."""
+    _validate_grad_clip_max_amps(grad_clip_max_amps)
     new_updates = updates
 
     if guard_fn is not None:

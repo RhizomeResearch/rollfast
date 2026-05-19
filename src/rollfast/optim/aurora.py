@@ -37,6 +37,7 @@ from rollfast.optim.dimension_numbers import (
     _is_standard_2d_spec,
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
+    _validate_matrix_operand,
 )
 from rollfast.optim.magma import validate_magma_args
 from rollfast.utils import (
@@ -95,7 +96,7 @@ def get_equinox_aurora_spec(
     if not _AURORA_EQUINOX_AVAILABLE:
         raise ImportError(
             "The function `get_equinox_aurora_spec` requires the `equinox` "
-            "library. Please install it via `pip install equinox`."
+            'library. Please install it via `pip install "rollfast[equinox]"`.'
         )
     import equinox as eqx
 
@@ -433,6 +434,7 @@ def _apply_matrix_rule(
     """Apply Aurora/Riemannian-Aurora to a leaf with optional reshape spec."""
     if dim_nums is None or isinstance(dim_nums, _masking.MaskedNode):
         return mu_nest if mu_nest is not None else mu_raw
+    _validate_matrix_operand(updates, dim_nums, "scale_by_aurora")
 
     target = mu_nest if mu_nest is not None else mu_raw
 
@@ -547,7 +549,13 @@ def _scale_by_aurora_impl(
             weight_dimension_numbers,
             params=params,
             updates=updates,
-            transform_name="Aurora",
+            transform_name="scale_by_aurora",
+        )
+        jax.tree.map(
+            lambda u, d: _validate_matrix_operand(u, d, "scale_by_aurora"),
+            updates,
+            resolved_dim_nums,
+            is_leaf=_is_dim_leaf,
         )
 
         runtime = prepare_matrix_runtime_step(

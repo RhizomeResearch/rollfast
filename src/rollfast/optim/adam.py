@@ -61,8 +61,9 @@ def scale_by_adam(
         eps: Term added to the denominator to improve numerical stability.
         eps_root: Term added to the denominator inside the square-root to improve
             numerical stability when backpropagating gradients through the rescaling.
-        mu_dtype: Optional `dtype` to be used for the first order accumulator; if
-            `None` then the `dtype` is inferred from `params` and `updates`.
+        mu_dtype: Optional dtype for Adam state storage. Real dtypes are used for
+            both first and second moments; complex first moments keep a real
+            second-moment tree.
         weight_decay: Optional decoupled weight decay applied inside this transform
             when `params` are provided. Public `adamw` only passes nonzero decay here
             when `use_magma=True`; otherwise it applies decay as a separate transform.
@@ -220,7 +221,7 @@ def scale_by_adam(
             nu_stored = _tree_stochastic_cast(nu_f32, jnp.bfloat16, k2)
         else:
             mu_stored = _cast_state_tree(mu_f32, canonical_mu_dtype)
-            nu_stored = _cast_state_tree(nu_f32, canonical_mu_dtype)
+            nu_stored = _cast_state_tree(nu_f32, canonical_nu_dtype)
 
         return final_updates, ScaleByAdamState(
             count=count_inc,

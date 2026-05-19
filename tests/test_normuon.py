@@ -163,6 +163,18 @@ def test_scale_by_normuon_heavy_ball_momentum_accumulator():
     assert jnp.allclose(mu["w"], grads["w"])
 
 
+def test_scale_by_normuon_rejects_direct_fallback_leaves():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.ones_like, params)
+    tx = scale_by_normuon(beta1=0.0, beta2=0.0, nesterov=False, ns_iters=2)
+
+    with pytest.raises(ValueError, match="scale_by_normuon.*matrix dimension specs"):
+        tx.update(grads, tx.init(params), params)
+
+
 def test_scale_by_normuon_bf16_momentum_state():
     params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
     grads = {"w": jnp.ones_like(params["w"]) * 0.1}
@@ -224,6 +236,25 @@ def test_contramuon_changes_muon_direction():
 
     assert not jnp.allclose(muon_updates["w"], contra_updates["w"])
     assert jnp.all(jnp.isfinite(contra_updates["w"]))
+
+
+def test_contramuon_operator_normalization_avoids_degenerate_ones_start():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.array([[1.0, -1.0], [0.0, 0.0]], dtype=jnp.float32)}
+    tx = scale_by_normuon(
+        beta1=0.0,
+        beta2=None,
+        nesterov=False,
+        ns_iters=2,
+        contra_coeff=1.0,
+        contra_power_iters=2,
+    )
+
+    updates, _ = tx.update(grads, tx.init(params), params)
+    updates = cast(dict[str, jax.Array], updates)
+
+    assert jnp.all(jnp.isfinite(updates["w"]))
+    assert jnp.linalg.norm(updates["w"]) < 10.0
 
 
 def test_contramuon_preserves_pre_contra_update_norm():

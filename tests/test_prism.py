@@ -2,6 +2,7 @@ import jax.numpy as jnp
 from typing import cast
 
 import jax
+import pytest
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.optim.prism import ScaleByPrismState, scale_by_prism, prism
@@ -57,6 +58,19 @@ def test_scale_by_prism_accepts_preconditioning_selector():
 
     assert updates["w"].shape == params["w"].shape
     assert jnp.all(jnp.isfinite(updates["w"]))
+
+
+def test_scale_by_prism_rejects_nonpositive_clip_thresholds():
+    params = {"w": jnp.eye(4, dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"])}
+
+    raw_clip_tx = scale_by_prism(raw_global_grad_clip=0.0, grad_clip_max_amps=None)
+    with pytest.raises(ValueError, match="raw_global_grad_clip"):
+        raw_clip_tx.update(grads, raw_clip_tx.init(params), params)
+
+    post_clip_tx = scale_by_prism(grad_clip_max_amps=(0.0, 10.0))
+    with pytest.raises(ValueError, match="grad_clip_max_amps"):
+        post_clip_tx.update(grads, post_clip_tx.init(params), params)
 
 
 def test_scale_by_prism_heavy_ball_momentum_accumulator():
