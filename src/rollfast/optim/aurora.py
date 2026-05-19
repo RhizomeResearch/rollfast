@@ -844,7 +844,9 @@ def _build_unscaled_aurora_branch(
 
     components = [aurora_scale]
     if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
-        components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+        components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
 
     return combine.chain(*components)
 

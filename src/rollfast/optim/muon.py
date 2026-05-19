@@ -389,7 +389,9 @@ def _build_unscaled_muon_branch(
             )
         )
         if _has_nonzero_or_scheduled(weight_decay):
-            components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+            components.append(
+                transform.add_decayed_weights(weight_decay, weight_decay_mask)
+            )
 
     return combine.chain(*components)
 

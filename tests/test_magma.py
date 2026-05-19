@@ -28,12 +28,8 @@ def test_magma_via_aurora():
 
 
 def test_magma_complex_leaves_use_real_hermitian_alignment():
-    raw_gradients = {
-        "w": jnp.array([1.0 + 2.0j, -3.0 + 4.0j], dtype=jnp.complex64)
-    }
-    first_moments = {
-        "w": jnp.array([2.0 - 1.0j, 1.0 + 0.5j], dtype=jnp.complex64)
-    }
+    raw_gradients = {"w": jnp.array([1.0 + 2.0j, -3.0 + 4.0j], dtype=jnp.complex64)}
+    first_moments = {"w": jnp.array([2.0 - 1.0j, 1.0 + 0.5j], dtype=jnp.complex64)}
     base_updates = {"w": jnp.ones((2,), dtype=jnp.complex64)}
     magma_s = {"w": jnp.array(0.5, dtype=jnp.float32)}
 
