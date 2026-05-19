@@ -1,7 +1,10 @@
 import jax.numpy as jnp
+import pytest
 from rollfast.optim.adam import adamw
-from rollfast.optim.aurora import aurora
+from rollfast.optim.aurora import aurora, scale_by_aurora
 from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.prism import scale_by_prism
+from rollfast.optim.psgd import scale_by_kron
 from tests._typing import as_array_dict
 
 
@@ -48,3 +51,9 @@ def test_magma_complex_leaves_use_real_hermitian_alignment():
     assert next_s["w"].dtype == jnp.float32
     assert jnp.all(jnp.isfinite(updates["w"]))
     assert jnp.all(jnp.isfinite(next_s["w"]))
+
+
+@pytest.mark.parametrize("make_tx", [scale_by_aurora, scale_by_prism, scale_by_kron])
+def test_magma_enabled_transforms_validate_probability(make_tx):
+    with pytest.raises(ValueError, match="magma_p"):
+        make_tx(use_magma=True, magma_p=-0.1)

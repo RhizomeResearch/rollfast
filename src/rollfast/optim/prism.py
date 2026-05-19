@@ -31,6 +31,7 @@ from rollfast.optim.dimension_numbers import (
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
 )
+from rollfast.optim.magma import validate_magma_args
 from rollfast.optim.orthogonalization import (
     MUON_NS_COEFFS,
     MuonNsCoeffs,
@@ -568,7 +569,7 @@ def scale_by_prism(
             `params` must be passed to `update`.
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.
@@ -589,6 +590,9 @@ def scale_by_prism(
         via Anisotropic Spectral Shaping.
         URL: https://leloykun.github.io/ponder/shampoo-prism/
     """
+    if use_magma:
+        validate_magma_args(magma_p, magma_tau)
+
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
@@ -844,7 +848,7 @@ def prism(
             of ~0.25x. You may need to scale the global learning rate by ~4x to
             maintain the undamped update volume.
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.
@@ -923,6 +927,7 @@ def prism(
                 weight_decay=weight_decay,
                 weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
+                nesterov=nesterov,
                 use_magma=use_magma,
                 magma_p=magma_p,
                 magma_tau=magma_tau,

@@ -3,6 +3,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
 from rollfast.optim.pion import ScaleByPionState, pion, scale_by_pion
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
@@ -78,6 +79,18 @@ def test_scale_by_pion_bf16_state():
     assert v_in["w"].dtype == jnp.bfloat16
     assert m_out["w"].dtype == jnp.bfloat16
     assert v_out["w"].dtype == jnp.bfloat16
+
+
+def test_scale_by_pion_rejects_direct_fallback_leaves():
+    params = {
+        "w": jnp.eye(4, dtype=jnp.float32),
+        "b": jnp.ones((4,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(lambda x: jnp.ones_like(x) * 0.1, params)
+    tx = scale_by_pion(learning_rate=0.01)
+
+    with pytest.raises(ValueError, match="public `pion` wrapper"):
+        tx.update(grads, tx.init(params), params)
 
 
 def test_pion_partitions_vectors_to_adam():

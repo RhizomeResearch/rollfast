@@ -9,7 +9,7 @@ import optax.tree
 from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
-from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
     _apply_weight_decay_tree,
     _cast_state_tree,
@@ -21,6 +21,7 @@ from rollfast.utils import (
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
+    _zeros_like_tree,
 )
 
 
@@ -73,7 +74,7 @@ def scale_by_adam(
             Nesterov momentum is described in [Dozat 2016]
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.
@@ -90,14 +91,22 @@ def scale_by_adam(
         arXiv preprint arXiv:2602.15322.
     """
 
+    if use_magma:
+        validate_magma_args(magma_p, magma_tau)
+
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
     )
+    canonical_nu_dtype = (
+        jnp.float32
+        if jnp.issubdtype(jnp.dtype(canonical_mu_dtype), jnp.complexfloating)
+        else canonical_mu_dtype
+    )
 
     def init_fn(params):
-        mu = optax.tree.zeros_like(params, dtype=canonical_mu_dtype)  # First moment
-        nu = optax.tree.zeros_like(params, dtype=canonical_mu_dtype)  # Second moment
+        mu = _zeros_like_tree(params, canonical_mu_dtype)  # First moment
+        nu = optax.tree.zeros_like(params, dtype=canonical_nu_dtype)  # Second moment
 
         magma_s = _init_magma_state(params) if use_magma else ()
 
@@ -132,15 +141,7 @@ def scale_by_adam(
 
             # Explicitly bypass MaskedNodes. Attempting .astype() on a MaskedNode
             # triggers an AttributeError during partitioned gradient routing.
-            updates_f32 = jax.tree.map(
-                lambda x: (
-                    x
-                    if isinstance(x, _masking.MaskedNode)
-                    else (x.astype(jnp.float32) if x is not None else None)
-                ),
-                updates,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
+            updates_f32 = _cast_state_tree(updates, jnp.float32)
             g_bc = _safe_bias_correction(updates_f32, mu_bc_factor)
 
             # MaskedNodes cannot be mathematically multiplied or added.
@@ -173,9 +174,14 @@ def scale_by_adam(
             is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
 
-        wd_step = _resolve_scalar(weight_decay, state.count)
+        if _has_nonzero_or_scheduled(weight_decay) and params is None:
+            raise ValueError(
+                "`params` must be provided to `scale_by_adam.update` when "
+                "`weight_decay` is nonzero or scheduled."
+            )
 
         if params is not None:
+            wd_step = _resolve_scalar(weight_decay, state.count)
             resolved_mask = _resolve_mask(weight_decay_mask, params)
             if resolved_mask is None:
                 resolved_mask = jax.tree.map(
@@ -321,7 +327,7 @@ def adamw(
             of ~0.25x. You may need to scale the global learning rate by ~4x to
             maintain the undamped update volume.
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.

@@ -117,6 +117,8 @@ approximation.
   RMS-normalized second-order exponential updates.
 - **Partitioning**: Automatically routes 2D matrices to Pion and routes vectors,
   scalars, and unspecified tensors to AdamW.
+- **Weight decay**: `pion(..., weight_decay=...)` applies decay only on the
+  AdamW fallback leaves. Pion-managed matrices stay on their iso-spectral path.
 - **Reference**: *Pion: A Spectrum-Preserving Optimizer via Orthogonal
   Equivalence Transformation* (Shi et al., 2026).
 
@@ -432,6 +434,8 @@ optimizer = optax.chain(
 
 The `schedule_free_*` functions wrap base optimizers with the Schedule-Free
 logic and the WSD (Warmup-Stable-Decay) scheduler for the internal step size.
+Their `update` method needs the current `params`, because Schedule-Free
+interpolates between the averaged iterate and its internal z-sequence.
 
 ```python
 import jax.numpy as jnp
@@ -564,7 +568,9 @@ or `contranormuon_weight_dimension_numbers` for high-rank tensors.
 The direct transforms such as `scale_by_rmnp`, `scale_by_normuon`,
 `scale_by_trasmuon`, and `scale_by_pion` are low-level matrix-branch
 primitives. They do not include the AdamW fallback used by public wrappers such
-as `rmnp`, `normuon`, `trasmuon`, and `pion`.
+as `rmnp`, `normuon`, `trasmuon`, and `pion`; `scale_by_pion` rejects leaves
+without Pion dimension specs because it already applies its learning rate
+internally.
 
 By default, only 2D array leaves receive matrix dimension numbers. For
 convolution kernels or other high-rank tensors, either use the public wrapper so
@@ -700,7 +706,10 @@ state affected depends on the optimizer:
 | `pion` | All Pion Lie-algebra moment trees: `m_in`, `v_in`, `m_out`, and `v_out`. |
 
 Composition wrappers such as SODA, Hyperball, and Schedule-Free forward
-`mu_dtype` to their base optimizer branches.
+`mu_dtype` to their base optimizer branches when those branches expose momentum
+state. `schedule_free_kron` is the exception: it runs Kron with `b1=0.0`, so
+there is no momentum buffer for `mu_dtype` to control; use `precond_dtype` for
+Kron preconditioner storage.
 
 ```python
 import jax.numpy as jnp
@@ -738,6 +747,11 @@ WSD (Warmup-Stable-Decay) schedule and the iterate averaging.
 | `warmup_fraction` | `0.1`       | Fraction of `total_steps` used for linear warmup.                                                                 |
 | `decay_fraction`  | `0.1`       | Fraction of `total_steps` used for linear decay (cooldown) at the end of training.                                |
 | `weighting_mode`  | `PRACTICAL` | Strategy for $c_t$ calculation: `THEORETICAL` ($1/t$), `PRACTICAL` ($\gamma_t^2$), or `SCHEDULET` ($\gamma_t$). |
+
+For the WSD schedule, `warmup_steps = int(total_steps * warmup_fraction)` and
+`decay_steps = int(total_steps * decay_fraction)`. Counts `0..warmup_steps`
+are warmup, counts after `total_steps - decay_steps` are decay, and the final
+count `total_steps - 1` reaches `final_lr_ratio * peak_lr`.
 
 ### Muon Specifics
 
@@ -821,8 +835,8 @@ and prevent vanishing progress.
 | Parameter   | Default | Description                                                                                                                                                                                                                                                            |
 | :---------- | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `use_magma` | `False` | Enables Momentum-aligned gradient masking. Operates at the PyTree leaf level to ensure strict cryptographic PRNG independence and JAX topological isomorphism.                                                                                                         |
-| `magma_p`   | `0.5`   | Bernoulli masking probability. A value of `1.0` keeps every leaf active while still applying the alignment score; `0.0` suppresses Magma-managed leaves.                                                                                                               |
-| `magma_tau` | `2.0`   | Temperature parameter for the alignment sigmoid $\sigma(\text{cossim} / \tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                             |
+| `magma_p`   | `0.5`   | Bernoulli masking probability in `[0, 1]`. A value of `1.0` keeps every leaf active while still applying the alignment score; `0.0` suppresses Magma-managed leaves.                                                                                                  |
+| `magma_tau` | `2.0`   | Positive temperature parameter for the alignment sigmoid $\sigma(\text{cossim} / \tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                    |
 | `key`       | `jax.random.PRNGKey(42)` | PRNG key used to initialize Magma's stateful Bernoulli sampling stream. Pass an explicit JAX key when composing multiple Magma-enabled branches and split keys per branch when deterministic independence matters. |
 
 #### Preconditioner Modes

@@ -14,16 +14,40 @@ def _is_aux_leaf(x: Any) -> bool:
 
 
 def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+    target_dtype = jnp.dtype(dtype)
+
+    def _zeros_leaf(x):
+        if _is_aux_leaf(x):
+            return x
+        leaf_dtype = (
+            jnp.complex64
+            if jnp.issubdtype(x.dtype, jnp.complexfloating)
+            and not jnp.issubdtype(target_dtype, jnp.complexfloating)
+            else target_dtype
+        )
+        return jnp.zeros_like(x, dtype=leaf_dtype)
+
     return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else jnp.zeros_like(x, dtype=dtype),
+        _zeros_leaf,
         params,
         is_leaf=_is_aux_leaf,
     )
 
 
 def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+    target_dtype = jnp.dtype(dtype)
+
+    def _cast_leaf(x):
+        if _is_aux_leaf(x):
+            return x
+        if jnp.issubdtype(x.dtype, jnp.complexfloating) and not jnp.issubdtype(
+            target_dtype, jnp.complexfloating
+        ):
+            return x.astype(jnp.complex64)
+        return x.astype(target_dtype)
+
     return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else x.astype(dtype),
+        _cast_leaf,
         tree,
         is_leaf=_is_aux_leaf,
     )
@@ -127,15 +151,15 @@ def dist_reduce(x: jax.Array, axis_name: Optional[str], op: str = "mean") -> jax
     Returns:
         The reduced array across devices.
     """
+    if op not in ("mean", "max", "sum"):
+        raise ValueError(f"op must be one of 'mean', 'max', or 'sum', got {op!r}.")
     if axis_name is None:
         return x
     if op == "mean":
         return jax.lax.pmean(x, axis_name=axis_name)
-    elif op == "max":
+    if op == "max":
         return jax.lax.pmax(x, axis_name=axis_name)
-    elif op == "sum":
-        return jax.lax.psum(x, axis_name=axis_name)
-    return x
+    return jax.lax.psum(x, axis_name=axis_name)
 
 
 def _safe_bias_correction(tree, factor):
@@ -216,6 +240,8 @@ def _tree_stochastic_cast(
     leaves, treedef = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
     keys = jax.random.split(key, len(leaves))
 
+    canonical_target_dtype = jnp.dtype(target_dtype)
+
     def _cast_leaf(leaf, k):
         # Short-circuit MaskedNodes and static Callables before ANY cast attempt.
         # This completely replaces the unsafe `optax.tree.cast` fast-path.
@@ -226,52 +252,17 @@ def _tree_stochastic_cast(
         ):
             return leaf
 
-        if target_dtype == jnp.bfloat16:
+        if jnp.issubdtype(leaf.dtype, jnp.complexfloating) and not jnp.issubdtype(
+            canonical_target_dtype, jnp.complexfloating
+        ):
+            return leaf.astype(jnp.complex64)
+
+        if canonical_target_dtype == jnp.dtype(jnp.bfloat16):
             return _stochastic_round_bf16(leaf, k)
-        return leaf.astype(target_dtype)
+        return leaf.astype(canonical_target_dtype)
 
     rounded_leaves = [_cast_leaf(leaf, k) for leaf, k in zip(leaves, keys)]
     return jax.tree.unflatten(treedef, rounded_leaves)
-
-
-def _tree_stochastic_cast_like(
-    tree: base.Params, reference_tree: base.Params, key: jax.Array
-) -> base.Params:
-    """A stochastic equivalent to `optax.tree.cast_like`, strictly enforcing isomorphism.
-
-    Args:
-        tree: The input PyTree to cast.
-        reference_tree: The reference PyTree whose dtypes will be matched.
-        key: A PRNG key for generating noise during rounding.
-
-    Returns:
-        A new PyTree with the same structure and dtypes as the reference tree.
-    """
-    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
-    leaves_x, treedef_x = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
-    leaves_ref, _ = jax.tree.flatten(reference_tree, is_leaf=is_leaf_fn)
-    keys = jax.random.split(key, len(leaves_x))
-
-    def _stochastic_cast_like_leaf(x_leaf, ref_leaf, k):
-        if (
-            x_leaf is None
-            or ref_leaf is None
-            or isinstance(x_leaf, _masking.MaskedNode)
-            or not hasattr(x_leaf, "dtype")
-        ):
-            return x_leaf
-        tgt_dtype = getattr(ref_leaf, "dtype", x_leaf.dtype)
-        if tgt_dtype == jnp.bfloat16:
-            return _stochastic_round_bf16(x_leaf, k)
-        return x_leaf.astype(tgt_dtype)
-
-    return jax.tree.unflatten(
-        treedef_x,
-        [
-            _stochastic_cast_like_leaf(x, r, k)
-            for x, r, k in zip(leaves_x, leaves_ref, keys)
-        ],
-    )
 
 
 def _tree_update_moment_f32(
@@ -296,7 +287,13 @@ def _tree_update_moment_f32(
             or isinstance(t, _masking.MaskedNode)
         ):
             return g
-        return grad_scale * g.astype(jnp.float32) + decay32 * t.astype(jnp.float32)
+        compute_dtype = (
+            jnp.complex64
+            if jnp.issubdtype(g.dtype, jnp.complexfloating)
+            or jnp.issubdtype(t.dtype, jnp.complexfloating)
+            else jnp.float32
+        )
+        return grad_scale * g.astype(compute_dtype) + decay32 * t.astype(compute_dtype)
 
     return jax.tree.map(
         _update_moment_f32,
@@ -322,9 +319,12 @@ def _tree_update_moment_sq_f32(
             or isinstance(t, _masking.MaskedNode)
         ):
             return g
-        g_f32 = g.astype(jnp.float32)
-        sq_norm = jnp.square(g_f32) if jnp.isrealobj(g) else numerics.abs_sq(g_f32)
-        return (1.0 - decay) * sq_norm + decay * t.astype(jnp.float32)
+        if jnp.issubdtype(g.dtype, jnp.complexfloating):
+            sq_norm = numerics.abs_sq(g.astype(jnp.complex64))
+        else:
+            sq_norm = jnp.square(g.astype(jnp.float32))
+        t_real = jnp.real(t).astype(jnp.float32)
+        return (1.0 - decay) * sq_norm + decay * t_real
 
     return jax.tree.map(
         _update_moment_sq_f32,
@@ -332,12 +332,6 @@ def _tree_update_moment_sq_f32(
         moments,
         is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
     )
-
-
-def _compute_ema_f32(m, u, b1: jax.typing.ArrayLike):
-    if m is None or u is None:
-        return None
-    return b1 * m.astype(jnp.float32) + (1.0 - b1) * u.astype(jnp.float32)
 
 
 def _tree_bias_correction_momentum(
@@ -362,16 +356,19 @@ def _tree_momentum_lookahead(
 ) -> base.Updates:
     decay32 = jnp.asarray(decay, dtype=jnp.float32)
     grad_scale = _momentum_grad_scale(decay32, momentum_accumulator)
-    return jax.tree.map(
-        lambda m, g: (
-            m
-            if _is_aux_leaf(m) or _is_aux_leaf(g)
-            else decay32 * m.astype(jnp.float32) + grad_scale * g.astype(jnp.float32)
-        ),
-        moments,
-        updates,
-        is_leaf=_is_aux_leaf,
-    )
+
+    def _lookahead_leaf(m, g):
+        if _is_aux_leaf(m) or _is_aux_leaf(g):
+            return m
+        compute_dtype = (
+            jnp.complex64
+            if jnp.issubdtype(m.dtype, jnp.complexfloating)
+            or jnp.issubdtype(g.dtype, jnp.complexfloating)
+            else jnp.float32
+        )
+        return decay32 * m.astype(compute_dtype) + grad_scale * g.astype(compute_dtype)
+
+    return jax.tree.map(_lookahead_leaf, moments, updates, is_leaf=_is_aux_leaf)
 
 
 def apply_updates(
@@ -415,7 +412,12 @@ def apply_updates(
         keys_tree = jax.tree.unflatten(treedef, [None] * len(leaves))
 
     def _apply_leaf(p, u, k):
-        if p is None or isinstance(p, _masking.MaskedNode):
+        if (
+            p is None
+            or u is None
+            or isinstance(p, _masking.MaskedNode)
+            or isinstance(u, _masking.MaskedNode)
+        ):
             return p
 
         p_arr = jnp.asarray(p)

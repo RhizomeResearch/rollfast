@@ -32,8 +32,8 @@ from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
-    _get_dimension_numbers,
     _compute_matrix_reshape,
+    _get_dimension_numbers,
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
 )
@@ -41,6 +41,7 @@ from rollfast.utils import (
     MomentumAccumulator,
     _cast_state_tree,
     _momentum_grad_scale,
+    _resolve_scalar,
     _tree_stochastic_cast,
 )
 
@@ -54,16 +55,6 @@ class ScaleByPionState(NamedTuple):
     m_out: base.Updates
     v_out: base.Updates
     key: jax.Array | None
-
-
-def _resolve_scalar(
-    value: base.ScalarOrSchedule,
-    count: jax.typing.ArrayLike,
-) -> jax.typing.ArrayLike:
-    if callable(value):
-        schedule = cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], value)
-        return schedule(count)
-    return value
 
 
 def _zeros_for_pion(
@@ -242,6 +233,25 @@ def scale_by_pion(
         count_inc = numerics.safe_increment(state.count)
         dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
+        unsupported = jax.tree.leaves(
+            jax.tree.map(
+                lambda p, d: (
+                    p is not None
+                    and not isinstance(p, _masking.MaskedNode)
+                    and d is None
+                ),
+                params,
+                dim_nums,
+                is_leaf=_is_dimension_numbers_leaf,
+            )
+        )
+        if any(unsupported):
+            raise ValueError(
+                "`scale_by_pion` only supports leaves with Pion dimension specs. "
+                "Use the public `pion` wrapper for Adam fallback leaves, or pass "
+                "a `weight_dimension_numbers` tree that marks every updated leaf."
+            )
+
         out = jax.tree.map(
             lambda g, p, mi, vi, mo, vo, d: _pion_matrix_update(
                 g,
@@ -333,7 +343,9 @@ def pion(
 
     Matrix leaves are optimized by Pion's orthogonal-equivalence update. Leaves
     without a Pion dimension specification, such as biases and normalization
-    scales, are optimized by AdamW.
+    scales, are optimized by AdamW. ``weight_decay`` applies only to those AdamW
+    fallback leaves; additive decay is intentionally not applied to Pion-managed
+    matrices because it would change their singular spectrum.
     """
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate

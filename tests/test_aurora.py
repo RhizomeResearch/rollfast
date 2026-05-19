@@ -156,6 +156,31 @@ def test_aurora_magma_wrapper_masks_matrix_weight_decay_and_keeps_adam_finite():
     assert jnp.all(jnp.isfinite(updates["b"]))
 
 
+def test_aurora_adam_fallback_honors_nesterov():
+    params = {"b": jnp.ones((4,), dtype=jnp.float32)}
+    grads = {"b": jnp.ones_like(params["b"])}
+    plain_tx = aurora(
+        learning_rate=1.0,
+        adam_b1=0.5,
+        adam_b2=0.0,
+        nesterov=False,
+    )
+    nesterov_tx = aurora(
+        learning_rate=1.0,
+        adam_b1=0.5,
+        adam_b2=0.0,
+        nesterov=True,
+    )
+
+    plain_updates, _ = plain_tx.update(grads, plain_tx.init(params), params)
+    nesterov_updates, _ = nesterov_tx.update(grads, nesterov_tx.init(params), params)
+    plain_updates = as_array_dict(plain_updates)
+    nesterov_updates = as_array_dict(nesterov_updates)
+
+    assert not jnp.allclose(plain_updates["b"], nesterov_updates["b"])
+    assert jnp.all(jnp.isfinite(nesterov_updates["b"]))
+
+
 def test_scale_by_aurora_explicit_high_rank_dimension_spec():
     params = {"w": jnp.ones((2, 3, 4), dtype=jnp.float32)}
     grads = {"w": jnp.ones_like(params["w"]) * 0.1}

@@ -302,7 +302,11 @@ def schedule_free(
 
     def update_fn(updates, state, params=None, **extra_args):
         if params is None:
-            raise ValueError("schedule_free requires params to be passed to update().")
+            raise ValueError(
+                "`params` must be provided to `schedule_free.update`; "
+                "Schedule-Free needs the current parameters to interpolate "
+                "between the averaged and z sequences."
+            )
 
         next_state_key, sr_key = jax.random.split(state.key, 2)
         lr_tree = _resolve_learning_rate(state.step_count, params)

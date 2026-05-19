@@ -53,6 +53,15 @@ def test_schedule_free_plain_base_optimizer_ignores_extra_args():
     assert updates["w"].shape == params["w"].shape
 
 
+def test_schedule_free_requires_params_on_update():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    tx = schedule_free(optax.sgd(0.01), learning_rate=0.01)
+
+    with pytest.raises(ValueError, match="params.*schedule_free"):
+        tx.update(grads, tx.init(params))
+
+
 def test_schedule_free_does_not_swallow_base_optimizer_type_errors():
     params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
     grads = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
@@ -125,6 +134,10 @@ def test_schedule_free_wrappers_forward_key_to_outer_state():
     ):
         state = cast(ScheduleFreeState, make_tx().init(params))
         assert jnp.array_equal(state.key, key)
+
+
+def test_schedule_free_kron_does_not_expose_mu_dtype():
+    assert "mu_dtype" not in inspect.signature(schedule_free_kron).parameters
 
 
 def test_schedule_free_prism_accepts_shared_ns_coeff_schedule():

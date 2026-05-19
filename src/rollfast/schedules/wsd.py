@@ -54,8 +54,13 @@ def wsd_schedule(
     Args:
         peak_lr: The constant learning rate during the stable phase.
         total_steps: Total training steps T.
-        warmup_fraction: Fraction of steps for warmup.
-        decay_fraction: Fraction of steps for decay (cooldown).
+        warmup_fraction: Fraction of steps for warmup. The schedule uses
+            ``warmup_steps = int(total_steps * warmup_fraction)`` and treats
+            counts ``0..warmup_steps`` as warmup.
+        decay_fraction: Fraction of steps for decay (cooldown). The schedule
+            uses ``decay_steps = int(total_steps * decay_fraction)`` and treats
+            counts after ``total_steps - decay_steps`` as decay; count
+            ``total_steps - 1`` reaches ``final_lr_ratio * peak_lr``.
         warmup_shape: Warmup interpolation shape.
         decay_shape: Decay interpolation shape.
         final_lr_ratio: Final learning-rate ratio relative to ``peak_lr``.

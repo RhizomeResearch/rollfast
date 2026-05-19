@@ -1,4 +1,5 @@
 from .optim.adam import adamw as adamw
+from .optim.adam import scale_by_adam as scale_by_adam
 from .optim.aurora import (
     AuroraDimensionNumbers as AuroraDimensionNumbers,
     aurora as aurora,
@@ -49,6 +50,7 @@ from .optim.prism import (
     scale_by_prism as scale_by_prism,
 )
 from .optim.psgd import kron as kron
+from .optim.psgd import scale_by_kron as scale_by_kron
 from .optim.rmnp import rmnp as rmnp
 from .optim.rmnp import scale_by_rmnp as scale_by_rmnp
 from .optim.rmnp import scale_by_rmnp_shape as scale_by_rmnp_shape

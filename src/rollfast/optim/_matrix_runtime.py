@@ -12,6 +12,7 @@ from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     MomentumAccumulator,
     _apply_weight_decay_tree,
+    _cast_state_tree,
     _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
@@ -45,11 +46,7 @@ class MatrixRuntimeStep(NamedTuple):
 
 
 def _tree_cast_f32(tree: Any) -> Any:
-    return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else x.astype(jnp.float32),
-        tree,
-        is_leaf=_is_aux_leaf,
-    )
+    return _cast_state_tree(tree, jnp.float32)
 
 
 def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
@@ -64,7 +61,15 @@ def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
 def _tree_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
     leaves = jax.tree.leaves(grads, is_leaf=_is_aux_leaf)
     sq_terms = [
-        jnp.sum(numerics.abs_sq(x.astype(jnp.float32)))
+        jnp.sum(
+            numerics.abs_sq(
+                x.astype(
+                    jnp.complex64
+                    if jnp.issubdtype(x.dtype, jnp.complexfloating)
+                    else jnp.float32
+                )
+            )
+        )
         for x in leaves
         if not _is_aux_leaf(x)
     ]
@@ -84,7 +89,12 @@ def _clip_per_tensor_rms(
 ) -> jax.Array:
     rms = jnp.sqrt(jnp.mean(numerics.abs_sq(update)))
     scale_factor = jnp.minimum(1.0, max_rms / (rms + 1e-9))
-    return jnp.clip(update * scale_factor, -max_val, max_val)
+    update = update * scale_factor
+    if jnp.issubdtype(update.dtype, jnp.complexfloating):
+        magnitude = jnp.abs(update)
+        clamp_scale = jnp.minimum(1.0, max_val / add_tiny(magnitude))
+        return update * clamp_scale
+    return jnp.clip(update, -max_val, max_val)
 
 
 def _split_runtime_keys(
@@ -286,7 +296,14 @@ def finish_matrix_runtime_step(
             is_leaf=_is_aux_leaf,
         )
 
-    if _has_nonzero_or_scheduled(weight_decay) and params is not None:
+    if _has_nonzero_or_scheduled(weight_decay) and params is None:
+        raise ValueError(
+            "`params` must be provided to matrix optimizer updates when "
+            "`weight_decay` is nonzero or scheduled."
+        )
+
+    if _has_nonzero_or_scheduled(weight_decay):
+        params = cast(base.Params, params)
         wd_step = _resolve_scalar(
             weight_decay,
             runtime.count - jnp.asarray(1, dtype=runtime.count.dtype),

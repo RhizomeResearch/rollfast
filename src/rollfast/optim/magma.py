@@ -5,6 +5,14 @@ from optax.transforms import _masking
 from rollfast.utils import dist_reduce
 
 
+def validate_magma_args(p: float, tau: float) -> None:
+    """Validate Magma constructor arguments before they enter JAX control flow."""
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"magma_p must be in [0, 1], got {p!r}.")
+    if tau <= 0.0:
+        raise ValueError(f"magma_tau must be positive, got {tau!r}.")
+
+
 def apply_magma_internal(
     raw_gradients,
     first_moments,

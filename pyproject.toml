@@ -28,7 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "jax>=0.6.2",
-    "optax>=0.2.8",
+    "optax>=0.2.8,<0.3.0",
 ]
 
 [project.optional-dependencies]

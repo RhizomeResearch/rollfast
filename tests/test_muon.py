@@ -2,6 +2,7 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from rollfast.optim.muon import (
     MuonDimensionNumbers,
@@ -95,6 +96,14 @@ def test_scale_by_muon_shape_matches_width_and_consistent_rms_scaling():
     assert jnp.allclose(rms_scaled["w"], jnp.sqrt(8.0) * 0.2)
 
 
+def test_scale_by_muon_shape_callable_spec_requires_params():
+    updates = {"w": jnp.ones((2, 8), dtype=jnp.float32)}
+    tx = scale_by_muon_shape(weight_dimension_numbers=lambda params: params)
+
+    with pytest.raises(ValueError, match="scale_by_muon_shape"):
+        tx.update(updates, tx.init(updates))
+
+
 def test_muon_bf16_momentum_storage_uses_bf16_state_with_finite_updates():
     params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
     grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1}
@@ -171,6 +180,15 @@ def test_scale_by_muon_magma_scheduled_weight_decay_uses_pre_increment_count():
 
     assert jnp.allclose(updates["w"], jnp.ones_like(params["w"]) * 0.1)
     assert jnp.allclose(next_updates["w"], jnp.ones_like(params["w"]) * 0.45)
+
+
+def test_scale_by_muon_requires_params_for_magma_weight_decay():
+    params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
+    grads = jax.tree.map(jnp.zeros_like, params)
+    tx = scale_by_muon(use_magma=True, weight_decay=0.1, ns_steps=2)
+
+    with pytest.raises(ValueError, match="params.*scale_by_muon"):
+        tx.update(grads, tx.init(params))
 
 
 def test_muon_magma_wrapper_masks_matrix_and_adam_fallback_weight_decay():

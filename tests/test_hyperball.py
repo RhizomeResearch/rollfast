@@ -377,6 +377,35 @@ def test_muon_hyperball_forwards_magma_axis_and_key_to_partition_branches(
     assert jnp.array_equal(captured_adam["key"], key_adam)
 
 
+def test_prism_and_aurora_hyperball_forward_nesterov_to_adam_fallback(monkeypatch):
+    captured_adam = []
+
+    def fake_scale_by_adam(**kwargs):
+        captured_adam.append(kwargs)
+        return optax.identity()
+
+    monkeypatch.setattr(hyperball_module, "scale_by_adam", fake_scale_by_adam)
+    monkeypatch.setattr(
+        hyperball_module, "_build_unscaled_prism_branch", lambda **_: optax.identity()
+    )
+    monkeypatch.setattr(
+        hyperball_module, "_build_unscaled_aurora_branch", lambda **_: optax.identity()
+    )
+
+    hyperball_module.prism_hyperball(
+        learning_rate=0.01,
+        ns_iters=2,
+        nesterov=False,
+    )
+    hyperball_module.aurora_hyperball(
+        learning_rate=0.01,
+        polar_ns_iters=2,
+        nesterov=False,
+    )
+
+    assert [kwargs["nesterov"] for kwargs in captured_adam] == [False, False]
+
+
 def test_muon_hyperball_keeps_external_shape_scaling_without_magma(monkeypatch):
     captured_muon = {}
     shape_calls = []

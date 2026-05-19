@@ -15,7 +15,7 @@ from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
 from optax.transforms import _masking
 
-from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
     _apply_weight_decay_tree,
     _has_nonzero_or_scheduled,
@@ -95,7 +95,18 @@ def _compute_global_norm(
         return jnp.array(0.0)
 
     local_sq = sum(
-        (jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves),
+        (
+            jnp.sum(
+                numerics.abs_sq(
+                    x.astype(
+                        jnp.complex64
+                        if jnp.issubdtype(x.dtype, jnp.complexfloating)
+                        else jnp.float32
+                    )
+                )
+            )
+            for x in leaves
+        ),
         start=jnp.array(0.0, dtype=jnp.float32),
     )
     total_sq = dist_reduce(local_sq, axis_name, "sum")
@@ -796,7 +807,7 @@ def scale_by_kron(
         newton_schulz_iters: Iterations for NS mode (default 5).
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.
@@ -821,6 +832,8 @@ def scale_by_kron(
         raise ValueError(
             "Magma requires momentum (b1 > 0) to compute gradient-momentum alignment."
         )
+    if use_magma:
+        validate_magma_args(magma_p, magma_tau)
 
     if mu_dtype is None:
         mu_dtype = jnp.float32
@@ -852,9 +865,14 @@ def scale_by_kron(
             "TAYLOR2": PreconditionerMode.TAYLOR2,
             "HYPER": PreconditionerMode.HYPER,
         }
-        preconditioner_mode = mode_map.get(
-            preconditioner_mode, PreconditionerMode.Q0P5EQ1P5
-        )
+        try:
+            preconditioner_mode = mode_map[preconditioner_mode]
+        except KeyError as error:
+            supported = "', '".join(mode_map)
+            raise ValueError(
+                f"preconditioner_mode must be one of '{supported}', "
+                f"got {preconditioner_mode!r}."
+            ) from error
 
     lazy_init = preconditioner_init_scale is None
     _init_scale = 1.0 if lazy_init else preconditioner_init_scale
@@ -1376,7 +1394,14 @@ def scale_by_kron(
 
         updates = grads_structure.unflatten(precond_gs)
 
-        if _has_nonzero_or_scheduled(weight_decay) and params is not None:
+        if _has_nonzero_or_scheduled(weight_decay) and params is None:
+            raise ValueError(
+                "`params` must be provided to `scale_by_kron.update` when "
+                "`weight_decay` is nonzero or scheduled."
+            )
+
+        if _has_nonzero_or_scheduled(weight_decay):
+            params = cast(base.Params, params)
             wd_step = _resolve_scalar(weight_decay, state.count)
             updates = _apply_weight_decay_tree(
                 updates,

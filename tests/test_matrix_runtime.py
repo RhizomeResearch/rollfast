@@ -297,6 +297,42 @@ def test_matrix_runtime_weight_decay_accepts_array_mask():
     assert jnp.allclose(updates["w"], expected)
 
 
+def test_matrix_runtime_requires_params_for_weight_decay():
+    grads = {"w": jnp.zeros((2, 2), dtype=jnp.float32)}
+    mu = init_matrix_momentum_state(grads, jnp.float32)
+    runtime = prepare_matrix_runtime_step(
+        grads,
+        count=jnp.zeros([], dtype=jnp.int32),
+        mu=mu,
+        key=jax.random.PRNGKey(0),
+        beta=0.0,
+        nesterov=False,
+        shape_nesterov=False,
+        bias_correction=False,
+        momentum_accumulator="ema",
+        mu_dtype=jnp.float32,
+        raw_global_grad_clip=None,
+        permissive_spike_protection=True,
+        use_magma=False,
+        axis_name=None,
+    )
+
+    with pytest.raises(ValueError, match="params.*weight_decay"):
+        finish_matrix_runtime_step(
+            grads,
+            runtime,
+            params=None,
+            magma_s=(),
+            use_magma=False,
+            magma_p=1.0,
+            magma_tau=2.0,
+            weight_decay=0.1,
+            weight_decay_mask=None,
+            grad_clip_max_amps=None,
+            axis_name=None,
+        )
+
+
 def test_matrix_runtime_axis_name_global_clip_smoke():
     def run(grad_leaf):
         grads = {"w": grad_leaf}

@@ -38,6 +38,7 @@ from rollfast.optim.dimension_numbers import (
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
 )
+from rollfast.optim.magma import validate_magma_args
 from rollfast.utils import (
     MomentumAccumulator,
     _has_nonzero_or_scheduled,
@@ -519,6 +520,9 @@ def _scale_by_aurora_impl(
     if eps <= 0.0:
         raise ValueError(f"eps must be positive, got {eps}")
 
+    if use_magma:
+        validate_magma_args(magma_p, magma_tau)
+
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
@@ -946,6 +950,7 @@ def _partitioned_aurora(
                 weight_decay=weight_decay,
                 weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
+                nesterov=nesterov,
                 use_magma=use_magma,
                 magma_p=magma_p,
                 magma_tau=magma_tau,

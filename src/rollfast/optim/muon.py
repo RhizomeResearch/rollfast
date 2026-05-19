@@ -28,7 +28,7 @@ from rollfast.optim.dimension_numbers import (
     _normalize_axes,
     _resolve_update_dimension_numbers,
 )
-from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.optim.orthogonalization import (
     MUON_NS_COEFFS,
     MuonNsCoeffs,
@@ -107,8 +107,12 @@ def scale_by_muon_shape(
     """Scale Muon updates by width-transfer or consistent-RMS shape factors."""
 
     def update_fn(updates, state, params=None):
-        dim_source = updates if params is None else params
-        dim_nums = _get_dimension_numbers(weight_dimension_numbers, dim_source)
+        dim_nums = _resolve_update_dimension_numbers(
+            weight_dimension_numbers,
+            params=params,
+            updates=updates,
+            transform_name="scale_by_muon_shape",
+        )
         if consistent_rms is None:
             scaled_updates = jax.tree.map(
                 _scale_update_for_width_transfer,
@@ -178,6 +182,14 @@ def scale_by_muon(
     complete pre-learning-rate base update, including shape scaling and decay,
     is passed through Magma. Plain Muon keeps those as separate transforms.
     """
+    if use_magma:
+        validate_magma_args(magma_p, magma_tau)
+    elif _has_nonzero_or_scheduled(weight_decay):
+        raise ValueError(
+            "`weight_decay` in `scale_by_muon` is only applied by the Magma path. "
+            "Use `use_magma=True` or chain `optax.add_decayed_weights` separately."
+        )
+
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
@@ -281,7 +293,14 @@ def scale_by_muon(
                     is_leaf=_is_dimension_numbers_leaf,
                 )
 
-        if use_magma and _has_nonzero_or_scheduled(weight_decay) and params is not None:
+        if use_magma and _has_nonzero_or_scheduled(weight_decay) and params is None:
+            raise ValueError(
+                "`params` must be provided to `scale_by_muon.update` when "
+                "`weight_decay` is nonzero or scheduled."
+            )
+
+        if use_magma and _has_nonzero_or_scheduled(weight_decay):
+            params = cast(base.Params, params)
             wd_step = _resolve_scalar(weight_decay, state.count)
             muon_updates = _apply_weight_decay_tree(
                 muon_updates,

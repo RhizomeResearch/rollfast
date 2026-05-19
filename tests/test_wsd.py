@@ -31,6 +31,22 @@ def test_wsd_schedule_supports_cosine_decay_to_ratio():
     assert cast(float, sched(99)) == pytest.approx(0.1)
 
 
+def test_wsd_schedule_documents_inclusive_boundaries():
+    sched = wsd_schedule(
+        peak_lr=1.0,
+        total_steps=20,
+        warmup_fraction=0.1,
+        decay_fraction=0.2,
+        final_lr_ratio=0.1,
+    )
+
+    assert cast(float, sched(1)) < 1.0
+    assert cast(float, sched(2)) == 1.0
+    assert cast(float, sched(16)) == 1.0
+    assert cast(float, sched(17)) < 1.0
+    assert cast(float, sched(19)) == pytest.approx(0.1)
+
+
 def test_wsd_schedule_power_decay_shape_changes_mid_cooldown():
     linear = wsd_schedule(
         peak_lr=1.0,

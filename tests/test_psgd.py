@@ -2,6 +2,7 @@ from typing import cast
 
 import jax.numpy as jnp
 import jax
+import pytest
 
 from rollfast.optim.psgd import KronState, scale_by_kron, kron
 from tests._typing import as_array_dict
@@ -50,6 +51,25 @@ def test_scale_by_kron_magma_weight_decay_accepts_array_mask():
 
     assert jnp.all(updates["w"][mask["w"]] > 0)
     assert jnp.allclose(updates["w"][jnp.logical_not(mask["w"])], 0.0)
+
+
+def test_scale_by_kron_rejects_unknown_preconditioner_mode():
+    with pytest.raises(ValueError, match="preconditioner_mode"):
+        scale_by_kron(preconditioner_mode="typo")
+
+
+def test_scale_by_kron_requires_params_for_weight_decay():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.zeros_like(params["w"])}
+    tx = scale_by_kron(
+        b1=0.0,
+        preconditioner_update_probability=0.0,
+        grad_clip_max_amps=(1e9, 1e9),
+        weight_decay=0.1,
+    )
+
+    with pytest.raises(ValueError, match="params.*scale_by_kron"):
+        tx.update(grads, tx.init(params))
 
 
 def test_scale_by_kron_spike_skip_preserves_momentum_and_zeroes_update():
