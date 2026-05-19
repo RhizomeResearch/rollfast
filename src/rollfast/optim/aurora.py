@@ -19,7 +19,6 @@ from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 import jax
 import jax.numpy as jnp
 from optax._src import base, combine, transform, utils
-from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
 from rollfast.optim._matrix_runtime import (
@@ -43,6 +42,7 @@ from rollfast.optim.magma import validate_magma_args
 from rollfast.utils import (
     MomentumAccumulator,
     _has_nonzero_or_scheduled,
+    _is_aux_leaf,
 )
 
 try:
@@ -151,10 +151,6 @@ class ScaleByAuroraState(NamedTuple):
     mu: base.Updates
     magma_s: Any
     key: Optional[jax.Array]
-
-
-def _is_aux_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, _masking.MaskedNode)
 
 
 def _is_dim_leaf(x: Any) -> bool:
@@ -432,7 +428,7 @@ def _apply_matrix_rule(
     precision: jax.lax.PrecisionLike,
 ) -> jax.Array:
     """Apply Aurora/Riemannian-Aurora to a leaf with optional reshape spec."""
-    if dim_nums is None or isinstance(dim_nums, _masking.MaskedNode):
+    if dim_nums is None or _is_aux_leaf(dim_nums):
         return mu_nest if mu_nest is not None else mu_raw
     _validate_matrix_operand(updates, dim_nums, "scale_by_aurora")
 

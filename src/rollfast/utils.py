@@ -13,6 +13,14 @@ def _is_aux_leaf(x: Any) -> bool:
     return x is None or isinstance(x, _masking.MaskedNode)
 
 
+def _map_non_aux(fn: Callable[[jax.Array], jax.Array], tree: Any) -> Any:
+    return jax.tree.map(
+        lambda x: x if _is_aux_leaf(x) else fn(x),
+        tree,
+        is_leaf=_is_aux_leaf,
+    )
+
+
 def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
     target_dtype = jnp.dtype(dtype)
 
@@ -202,13 +210,9 @@ def dist_reduce(x: jax.Array, axis_name: Optional[str], op: str = "mean") -> jax
 def _safe_bias_correction(tree, factor):
     """Safely bypasses MaskedNodes to prevent division TypeErrors in partitioned graphs."""
     return jax.tree.map(
-        lambda t: (
-            t
-            if isinstance(t, _masking.MaskedNode)
-            else (t / factor if t is not None else None)
-        ),
+        lambda t: t if _is_aux_leaf(t) else t / factor,
         tree,
-        is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+        is_leaf=_is_aux_leaf,
     )
 
 
@@ -273,8 +277,7 @@ def _tree_stochastic_cast(
     Returns:
         A new PyTree with the casted and stochastically rounded leaves.
     """
-    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
-    leaves, treedef = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
+    leaves, treedef = jax.tree.flatten(tree, is_leaf=_is_aux_leaf)
     keys = jax.random.split(key, len(leaves))
 
     canonical_target_dtype = jnp.dtype(target_dtype)
@@ -282,11 +285,7 @@ def _tree_stochastic_cast(
     def _cast_leaf(leaf, k):
         # Short-circuit MaskedNodes and static Callables before ANY cast attempt.
         # This completely replaces the unsafe `optax.tree.cast` fast-path.
-        if (
-            leaf is None
-            or isinstance(leaf, _masking.MaskedNode)
-            or not hasattr(leaf, "dtype")
-        ):
+        if _is_aux_leaf(leaf) or not hasattr(leaf, "dtype"):
             return leaf
 
         if jnp.issubdtype(leaf.dtype, jnp.complexfloating) and not jnp.issubdtype(
@@ -342,12 +341,7 @@ def _tree_update_moment_f32(
     grad_scale = _momentum_grad_scale(decay32, momentum_accumulator)
 
     def _update_moment_f32(g, t):
-        if (
-            g is None
-            or t is None
-            or isinstance(g, _masking.MaskedNode)
-            or isinstance(t, _masking.MaskedNode)
-        ):
+        if _is_aux_leaf(g) or _is_aux_leaf(t):
             return g
         compute_dtype = (
             jnp.complex64
@@ -361,7 +355,7 @@ def _tree_update_moment_f32(
         _update_moment_f32,
         updates,
         moments,
-        is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+        is_leaf=_is_aux_leaf,
     )
 
 
@@ -374,12 +368,7 @@ def _tree_update_moment_sq_f32(
     """
 
     def _update_moment_sq_f32(g, t):
-        if (
-            g is None
-            or t is None
-            or isinstance(g, _masking.MaskedNode)
-            or isinstance(t, _masking.MaskedNode)
-        ):
+        if _is_aux_leaf(g) or _is_aux_leaf(t):
             return g
         if jnp.issubdtype(g.dtype, jnp.complexfloating):
             sq_norm = numerics.abs_sq(g.astype(jnp.complex64))
@@ -392,7 +381,7 @@ def _tree_update_moment_sq_f32(
         _update_moment_sq_f32,
         updates,
         moments,
-        is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+        is_leaf=_is_aux_leaf,
     )
 
 
@@ -462,8 +451,7 @@ def apply_updates(
             "Pass stochastic=False for deterministic rounding."
         )
 
-    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
-    leaves, treedef = jax.tree.flatten(params, is_leaf=is_leaf_fn)
+    leaves, treedef = jax.tree.flatten(params, is_leaf=_is_aux_leaf)
 
     # Skip PRNG work entirely when deterministic — avoids materializing
     # len(leaves) unused uint32[2] arrays on device.
@@ -474,12 +462,7 @@ def apply_updates(
         keys_tree = jax.tree.unflatten(treedef, [None] * len(leaves))
 
     def _apply_leaf(p, u, k):
-        if (
-            p is None
-            or u is None
-            or isinstance(p, _masking.MaskedNode)
-            or isinstance(u, _masking.MaskedNode)
-        ):
+        if _is_aux_leaf(p) or _is_aux_leaf(u):
             return p
 
         p_arr = jnp.asarray(p)
@@ -498,7 +481,7 @@ def apply_updates(
         params,
         updates,
         keys_tree,
-        is_leaf=is_leaf_fn,
+        is_leaf=_is_aux_leaf,
     )
 
 
@@ -534,9 +517,7 @@ def apply_updates_prefix(
             "Pass stochastic=False for deterministic rounding."
         )
 
-    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
-
-    update_leaves, update_treedef = jax.tree.flatten(updates, is_leaf=is_leaf_fn)
+    update_leaves, update_treedef = jax.tree.flatten(updates, is_leaf=_is_aux_leaf)
 
     if stochastic:
         keys = jax.random.split(cast(jax.Array, key), len(update_leaves))
@@ -545,9 +526,9 @@ def apply_updates_prefix(
         keys_tree = jax.tree.unflatten(update_treedef, [None] * len(update_leaves))
 
     def _apply_update(u, p, k):
-        if u is None or isinstance(u, _masking.MaskedNode):
+        if _is_aux_leaf(u):
             return p
-        if p is None or isinstance(p, _masking.MaskedNode):
+        if _is_aux_leaf(p):
             return p
         # Non-array leaves (e.g. Equinox Callables) should never receive a
         # non-None update; surface the error immediately rather than masking it.
@@ -562,4 +543,4 @@ def apply_updates_prefix(
 
         return jnp.asarray(p_arr + u_arr).astype(p_arr.dtype)
 
-    return jax.tree.map(_apply_update, updates, model, keys_tree, is_leaf=is_leaf_fn)
+    return jax.tree.map(_apply_update, updates, model, keys_tree, is_leaf=_is_aux_leaf)

@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import optax
 import optax.tree
 from optax._src import base, combine, numerics, transform, utils
-from optax.transforms import _masking
 
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
@@ -15,6 +14,7 @@ from rollfast.utils import (
     _cast_state_tree,
     _has_nonzero_or_scheduled,
     _init_magma_state,
+    _is_aux_leaf,
     _resolve_mask,
     _resolve_scalar,
     _safe_bias_correction,
@@ -149,12 +149,12 @@ def scale_by_adam(
             mu_hat = jax.tree.map(
                 lambda m, g: (
                     m
-                    if isinstance(m, _masking.MaskedNode)
+                    if _is_aux_leaf(m)
                     else (b1 * m + (1.0 - b1) * g if m is not None else None)
                 ),
                 mu_bc,
                 g_bc,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                is_leaf=_is_aux_leaf,
             )
         else:
             mu_hat = _safe_bias_correction(mu_f32, mu_bc_factor)
@@ -167,12 +167,12 @@ def scale_by_adam(
         adam_updates = jax.tree.map(
             lambda m, v: (
                 m
-                if isinstance(m, _masking.MaskedNode)
+                if _is_aux_leaf(m)
                 else (None if m is None else m / (jnp.sqrt(v + eps_root) + eps))
             ),
             mu_hat,
             nu_hat,
-            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            is_leaf=_is_aux_leaf,
         )
 
         if _has_nonzero_or_scheduled(weight_decay) and params is None:
@@ -188,7 +188,7 @@ def scale_by_adam(
                 resolved_mask = jax.tree.map(
                     lambda _: True,
                     params,
-                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                    is_leaf=_is_aux_leaf,
                 )
 
             adam_updates = _apply_weight_decay_tree(
@@ -196,7 +196,7 @@ def scale_by_adam(
                 params,
                 wd_step,
                 resolved_mask,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                is_leaf=_is_aux_leaf,
             )
 
         # Intercept and mathematically project Delta_t through Magma logic

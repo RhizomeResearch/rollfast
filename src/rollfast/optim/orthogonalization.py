@@ -14,12 +14,12 @@ from typing import Any, Literal, TypeAlias, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
-from optax.transforms import _masking
 
 from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     _compute_matrix_reshape,
 )
+from rollfast.utils import _is_aux_leaf
 
 MuonPreconditioning: TypeAlias = Literal["frobenius", "spectral", "aol", "schatten"]
 NsCoeffTriple: TypeAlias = tuple[
@@ -53,10 +53,6 @@ NS_COEFFS_PRESETS = {
 }
 
 _PRECONDITIONINGS = ("frobenius", "spectral", "aol", "schatten")
-
-
-def _is_aux_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, _masking.MaskedNode)
 
 
 def _optimal_quintic(l: float, u: float) -> tuple[float, float, float]:

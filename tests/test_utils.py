@@ -5,7 +5,12 @@ import jax.numpy as jnp
 import pytest
 from optax.transforms import _masking
 
-from rollfast.utils import apply_updates, apply_updates_prefix, dist_reduce
+from rollfast.utils import (
+    _map_non_aux,
+    apply_updates,
+    apply_updates_prefix,
+    dist_reduce,
+)
 from tests._typing import as_array_dict
 
 
@@ -59,3 +64,18 @@ def test_apply_updates_prefix_allows_missing_key_when_deterministic():
 def test_dist_reduce_rejects_unknown_op():
     with pytest.raises(ValueError, match="op must be"):
         dist_reduce(jnp.array(1.0), axis_name="devices", op="median")
+
+
+def test_map_non_aux_skips_none_and_masked_leaves():
+    masked = _masking.MaskedNode()
+    tree = {
+        "w": jnp.ones((2,), dtype=jnp.float32),
+        "none": None,
+        "masked": masked,
+    }
+
+    mapped = _map_non_aux(lambda x: x + 1.0, tree)
+
+    assert jnp.allclose(mapped["w"], jnp.array([2.0, 2.0], dtype=jnp.float32))
+    assert mapped["none"] is None
+    assert isinstance(mapped["masked"], _masking.MaskedNode)

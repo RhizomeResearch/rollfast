@@ -15,6 +15,7 @@ from rollfast.utils import (
     _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
+    _map_non_aux,
     _resolve_mask,
     _resolve_scalar,
     _tree_bias_correction_momentum,
@@ -48,14 +49,6 @@ class MatrixRuntimeStep(NamedTuple):
 
 def _tree_cast_f32(tree: Any) -> Any:
     return _cast_state_tree(tree, jnp.float32)
-
-
-def _map_non_aux(fn: Callable[[jax.Array], jax.Array], tree: Any) -> Any:
-    return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else fn(x),
-        tree,
-        is_leaf=_is_aux_leaf,
-    )
 
 
 def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
