@@ -35,6 +35,7 @@ from rollfast.optim.orthogonalization import (
 from rollfast.utils import (
     MomentumAccumulator,
     _cast_state_tree,
+    _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
@@ -407,33 +408,37 @@ def trasmuon(
         trasmuon_weight_dimension_numbers,
         "trasmuon",
     )
+    trasmuon_components = [
+        scale_by_trasmuon(
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
+            ns_iters=ns_iters,
+            ns_coeffs=ns_coeffs,
+            clip_alpha=clip_alpha,
+            energy_beta=energy_beta,
+            clip_beta=clip_beta,
+            clip_min=clip_min,
+            trigger=trigger,
+            update_period=update_period,
+            warmup_steps=warmup_steps,
+            mix=mix,
+            preconditioning=preconditioning,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=mu_dtype,
+            weight_dimension_numbers=partition.masked_specs,
+            key=key_trasmuon,
+        ),
+    ]
+    if _has_nonzero_or_scheduled(weight_decay):
+        trasmuon_components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+    trasmuon_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={
-            "trasmuon": combine.chain(
-                scale_by_trasmuon(
-                    beta1=beta1,
-                    beta2=beta2,
-                    eps=eps,
-                    ns_iters=ns_iters,
-                    ns_coeffs=ns_coeffs,
-                    clip_alpha=clip_alpha,
-                    energy_beta=energy_beta,
-                    clip_beta=clip_beta,
-                    clip_min=clip_min,
-                    trigger=trigger,
-                    update_period=update_period,
-                    warmup_steps=warmup_steps,
-                    mix=mix,
-                    preconditioning=preconditioning,
-                    momentum_accumulator=momentum_accumulator,
-                    mu_dtype=mu_dtype,
-                    weight_dimension_numbers=partition.masked_specs,
-                    key=key_trasmuon,
-                ),
-                transform.add_decayed_weights(weight_decay, weight_decay_mask),
-                transform.scale_by_learning_rate(learning_rate),
-            ),
+            "trasmuon": combine.chain(*trasmuon_components),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,

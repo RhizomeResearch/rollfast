@@ -382,15 +382,14 @@ def _build_unscaled_muon_branch(
     ]
 
     if not use_magma:
-        components.extend(
-            [
-                scale_by_shape(
-                    weight_dimension_numbers=weight_dimension_numbers,
-                    consistent_rms=consistent_rms,
-                ),
-                transform.add_decayed_weights(weight_decay, weight_decay_mask),
-            ]
+        components.append(
+            scale_by_shape(
+                weight_dimension_numbers=weight_dimension_numbers,
+                consistent_rms=consistent_rms,
+            )
         )
+        if _has_nonzero_or_scheduled(weight_decay):
+            components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
 
     return combine.chain(*components)
 

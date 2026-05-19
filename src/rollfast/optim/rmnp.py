@@ -36,6 +36,7 @@ from rollfast.optim.dimension_numbers import (
 from rollfast.utils import (
     MomentumAccumulator,
     _cast_state_tree,
+    _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
@@ -275,27 +276,31 @@ def rmnp(
     key_rmnp, key_adam = jax.random.split(key, 2)
 
     partition = _make_matrix_partition_fns(rmnp_weight_dimension_numbers, "rmnp")
+    rmnp_components = [
+        scale_by_rmnp(
+            beta=beta,
+            eps=eps,
+            mu_dtype=mu_dtype,
+            nesterov=nesterov,
+            adaptive=adaptive,
+            momentum_accumulator=momentum_accumulator,
+            weight_dimension_numbers=partition.masked_specs,
+            key=key_rmnp,
+        ),
+        scale_by_rmnp_shape(
+            weight_dimension_numbers=partition.masked_specs,
+            consistent_rms=consistent_rms,
+        ),
+    ]
+    if _has_nonzero_or_scheduled(weight_decay):
+        rmnp_components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+    rmnp_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={
-            "rmnp": combine.chain(
-                scale_by_rmnp(
-                    beta=beta,
-                    eps=eps,
-                    mu_dtype=mu_dtype,
-                    nesterov=nesterov,
-                    adaptive=adaptive,
-                    momentum_accumulator=momentum_accumulator,
-                    weight_dimension_numbers=partition.masked_specs,
-                    key=key_rmnp,
-                ),
-                scale_by_rmnp_shape(
-                    weight_dimension_numbers=partition.masked_specs,
-                    consistent_rms=consistent_rms,
-                ),
-                transform.add_decayed_weights(weight_decay, weight_decay_mask),
-                transform.scale_by_learning_rate(learning_rate),
-            ),
+            "rmnp": combine.chain(*rmnp_components),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,

@@ -37,6 +37,7 @@ from rollfast.optim.orthogonalization import (
 from rollfast.utils import (
     MomentumAccumulator,
     _cast_state_tree,
+    _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
@@ -409,36 +410,40 @@ def _partitioned_muon_variant(
     key_muon, key_adam = jax.random.split(key, 2)
 
     partition = _make_matrix_partition_fns(weight_dimension_numbers, label)
+    matrix_components = [
+        scale_by_normuon(
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
+            ns_iters=ns_iters,
+            ns_coeffs=ns_coeffs,
+            contra_coeff=contra_coeff,
+            contra_power_iters=contra_power_iters,
+            normalization_axis=normalization_axis,
+            normalization_rescale=normalization_rescale,
+            normalization_rms=normalization_rms,
+            preconditioning=preconditioning,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=mu_dtype,
+            nesterov=nesterov,
+            bias_correction=bias_correction,
+            weight_dimension_numbers=partition.masked_specs,
+            key=key_muon,
+        ),
+        scale_by_normuon_shape(
+            weight_dimension_numbers=partition.masked_specs,
+            consistent_rms=consistent_rms,
+        ),
+    ]
+    if _has_nonzero_or_scheduled(weight_decay):
+        matrix_components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+    matrix_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={
-            label: combine.chain(
-                scale_by_normuon(
-                    beta1=beta1,
-                    beta2=beta2,
-                    eps=eps,
-                    ns_iters=ns_iters,
-                    ns_coeffs=ns_coeffs,
-                    contra_coeff=contra_coeff,
-                    contra_power_iters=contra_power_iters,
-                    normalization_axis=normalization_axis,
-                    normalization_rescale=normalization_rescale,
-                    normalization_rms=normalization_rms,
-                    preconditioning=preconditioning,
-                    momentum_accumulator=momentum_accumulator,
-                    mu_dtype=mu_dtype,
-                    nesterov=nesterov,
-                    bias_correction=bias_correction,
-                    weight_dimension_numbers=partition.masked_specs,
-                    key=key_muon,
-                ),
-                scale_by_normuon_shape(
-                    weight_dimension_numbers=partition.masked_specs,
-                    consistent_rms=consistent_rms,
-                ),
-                transform.add_decayed_weights(weight_decay, weight_decay_mask),
-                transform.scale_by_learning_rate(learning_rate),
-            ),
+            label: combine.chain(*matrix_components),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,
