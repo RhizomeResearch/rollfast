@@ -90,14 +90,14 @@ def scale_by_adam(
         arXiv preprint arXiv:2602.15322.
     """
 
-    if mu_dtype is None:
-        mu_dtype = jnp.float32
-    else:
-        mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    canonical_mu_dtype = cast(
+        jax.typing.DTypeLike,
+        jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
+    )
 
     def init_fn(params):
-        mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # First moment
-        nu = optax.tree.zeros_like(params, dtype=mu_dtype)  # Second moment
+        mu = optax.tree.zeros_like(params, dtype=canonical_mu_dtype)  # First moment
+        nu = optax.tree.zeros_like(params, dtype=canonical_mu_dtype)  # Second moment
 
         magma_s = _init_magma_state(params) if use_magma else ()
 
@@ -208,13 +208,13 @@ def scale_by_adam(
             final_updates = adam_updates
             new_magma_s = state.magma_s
 
-        if mu_dtype == jnp.bfloat16:
+        if canonical_mu_dtype == jnp.bfloat16:
             k1, k2 = jax.random.split(sr_key)
             mu_stored = _tree_stochastic_cast(mu_f32, jnp.bfloat16, k1)
             nu_stored = _tree_stochastic_cast(nu_f32, jnp.bfloat16, k2)
         else:
-            mu_stored = _cast_state_tree(mu_f32, mu_dtype)
-            nu_stored = _cast_state_tree(nu_f32, mu_dtype)
+            mu_stored = _cast_state_tree(mu_f32, canonical_mu_dtype)
+            nu_stored = _cast_state_tree(nu_f32, canonical_mu_dtype)
 
         return final_updates, ScaleByAdamState(
             count=count_inc,

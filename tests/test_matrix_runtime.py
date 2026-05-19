@@ -317,7 +317,8 @@ def test_matrix_runtime_axis_name_global_clip_smoke():
             use_magma=False,
             axis_name="devices",
         )
-        return runtime.effective_updates["w"]
+        effective_updates = cast(dict[str, jax.Array], runtime.effective_updates)
+        return effective_updates["w"]
 
     run = jax.pmap(run, axis_name="devices")
     grads = jnp.ones((jax.local_device_count(), 2, 2), dtype=jnp.float32)
