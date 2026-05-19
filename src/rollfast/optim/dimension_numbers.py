@@ -91,6 +91,24 @@ def _get_dimension_numbers(
     return weight_dimension_numbers
 
 
+def _resolve_update_dimension_numbers(
+    weight_dimension_numbers: WeightDimNumOrFn | None,
+    *,
+    params: base.Params | None,
+    updates: base.Updates,
+    transform_name: str,
+) -> base.Params:
+    """Resolve update-time dimension specs with consistent params requirements."""
+    if params is None:
+        if callable(weight_dimension_numbers):
+            raise ValueError(
+                f"`params` must be provided to `{transform_name}` when "
+                "`weight_dimension_numbers` is callable."
+            )
+        return _get_dimension_numbers(weight_dimension_numbers, updates)
+    return _get_dimension_numbers(weight_dimension_numbers, params)
+
+
 def _mask_dimension_numbers(dim_nums_tree: base.Params) -> base.Params:
     """Replace ``None`` entries with ``MaskedNode`` for partition compatibility."""
     return jax.tree.map(

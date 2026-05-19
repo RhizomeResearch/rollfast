@@ -27,11 +27,11 @@ from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
-    _get_dimension_numbers,
     _compute_matrix_reshape,
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
     _normalize_axes,
+    _resolve_update_dimension_numbers,
 )
 from rollfast.utils import (
     MomentumAccumulator,
@@ -104,9 +104,17 @@ def _shape_scale_leaf(
 
 def _resolve_dimension_numbers(
     weight_dimension_numbers: WeightDimNumOrFn | None,
-    params_or_updates: base.Params,
+    *,
+    params: base.Params | None,
+    updates: base.Updates,
+    transform_name: str,
 ) -> base.Params:
-    return _get_dimension_numbers(weight_dimension_numbers, params_or_updates)
+    return _resolve_update_dimension_numbers(
+        weight_dimension_numbers,
+        params=params,
+        updates=updates,
+        transform_name=transform_name,
+    )
 
 
 def scale_by_rmnp(
@@ -141,8 +149,12 @@ def scale_by_rmnp(
         )
 
     def update_fn(updates, state, params=None):
-        dim_source = updates if params is None else params
-        dim_nums = _resolve_dimension_numbers(weight_dimension_numbers, dim_source)
+        dim_nums = _resolve_dimension_numbers(
+            weight_dimension_numbers,
+            params=params,
+            updates=updates,
+            transform_name="scale_by_rmnp",
+        )
 
         mu = _tree_update_moment_f32(
             updates,
@@ -216,8 +228,12 @@ def scale_by_rmnp_shape(
     """Scale RMNP matrix directions using Muon-style shape factors."""
 
     def update_fn(updates, state, params=None):
-        dim_source = updates if params is None else params
-        dim_nums = _resolve_dimension_numbers(weight_dimension_numbers, dim_source)
+        dim_nums = _resolve_dimension_numbers(
+            weight_dimension_numbers,
+            params=params,
+            updates=updates,
+            transform_name="scale_by_rmnp_shape",
+        )
         scaled_updates = jax.tree.map(
             lambda u, d: _shape_scale_leaf(u, d, consistent_rms),
             updates,
@@ -243,7 +259,7 @@ def rmnp(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule = 0.0,
+    adam_weight_decay: base.ScalarOrSchedule | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
@@ -252,6 +268,9 @@ def rmnp(
     """RMNP optimizer with AdamW fallback for non-matrix parameters."""
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
+    effective_adam_weight_decay = (
+        weight_decay if adam_weight_decay is None else adam_weight_decay
+    )
 
     key_rmnp, key_adam = jax.random.split(key, 2)
 
@@ -283,7 +302,7 @@ def rmnp(
                 b2=adam_b2,
                 eps=eps,
                 eps_root=adam_eps_root,
-                weight_decay=adam_weight_decay,
+                weight_decay=effective_adam_weight_decay,
                 weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
                 nesterov=nesterov,

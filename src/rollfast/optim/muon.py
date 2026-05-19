@@ -26,6 +26,7 @@ from rollfast.optim.dimension_numbers import (
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
     _normalize_axes,
+    _resolve_update_dimension_numbers,
 )
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.optim.orthogonalization import (
@@ -196,8 +197,12 @@ def scale_by_muon(
 
     def update_fn(updates, state, params=None):
         raw_gradients = updates
-        dim_source = updates if params is None else params
-        dim_nums = resolve_dim_nums(dim_source)
+        dim_nums = _resolve_update_dimension_numbers(
+            weight_dimension_numbers,
+            params=params,
+            updates=updates,
+            transform_name="scale_by_muon",
+        )
 
         mu = _tree_update_moment_f32(
             updates,
@@ -406,7 +411,7 @@ def muon(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule = 0.0,
+    adam_weight_decay: base.ScalarOrSchedule | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     muon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
@@ -421,6 +426,9 @@ def muon(
     """Muon optimizer with automatic Muon/AdamW partitioning."""
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
+    effective_adam_weight_decay = (
+        weight_decay if adam_weight_decay is None else adam_weight_decay
+    )
 
     key_muon, key_adam = jax.random.split(key, 2)
 
@@ -460,7 +468,7 @@ def muon(
                 b2=adam_b2,
                 eps=eps,
                 eps_root=adam_eps_root,
-                weight_decay=adam_weight_decay,
+                weight_decay=effective_adam_weight_decay,
                 weight_decay_mask=weight_decay_mask,
                 mu_dtype=mu_dtype,
                 nesterov=nesterov,

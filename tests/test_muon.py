@@ -202,6 +202,40 @@ def test_muon_magma_wrapper_masks_matrix_and_adam_fallback_weight_decay():
     assert jnp.allclose(updates["b"], jnp.zeros_like(updates["b"]))
 
 
+def test_muon_fallback_adam_inherits_weight_decay_by_default():
+    params = {
+        "w": jnp.ones((4, 4), dtype=jnp.float32),
+        "b": jnp.ones((4,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.zeros_like, params)
+
+    inherit_tx = muon(
+        learning_rate=1.0,
+        ns_steps=2,
+        beta=0.0,
+        nesterov=False,
+        weight_decay=0.2,
+        weight_decay_mask={"w": False, "b": True},
+    )
+    override_tx = muon(
+        learning_rate=1.0,
+        ns_steps=2,
+        beta=0.0,
+        nesterov=False,
+        weight_decay=0.2,
+        adam_weight_decay=0.0,
+        weight_decay_mask={"w": False, "b": True},
+    )
+
+    inherit_updates, _ = inherit_tx.update(grads, inherit_tx.init(params), params)
+    override_updates, _ = override_tx.update(grads, override_tx.init(params), params)
+    inherit_updates = as_array_dict(inherit_updates)
+    override_updates = as_array_dict(override_updates)
+
+    assert jnp.allclose(inherit_updates["b"], -0.2 * params["b"])
+    assert jnp.allclose(override_updates["b"], jnp.zeros_like(params["b"]))
+
+
 def test_muon_momentum_accumulator_modes_differ_after_first_step():
     params = {"w": jnp.eye(4, dtype=jnp.float32)}
     grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1}

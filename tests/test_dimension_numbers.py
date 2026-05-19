@@ -17,6 +17,7 @@ from rollfast.optim.prism import PrismDimensionNumbers
 from rollfast.optim.prism import scale_by_prism
 from rollfast.optim.aurora import AuroraDimensionNumbers
 from rollfast.optim.aurora import scale_by_aurora, scale_by_riemannian_aurora
+from rollfast.optim.muon import scale_by_muon
 
 
 def test_prism_dimension_numbers_is_compatibility_alias():
@@ -147,3 +148,34 @@ def test_compute_matrix_reshape_rejects_invalid_axis_specs(dim_nums, match):
 
     with pytest.raises(ValueError, match=match):
         _compute_matrix_reshape(x, dim_nums)
+
+
+def test_explicit_dimension_spec_tree_works_without_params_at_update():
+    params = {"w": jnp.ones((2, 3, 4), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+    tx = scale_by_prism(
+        ns_iters=2,
+        grad_clip_max_amps=None,
+        weight_dimension_numbers={
+            "w": MatrixDimensionNumbers(reduction_axis=1, output_axis=2)
+        },
+    )
+
+    updates, _ = tx.update(grads, tx.init(params))
+    updates = cast(dict[str, jax.Array], updates)
+
+    assert updates["w"].shape == params["w"].shape
+    assert jnp.all(jnp.isfinite(updates["w"]))
+
+
+def test_callable_dimension_specs_require_params_at_update():
+    params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+
+    def specs(model):
+        return jax.tree.map(lambda _: MatrixDimensionNumbers(), model)
+
+    tx = scale_by_muon(ns_steps=2, weight_dimension_numbers=specs)
+
+    with pytest.raises(ValueError, match="params.*scale_by_muon"):
+        tx.update(grads, tx.init(params))

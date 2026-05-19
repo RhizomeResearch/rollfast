@@ -164,6 +164,40 @@ def test_trasmuon_applies_weight_decay_to_matrix_branch():
     assert jnp.all(next_params["w"] < params["w"])
 
 
+def test_trasmuon_fallback_adam_inherits_weight_decay_by_default():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.zeros_like, params)
+
+    inherit_tx = trasmuon(
+        learning_rate=1.0,
+        weight_decay=0.2,
+        beta1=0.0,
+        beta2=0.0,
+        ns_iters=2,
+        weight_decay_mask={"w": False, "b": True},
+    )
+    override_tx = trasmuon(
+        learning_rate=1.0,
+        weight_decay=0.2,
+        adam_weight_decay=0.0,
+        beta1=0.0,
+        beta2=0.0,
+        ns_iters=2,
+        weight_decay_mask={"w": False, "b": True},
+    )
+
+    inherit_updates, _ = inherit_tx.update(grads, inherit_tx.init(params), params)
+    override_updates, _ = override_tx.update(grads, override_tx.init(params), params)
+    inherit_updates = cast(dict[str, jax.Array], inherit_updates)
+    override_updates = cast(dict[str, jax.Array], override_updates)
+
+    assert jnp.allclose(inherit_updates["b"], -0.2 * params["b"])
+    assert jnp.allclose(override_updates["b"], jnp.zeros_like(params["b"]))
+
+
 def test_trasmuon_accepts_ordered_coeff_schedule():
     params = {"w": jnp.eye(4, dtype=jnp.float32)}
     grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1}

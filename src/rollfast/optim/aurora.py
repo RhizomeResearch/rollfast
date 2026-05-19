@@ -33,10 +33,10 @@ from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
     _compute_matrix_reshape,
-    _get_dimension_numbers,
     _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
     _make_matrix_partition_fns,
+    _resolve_update_dimension_numbers,
 )
 from rollfast.utils import (
     MomentumAccumulator,
@@ -539,14 +539,12 @@ def _scale_by_aurora_impl(
         )
 
     def update_fn(updates, state, params=None):
-        if params is None:
-            if weight_dimension_numbers is not None:
-                raise ValueError(
-                    "`params` must be provided to Aurora when `weight_dimension_numbers` is set."
-                )
-            resolved_dim_nums = _get_dimension_numbers(None, updates)
-        else:
-            resolved_dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
+        resolved_dim_nums = _resolve_update_dimension_numbers(
+            weight_dimension_numbers,
+            params=params,
+            updates=updates,
+            transform_name="Aurora",
+        )
 
         runtime = prepare_matrix_runtime_step(
             updates,
