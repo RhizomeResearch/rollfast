@@ -11,7 +11,10 @@ from optax.transforms import _masking
 
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
-    _apply_weight_decay_leaf,
+    _apply_weight_decay_tree,
+    _has_nonzero_or_scheduled,
+    _resolve_mask,
+    _resolve_scalar,
     _safe_bias_correction,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
@@ -181,21 +184,10 @@ def scale_by_adam(
             is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
         )
 
-        wd_step = (
-            cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], weight_decay)(
-                state.count
-            )
-            if callable(weight_decay)
-            else weight_decay
-        )
+        wd_step = _resolve_scalar(weight_decay, state.count)
 
         if params is not None:
-            # Resolve the mask tree natively
-            resolved_mask = (
-                weight_decay_mask(params)
-                if callable(weight_decay_mask)
-                else weight_decay_mask
-            )
+            resolved_mask = _resolve_mask(weight_decay_mask, params)
             if resolved_mask is None:
                 resolved_mask = jax.tree.map(
                     lambda _: True,
@@ -203,10 +195,10 @@ def scale_by_adam(
                     is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
                 )
 
-            adam_updates = jax.tree.map(
-                lambda u, p, m: _apply_weight_decay_leaf(u, p, wd_step, m),
+            adam_updates = _apply_weight_decay_tree(
                 adam_updates,
                 params,
+                wd_step,
                 resolved_mask,
                 is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
             )
@@ -406,10 +398,7 @@ def adamw(
         )
     ]
 
-    _wd_is_nonzero = (
-        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
-    )
-    if _wd_is_nonzero and not use_magma:
+    if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
         components.append(
             transform.add_decayed_weights(weight_decay, weight_decay_mask)
         )

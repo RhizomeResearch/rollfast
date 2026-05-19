@@ -1,4 +1,4 @@
-from typing import Any, Literal, Optional, TypeAlias
+from typing import Any, Callable, Literal, Optional, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
@@ -6,6 +6,7 @@ from optax._src import base, numerics
 from optax.transforms import _masking
 
 MomentumAccumulator: TypeAlias = Literal["ema", "heavy_ball"]
+MaskOrFn: TypeAlias = Optional[Any | Callable[[base.Params], Any]]
 
 
 def _is_aux_leaf(x: Any) -> bool:
@@ -48,6 +49,66 @@ def _apply_weight_decay_leaf(
 
     decayed_update = update + weight_decay_step * param.astype(update.dtype)
     return jnp.where(jnp.asarray(mask, dtype=jnp.bool_), decayed_update, update)
+
+
+def _resolve_scalar(
+    value: base.ScalarOrSchedule,
+    count: jax.Array,
+) -> jax.typing.ArrayLike:
+    """Resolve a scalar-or-schedule value at the given optimizer count."""
+    if callable(value):
+        return cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], value)(
+            count
+        )
+    return value
+
+
+def _has_nonzero_or_scheduled(value: base.ScalarOrSchedule) -> bool:
+    """Return True when a scalar-or-schedule value may affect updates."""
+    return not isinstance(value, (int, float)) or value > 0.0
+
+
+def _is_mask_callable(mask: Any) -> bool:
+    callable_leaves = jax.tree.leaves(jax.tree.map(callable, mask))
+    return callable(mask) and len(callable_leaves) > 0 and all(callable_leaves)
+
+
+def _resolve_mask(
+    mask: MaskOrFn,
+    params: base.Params,
+    default_fn: Callable[[base.Params], base.Params] | None = None,
+) -> base.Params | None:
+    """Resolve a callable-or-tree mask, optionally using a default when unset."""
+    if mask is None:
+        return None if default_fn is None else default_fn(params)
+    if _is_mask_callable(mask):
+        return cast(Callable[[base.Params], Any], mask)(params)
+    return cast(base.Params, mask)
+
+
+def _apply_weight_decay_tree(
+    updates: base.Updates,
+    params: base.Params,
+    weight_decay_step: jax.typing.ArrayLike,
+    weight_decay_mask: base.Params | None = None,
+    *,
+    is_leaf: Callable[[Any], bool] = _is_aux_leaf,
+) -> base.Updates:
+    """Apply decoupled weight decay across a tree with optional array masks."""
+    if weight_decay_mask is None:
+        return jax.tree.map(
+            lambda u, p: _apply_weight_decay_leaf(u, p, weight_decay_step),
+            updates,
+            params,
+            is_leaf=is_leaf,
+        )
+    return jax.tree.map(
+        lambda u, p, m: _apply_weight_decay_leaf(u, p, weight_decay_step, m),
+        updates,
+        params,
+        weight_decay_mask,
+        is_leaf=is_leaf,
+    )
 
 
 def add_tiny(x):

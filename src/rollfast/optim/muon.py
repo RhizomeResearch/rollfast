@@ -39,10 +39,13 @@ from rollfast.optim.orthogonalization import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
-    _apply_weight_decay_leaf,
+    _apply_weight_decay_tree,
     _cast_state_tree,
+    _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
+    _resolve_mask,
+    _resolve_scalar,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
     _tree_stochastic_cast,
@@ -273,37 +276,14 @@ def scale_by_muon(
                     is_leaf=_is_dimension_numbers_leaf,
                 )
 
-        _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
-        if use_magma and _may_have_wd and params is not None:
-            wd_step = (
-                cast(
-                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
-                    weight_decay,
-                )(state.count)
-                if callable(weight_decay)
-                else weight_decay
+        if use_magma and _has_nonzero_or_scheduled(weight_decay) and params is not None:
+            wd_step = _resolve_scalar(weight_decay, state.count)
+            muon_updates = _apply_weight_decay_tree(
+                muon_updates,
+                params,
+                wd_step,
+                _resolve_mask(weight_decay_mask, params),
             )
-            resolved_mask = (
-                weight_decay_mask(params)
-                if callable(weight_decay_mask)
-                else weight_decay_mask
-            )
-
-            if resolved_mask is None:
-                muon_updates = jax.tree.map(
-                    lambda u, p: _apply_weight_decay_leaf(u, p, wd_step),
-                    muon_updates,
-                    params,
-                    is_leaf=_is_aux_leaf,
-                )
-            else:
-                muon_updates = jax.tree.map(
-                    lambda u, p, m: _apply_weight_decay_leaf(u, p, wd_step, m),
-                    muon_updates,
-                    params,
-                    resolved_mask,
-                    is_leaf=_is_aux_leaf,
-                )
 
         if canonical_mu_dtype == jnp.bfloat16 or use_magma:
             split_count = 3 if use_magma else 2

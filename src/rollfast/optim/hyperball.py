@@ -21,7 +21,6 @@ from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 import jax
 import jax.numpy as jnp
 from optax._src import base, combine, numerics
-from optax.transforms import _masking
 
 from rollfast.optim.adam import scale_by_adam
 from rollfast.optim.aurora import (
@@ -44,7 +43,13 @@ from rollfast.optim.psgd import (
     scale_by_kron,
 )
 from rollfast.optim.rmnp import scale_by_rmnp, scale_by_rmnp_shape
-from rollfast.utils import MomentumAccumulator, dist_reduce
+from rollfast.utils import (
+    MomentumAccumulator,
+    _is_aux_leaf,
+    _resolve_mask,
+    _resolve_scalar,
+    dist_reduce,
+)
 
 MaskOrFn = Optional[Union[Any, Callable[[base.Params], Any]]]
 
@@ -56,27 +61,12 @@ class HyperballState(NamedTuple):
     init_norm: base.Params
 
 
-def _is_aux_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, _masking.MaskedNode)
-
-
 def _is_bool_leaf(x: Any) -> bool:
     return _is_aux_leaf(x) or isinstance(x, (bool, int)) or hasattr(x, "dtype")
 
 
 def _is_array_like(x: Any) -> bool:
     return hasattr(x, "shape") and hasattr(x, "dtype")
-
-
-def _resolve_scalar(
-    value: base.ScalarOrSchedule,
-    count: jax.Array,
-) -> jax.typing.ArrayLike:
-    if callable(value):
-        return cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], value)(
-            count
-        )
-    return value
 
 
 def _leaf_l2_norm(
@@ -123,23 +113,6 @@ def _default_rank2_hyperball_mask(params: base.Params) -> base.Params:
         params,
         is_leaf=_is_aux_leaf,
     )
-
-
-def _is_mask_callable(mask: Any) -> bool:
-    callable_leaves = jax.tree.leaves(jax.tree.map(callable, mask))
-    return callable(mask) and len(callable_leaves) > 0 and all(callable_leaves)
-
-
-def _resolve_mask(
-    mask: MaskOrFn,
-    params: base.Params,
-    default_fn: Callable[[base.Params], base.Params],
-) -> base.Params:
-    if mask is None:
-        return default_fn(params)
-    if _is_mask_callable(mask):
-        return cast(Callable[[base.Params], Any], mask)(params)
-    return cast(base.Params, mask)
 
 
 def _mask_leaf_value(mask_leaf: Any) -> jax.Array:

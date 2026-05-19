@@ -17,7 +17,10 @@ from optax.transforms import _masking
 
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
-    _apply_weight_decay_leaf,
+    _apply_weight_decay_tree,
+    _has_nonzero_or_scheduled,
+    _resolve_mask,
+    _resolve_scalar,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     add_tiny,
@@ -1373,39 +1376,15 @@ def scale_by_kron(
 
         updates = grads_structure.unflatten(precond_gs)
 
-        _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
-        if _may_have_wd and params is not None:
-            wd_step = (
-                cast(
-                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
-                    weight_decay,
-                )(state.count)
-                if callable(weight_decay)
-                else weight_decay
+        if _has_nonzero_or_scheduled(weight_decay) and params is not None:
+            wd_step = _resolve_scalar(weight_decay, state.count)
+            updates = _apply_weight_decay_tree(
+                updates,
+                params,
+                wd_step,
+                _resolve_mask(weight_decay_mask, params),
+                is_leaf=_is_psgd_leaf,
             )
-            _wd_mask = None
-            if weight_decay_mask is not None:
-                _wd_mask = (
-                    weight_decay_mask(params)
-                    if callable(weight_decay_mask)
-                    else weight_decay_mask
-                )
-
-            if _wd_mask is not None:
-                updates = jax.tree.map(
-                    lambda u, p, m: _apply_weight_decay_leaf(u, p, wd_step, m),
-                    updates,
-                    params,
-                    _wd_mask,
-                    is_leaf=_is_psgd_leaf,
-                )
-            else:
-                updates = jax.tree.map(
-                    lambda u, p: _apply_weight_decay_leaf(u, p, wd_step),
-                    updates,
-                    params,
-                    is_leaf=_is_psgd_leaf,
-                )
 
         if use_magma:
             final_updates, new_magma_s = apply_magma_internal(
@@ -1546,10 +1525,7 @@ def kron(
         )
     ]
 
-    _wd_is_nonzero = (
-        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
-    )
-    if _wd_is_nonzero and not use_magma:
+    if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
         optimizer.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
 
     optimizer.append(transform.scale_by_learning_rate(learning_rate))

@@ -40,6 +40,7 @@ from rollfast.optim.dimension_numbers import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
+    _has_nonzero_or_scheduled,
 )
 
 try:
@@ -844,10 +845,7 @@ def _build_unscaled_aurora_branch(
         )
 
     components = [aurora_scale]
-    _wd_is_nonzero = (
-        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
-    )
-    if _wd_is_nonzero and not use_magma:
+    if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
         components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
 
     return combine.chain(*components)

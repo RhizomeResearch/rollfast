@@ -11,9 +11,12 @@ from optax._src import base, numerics
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
     MomentumAccumulator,
-    _apply_weight_decay_leaf,
+    _apply_weight_decay_tree,
+    _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
+    _resolve_mask,
+    _resolve_scalar,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
     _tree_stochastic_cast,
@@ -283,36 +286,17 @@ def finish_matrix_runtime_step(
             is_leaf=_is_aux_leaf,
         )
 
-    _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
-    if _may_have_wd and params is not None:
-        wd_step = (
-            cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], weight_decay)(
-                runtime.count - jnp.asarray(1, dtype=runtime.count.dtype)
-            )
-            if callable(weight_decay)
-            else weight_decay
+    if _has_nonzero_or_scheduled(weight_decay) and params is not None:
+        wd_step = _resolve_scalar(
+            weight_decay,
+            runtime.count - jnp.asarray(1, dtype=runtime.count.dtype),
         )
-        resolved_mask = (
-            weight_decay_mask(params)
-            if callable(weight_decay_mask)
-            else weight_decay_mask
+        new_updates = _apply_weight_decay_tree(
+            new_updates,
+            params,
+            wd_step,
+            _resolve_mask(weight_decay_mask, params),
         )
-
-        if resolved_mask is None:
-            new_updates = jax.tree.map(
-                lambda u, p: _apply_weight_decay_leaf(u, p, wd_step),
-                new_updates,
-                params,
-                is_leaf=_is_aux_leaf,
-            )
-        else:
-            new_updates = jax.tree.map(
-                lambda u, p, m: _apply_weight_decay_leaf(u, p, wd_step, m),
-                new_updates,
-                params,
-                resolved_mask,
-                is_leaf=_is_aux_leaf,
-            )
 
     new_updates = jax.tree.map(
         lambda u: (
