@@ -750,6 +750,109 @@ def scale_by_riemannian_aurora(
     )
 
 
+def _build_unscaled_aurora_branch(
+    *,
+    riemannian: bool,
+    b1: float,
+    weight_decay: base.ScalarOrSchedule,
+    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]],
+    pp_iterations: int,
+    pp_beta: float,
+    outer_steps: int,
+    cg_steps: int,
+    riemannian_eta: float,
+    retraction_steps: int,
+    polar_ns_iters: int,
+    polar_compute_dtype: jax.typing.DTypeLike,
+    polar_output_dtype: jax.typing.DTypeLike,
+    precision: jax.lax.PrecisionLike,
+    eps: float,
+    nesterov: bool,
+    shape_nesterov: bool,
+    bias_correction: bool,
+    momentum_accumulator: MomentumAccumulator,
+    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]],
+    raw_global_grad_clip: Optional[float],
+    permissive_spike_protection: bool,
+    mu_dtype: Optional[jax.typing.DTypeLike],
+    axis_name: Optional[str],
+    use_magma: bool,
+    magma_p: float,
+    magma_tau: float,
+    guard_nonfinite: bool,
+    key: jax.Array,
+    weight_dimension_numbers: AuroraWeightDimNumOrFn | None,
+) -> base.GradientTransformation:
+    """Build the unscaled Aurora direction branch shared by wrappers."""
+    if riemannian:
+        aurora_scale = scale_by_riemannian_aurora(
+            b1=b1,
+            outer_steps=outer_steps,
+            cg_steps=cg_steps,
+            riemannian_eta=riemannian_eta,
+            retraction_steps=retraction_steps,
+            polar_ns_iters=polar_ns_iters,
+            polar_compute_dtype=polar_compute_dtype,
+            polar_output_dtype=polar_output_dtype,
+            precision=precision,
+            eps=eps,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            weight_dimension_numbers=weight_dimension_numbers,
+            use_magma=use_magma,
+            magma_p=magma_p,
+            magma_tau=magma_tau,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
+            axis_name=axis_name,
+            guard_nonfinite=guard_nonfinite,
+            key=key,
+        )
+    else:
+        aurora_scale = scale_by_aurora(
+            b1=b1,
+            pp_iterations=pp_iterations,
+            pp_beta=pp_beta,
+            polar_ns_iters=polar_ns_iters,
+            polar_compute_dtype=polar_compute_dtype,
+            polar_output_dtype=polar_output_dtype,
+            precision=precision,
+            eps=eps,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            weight_dimension_numbers=weight_dimension_numbers,
+            use_magma=use_magma,
+            magma_p=magma_p,
+            magma_tau=magma_tau,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
+            axis_name=axis_name,
+            guard_nonfinite=guard_nonfinite,
+            key=key,
+        )
+
+    components = [aurora_scale]
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero and not use_magma:
+        components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+
+    return combine.chain(*components)
+
+
 def _partitioned_aurora(
     *,
     riemannian: bool,
@@ -798,78 +901,45 @@ def _partitioned_aurora(
         "aurora",
     )
 
-    if riemannian:
-        aurora_scale = scale_by_riemannian_aurora(
-            b1=b1,
-            outer_steps=outer_steps,
-            cg_steps=cg_steps,
-            riemannian_eta=riemannian_eta,
-            retraction_steps=retraction_steps,
-            polar_ns_iters=polar_ns_iters,
-            polar_compute_dtype=polar_compute_dtype,
-            polar_output_dtype=polar_output_dtype,
-            precision=precision,
-            eps=eps,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            momentum_accumulator=momentum_accumulator,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=partition.masked_specs,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=weight_decay if use_magma else 0.0,
-            weight_decay_mask=weight_decay_mask if use_magma else None,
-            axis_name=axis_name,
-            guard_nonfinite=guard_nonfinite,
-            key=key_aurora,
-        )
-    else:
-        aurora_scale = scale_by_aurora(
-            b1=b1,
-            pp_iterations=pp_iterations,
-            pp_beta=pp_beta,
-            polar_ns_iters=polar_ns_iters,
-            polar_compute_dtype=polar_compute_dtype,
-            polar_output_dtype=polar_output_dtype,
-            precision=precision,
-            eps=eps,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            momentum_accumulator=momentum_accumulator,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=partition.masked_specs,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=weight_decay if use_magma else 0.0,
-            weight_decay_mask=weight_decay_mask if use_magma else None,
-            axis_name=axis_name,
-            guard_nonfinite=guard_nonfinite,
-            key=key_aurora,
-        )
-
-    aurora_components = [aurora_scale]
-    _wd_is_nonzero = (
-        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    aurora_branch = _build_unscaled_aurora_branch(
+        riemannian=riemannian,
+        b1=b1,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        pp_iterations=pp_iterations,
+        pp_beta=pp_beta,
+        outer_steps=outer_steps,
+        cg_steps=cg_steps,
+        riemannian_eta=riemannian_eta,
+        retraction_steps=retraction_steps,
+        polar_ns_iters=polar_ns_iters,
+        polar_compute_dtype=polar_compute_dtype,
+        polar_output_dtype=polar_output_dtype,
+        precision=precision,
+        eps=eps,
+        nesterov=nesterov,
+        shape_nesterov=shape_nesterov,
+        bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
+        grad_clip_max_amps=grad_clip_max_amps,
+        raw_global_grad_clip=raw_global_grad_clip,
+        permissive_spike_protection=permissive_spike_protection,
+        mu_dtype=mu_dtype,
+        axis_name=axis_name,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        guard_nonfinite=guard_nonfinite,
+        key=key_aurora,
+        weight_dimension_numbers=partition.masked_specs,
     )
-    if _wd_is_nonzero and not use_magma:
-        aurora_components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
-    aurora_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={
-            "aurora": combine.chain(*aurora_components),
+            "aurora": combine.chain(
+                aurora_branch,
+                transform.scale_by_learning_rate(learning_rate),
+            ),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,

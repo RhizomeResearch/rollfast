@@ -686,6 +686,82 @@ def scale_by_prism(
     return base.GradientTransformation(init_fn, update_fn)
 
 
+def _build_unscaled_prism_branch(
+    *,
+    b1: float,
+    gamma: float,
+    ns_iters: int,
+    ns_coeffs: MuonNsCoeffs,
+    mode: str,
+    preconditioning: MuonPreconditioning,
+    inv_steps: int,
+    inv_eps: float,
+    inv_scale: float,
+    eps_gram: float,
+    gamma_l: Optional[float],
+    gamma_r: Optional[float],
+    precision: jax.lax.PrecisionLike,
+    nesterov: bool,
+    shape_nesterov: bool,
+    bias_correction: bool,
+    momentum_accumulator: MomentumAccumulator,
+    mu_dtype: Optional[jax.typing.DTypeLike],
+    raw_global_grad_clip: Optional[float],
+    permissive_spike_protection: bool,
+    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]],
+    weight_dimension_numbers: WeightDimNumOrFn | None,
+    use_magma: bool,
+    magma_p: float,
+    magma_tau: float,
+    weight_decay: base.ScalarOrSchedule,
+    weight_decay_mask: Optional[Union[Any, Callable]],
+    axis_name: Optional[str],
+    key: jax.Array,
+) -> base.GradientTransformation:
+    """Build the unscaled PRISM direction branch shared by wrappers."""
+    components = [
+        scale_by_prism(
+            b1=b1,
+            gamma=gamma,
+            ns_iters=ns_iters,
+            ns_coeffs=ns_coeffs,
+            mode=mode,
+            preconditioning=preconditioning,
+            inv_steps=inv_steps,
+            inv_eps=inv_eps,
+            inv_scale=inv_scale,
+            eps_gram=eps_gram,
+            gamma_l=gamma_l,
+            gamma_r=gamma_r,
+            precision=precision,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            grad_clip_max_amps=grad_clip_max_amps,
+            weight_dimension_numbers=weight_dimension_numbers,
+            use_magma=use_magma,
+            magma_p=magma_p,
+            magma_tau=magma_tau,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
+            axis_name=axis_name,
+            key=key,
+        ),
+    ]
+
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero and not use_magma:
+        components.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+
+    return combine.chain(*components)
+
+
 def prism(
     learning_rate: base.ScalarOrSchedule,
     b1: float = 0.95,
@@ -803,53 +879,44 @@ def prism(
 
     partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
 
-    prism_components = [
-        scale_by_prism(
-            b1=b1,
-            gamma=gamma,
-            ns_iters=ns_iters,
-            ns_coeffs=ns_coeffs,
-            mode=mode,
-            preconditioning=preconditioning,
-            inv_steps=inv_steps,
-            inv_eps=inv_eps,
-            inv_scale=inv_scale,
-            eps_gram=eps_gram,
-            gamma_l=gamma_l,
-            gamma_r=gamma_r,
-            precision=precision,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            momentum_accumulator=momentum_accumulator,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=partition.masked_specs,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=weight_decay if use_magma else 0.0,
-            weight_decay_mask=weight_decay_mask if use_magma else None,
-            axis_name=axis_name,
-            key=key_prism,
-        ),
-    ]
-
-    _wd_is_nonzero = (
-        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    prism_branch = _build_unscaled_prism_branch(
+        b1=b1,
+        gamma=gamma,
+        ns_iters=ns_iters,
+        ns_coeffs=ns_coeffs,
+        mode=mode,
+        preconditioning=preconditioning,
+        inv_steps=inv_steps,
+        inv_eps=inv_eps,
+        inv_scale=inv_scale,
+        eps_gram=eps_gram,
+        gamma_l=gamma_l,
+        gamma_r=gamma_r,
+        precision=precision,
+        nesterov=nesterov,
+        shape_nesterov=shape_nesterov,
+        bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
+        mu_dtype=mu_dtype,
+        raw_global_grad_clip=raw_global_grad_clip,
+        permissive_spike_protection=permissive_spike_protection,
+        grad_clip_max_amps=grad_clip_max_amps,
+        weight_dimension_numbers=partition.masked_specs,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        axis_name=axis_name,
+        key=key_prism,
     )
-    if _wd_is_nonzero and not use_magma:
-        prism_components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
-
-    prism_components.append(transform.scale_by_learning_rate(learning_rate))
 
     return combine.partition(
         transforms={
-            "prism": combine.chain(*prism_components),
+            "prism": combine.chain(
+                prism_branch,
+                transform.scale_by_learning_rate(learning_rate),
+            ),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,

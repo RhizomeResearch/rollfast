@@ -26,8 +26,7 @@ from optax.transforms import _masking
 from rollfast.optim.adam import scale_by_adam
 from rollfast.optim.aurora import (
     AuroraWeightDimNumOrFn,
-    scale_by_aurora,
-    scale_by_riemannian_aurora,
+    _build_unscaled_aurora_branch,
 )
 from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
@@ -36,7 +35,7 @@ from rollfast.optim.dimension_numbers import (
 import rollfast.optim.muon as optax_muon
 from rollfast.optim.orthogonalization import MUON_NS_COEFFS, MuonPreconditioning
 from rollfast.optim.prism import (
-    scale_by_prism,
+    _build_unscaled_prism_branch,
 )
 from rollfast.optim.psgd import (
     GradClipMode,
@@ -478,38 +477,29 @@ def muon_hyperball(
         hyperball_mask if hyperball_mask is not None else partition.default_mask
     )
 
-    muon_components: list[Any] = [
-        optax_muon.scale_by_muon(
-            ns_coeffs=ns_coeffs,
-            ns_steps=ns_steps,
-            beta=beta,
-            eps=eps,
-            mu_dtype=mu_dtype,
-            nesterov=nesterov,
-            adaptive=adaptive,
-            preconditioning=preconditioning,
-            weight_dimension_numbers=partition.masked_specs,
-            momentum_accumulator=momentum_accumulator,
-            shape_updates=use_magma,
-            consistent_rms=consistent_rms,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            axis_name=axis_name,
-            key=key_muon,
-        )
-    ]
-    if not use_magma:
-        muon_components.append(
-            optax_muon.scale_by_shape(
-                weight_dimension_numbers=partition.masked_specs,
-                consistent_rms=consistent_rms,
-            )
-        )
-
     partitioned_updates = combine.partition(
         transforms={
-            "muon": combine.chain(*muon_components),
+            "muon": optax_muon._build_unscaled_muon_branch(
+                ns_coeffs=ns_coeffs,
+                ns_steps=ns_steps,
+                beta=beta,
+                eps=eps,
+                mu_dtype=mu_dtype,
+                nesterov=nesterov,
+                adaptive=adaptive,
+                preconditioning=preconditioning,
+                weight_dimension_numbers=partition.masked_specs,
+                orthogonalize_fn=optax_muon.orthogonalize_via_newton_schulz,
+                momentum_accumulator=momentum_accumulator,
+                use_magma=use_magma,
+                magma_p=magma_p,
+                magma_tau=magma_tau,
+                consistent_rms=consistent_rms,
+                weight_decay=0.0,
+                weight_decay_mask=None,
+                axis_name=axis_name,
+                key=key_muon,
+            ),
             "adam": scale_by_adam(
                 b1=adam_b1,
                 b2=adam_b2,
@@ -791,7 +781,7 @@ def prism_hyperball(
 
     partitioned_updates = combine.partition(
         transforms={
-            "prism": scale_by_prism(
+            "prism": _build_unscaled_prism_branch(
                 b1=b1,
                 gamma=gamma,
                 ns_iters=ns_iters,
@@ -908,64 +898,38 @@ def _partitioned_aurora_hyperball(
         "aurora",
     )
 
-    if riemannian:
-        aurora_transform = scale_by_riemannian_aurora(
-            b1=b1,
-            outer_steps=outer_steps,
-            cg_steps=cg_steps,
-            riemannian_eta=riemannian_eta,
-            retraction_steps=retraction_steps,
-            polar_ns_iters=polar_ns_iters,
-            polar_compute_dtype=polar_compute_dtype,
-            polar_output_dtype=polar_output_dtype,
-            precision=precision,
-            eps=eps,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            momentum_accumulator=momentum_accumulator,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=partition.masked_specs,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=0.0,
-            weight_decay_mask=None,
-            axis_name=axis_name,
-            guard_nonfinite=guard_nonfinite,
-            key=key_aurora,
-        )
-    else:
-        aurora_transform = scale_by_aurora(
-            b1=b1,
-            pp_iterations=pp_iterations,
-            pp_beta=pp_beta,
-            polar_ns_iters=polar_ns_iters,
-            polar_compute_dtype=polar_compute_dtype,
-            polar_output_dtype=polar_output_dtype,
-            precision=precision,
-            eps=eps,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            momentum_accumulator=momentum_accumulator,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=partition.masked_specs,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=0.0,
-            weight_decay_mask=None,
-            axis_name=axis_name,
-            guard_nonfinite=guard_nonfinite,
-            key=key_aurora,
-        )
+    aurora_transform = _build_unscaled_aurora_branch(
+        riemannian=riemannian,
+        b1=b1,
+        weight_decay=0.0,
+        weight_decay_mask=None,
+        pp_iterations=pp_iterations,
+        pp_beta=pp_beta,
+        outer_steps=outer_steps,
+        cg_steps=cg_steps,
+        riemannian_eta=riemannian_eta,
+        retraction_steps=retraction_steps,
+        polar_ns_iters=polar_ns_iters,
+        polar_compute_dtype=polar_compute_dtype,
+        polar_output_dtype=polar_output_dtype,
+        precision=precision,
+        eps=eps,
+        nesterov=nesterov,
+        shape_nesterov=shape_nesterov,
+        bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
+        grad_clip_max_amps=grad_clip_max_amps,
+        raw_global_grad_clip=raw_global_grad_clip,
+        permissive_spike_protection=permissive_spike_protection,
+        mu_dtype=mu_dtype,
+        axis_name=axis_name,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        guard_nonfinite=guard_nonfinite,
+        key=key_aurora,
+        weight_dimension_numbers=partition.masked_specs,
+    )
 
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else partition.default_mask

@@ -348,6 +348,68 @@ def scale_by_muon(
     return base.GradientTransformation(init_fn, update_fn)
 
 
+def _build_unscaled_muon_branch(
+    *,
+    ns_coeffs: MuonNsCoeffs,
+    ns_steps: jax.typing.ArrayLike,
+    beta: jax.typing.ArrayLike,
+    eps: jax.typing.ArrayLike,
+    mu_dtype: jax.typing.DTypeLike | None,
+    nesterov: bool,
+    adaptive: bool,
+    preconditioning: MuonPreconditioning,
+    weight_dimension_numbers: WeightDimNumOrFn | None,
+    orthogonalize_fn: OrthogonalizeFn,
+    momentum_accumulator: MomentumAccumulator,
+    use_magma: bool,
+    magma_p: float,
+    magma_tau: float,
+    consistent_rms: jax.typing.ArrayLike | None,
+    weight_decay: base.ScalarOrSchedule,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
+    axis_name: str | None,
+    key: jax.Array,
+) -> base.GradientTransformation:
+    """Build the unscaled Muon direction branch shared by wrappers."""
+    components: list[base.GradientTransformation] = [
+        scale_by_muon(
+            ns_coeffs=ns_coeffs,
+            ns_steps=ns_steps,
+            beta=beta,
+            eps=eps,
+            mu_dtype=mu_dtype,
+            nesterov=nesterov,
+            adaptive=adaptive,
+            preconditioning=preconditioning,
+            weight_dimension_numbers=weight_dimension_numbers,
+            orthogonalize_fn=orthogonalize_fn,
+            momentum_accumulator=momentum_accumulator,
+            use_magma=use_magma,
+            magma_p=magma_p,
+            magma_tau=magma_tau,
+            shape_updates=use_magma,
+            consistent_rms=consistent_rms,
+            weight_decay=weight_decay if use_magma else 0.0,
+            weight_decay_mask=weight_decay_mask if use_magma else None,
+            axis_name=axis_name,
+            key=key,
+        ),
+    ]
+
+    if not use_magma:
+        components.extend(
+            [
+                scale_by_shape(
+                    weight_dimension_numbers=weight_dimension_numbers,
+                    consistent_rms=consistent_rms,
+                ),
+                transform.add_decayed_weights(weight_decay, weight_decay_mask),
+            ]
+        )
+
+    return combine.chain(*components)
+
+
 def muon(
     learning_rate: base.ScalarOrSchedule,
     ns_coeffs: MuonNsCoeffs = _DEFAULT_NS_COEFFS,
@@ -384,45 +446,34 @@ def muon(
 
     partition = _make_matrix_partition_fns(muon_weight_dimension_numbers, "muon")
 
-    muon_components = [
-        scale_by_muon(
-            ns_coeffs=ns_coeffs,
-            ns_steps=ns_steps,
-            beta=beta,
-            eps=eps,
-            mu_dtype=mu_dtype,
-            nesterov=nesterov,
-            adaptive=adaptive,
-            preconditioning=preconditioning,
-            weight_dimension_numbers=partition.masked_specs,
-            orthogonalize_fn=orthogonalize_fn,
-            momentum_accumulator=momentum_accumulator,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            shape_updates=use_magma,
-            consistent_rms=consistent_rms,
-            weight_decay=weight_decay if use_magma else 0.0,
-            weight_decay_mask=weight_decay_mask if use_magma else None,
-            axis_name=axis_name,
-            key=key_muon,
-        ),
-    ]
-    if not use_magma:
-        muon_components.extend(
-            [
-                scale_by_muon_shape(
-                    weight_dimension_numbers=partition.masked_specs,
-                    consistent_rms=consistent_rms,
-                ),
-                transform.add_decayed_weights(weight_decay, weight_decay_mask),
-            ]
-        )
-    muon_components.append(transform.scale_by_learning_rate(learning_rate))
+    muon_branch = _build_unscaled_muon_branch(
+        ns_coeffs=ns_coeffs,
+        ns_steps=ns_steps,
+        beta=beta,
+        eps=eps,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        adaptive=adaptive,
+        preconditioning=preconditioning,
+        weight_dimension_numbers=partition.masked_specs,
+        orthogonalize_fn=orthogonalize_fn,
+        momentum_accumulator=momentum_accumulator,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        consistent_rms=consistent_rms,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        axis_name=axis_name,
+        key=key_muon,
+    )
 
     return combine.partition(
         transforms={
-            "muon": combine.chain(*muon_components),
+            "muon": combine.chain(
+                muon_branch,
+                transform.scale_by_learning_rate(learning_rate),
+            ),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,
