@@ -37,13 +37,13 @@ from rollfast.optim.orthogonalization import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
-    _cast_state_tree,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
+    _store_moment_tree,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
-    _tree_stochastic_cast,
     _tree_update_moment_f32,
+    _unzip_leaf_tuple_tree,
     _zeros_like_tree,
 )
 
@@ -351,16 +351,9 @@ def scale_by_normuon(
             state.nu,
             is_leaf=_is_dimension_numbers_leaf,
         )
-        result_is_leaf = lambda x: isinstance(x, tuple) and len(x) == 2
-        new_updates = jax.tree.map(lambda x: x[0], result, is_leaf=result_is_leaf)
-        nu = jax.tree.map(lambda x: x[1], result, is_leaf=result_is_leaf)
+        new_updates, nu = _unzip_leaf_tuple_tree(result, 2)
 
-        if canonical_mu_dtype == jnp.bfloat16:
-            key, sr_key = jax.random.split(cast(jax.Array, state.key), 2)
-            mu = _tree_stochastic_cast(mu, canonical_mu_dtype, sr_key)
-        else:
-            key = state.key
-            mu = _cast_state_tree(mu, canonical_mu_dtype)
+        mu, key = _store_moment_tree(mu, canonical_mu_dtype, state.key)
 
         return new_updates, ScaleByNorMuonState(
             count=cast(jax.Array, count_inc), mu=mu, nu=nu, key=key

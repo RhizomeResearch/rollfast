@@ -50,6 +50,14 @@ def _tree_cast_f32(tree: Any) -> Any:
     return _cast_state_tree(tree, jnp.float32)
 
 
+def _map_non_aux(fn: Callable[[jax.Array], jax.Array], tree: Any) -> Any:
+    return jax.tree.map(
+        lambda x: x if _is_aux_leaf(x) else fn(x),
+        tree,
+        is_leaf=_is_aux_leaf,
+    )
+
+
 def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
     return jax.tree.map(
         lambda x, y: x if _is_aux_leaf(x) else jnp.where(pred, x, y),
@@ -60,24 +68,21 @@ def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
 
 
 def _tree_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
-    leaves = jax.tree.leaves(grads, is_leaf=_is_aux_leaf)
-    sq_terms = [
-        jnp.sum(
-            numerics.abs_sq(
-                x.astype(
-                    jnp.complex64
-                    if jnp.issubdtype(x.dtype, jnp.complexfloating)
-                    else jnp.float32
+    local_sq = sum(
+        (
+            jnp.sum(
+                numerics.abs_sq(
+                    x.astype(
+                        jnp.complex64
+                        if jnp.issubdtype(x.dtype, jnp.complexfloating)
+                        else jnp.float32
+                    )
                 )
             )
-        )
-        for x in leaves
-        if not _is_aux_leaf(x)
-    ]
-    local_sq = (
-        sum(sq_terms, start=jnp.array(0.0, dtype=jnp.float32))
-        if sq_terms
-        else jnp.array(0.0, dtype=jnp.float32)
+            for x in jax.tree.leaves(grads, is_leaf=_is_aux_leaf)
+            if not _is_aux_leaf(x)
+        ),
+        start=jnp.array(0.0, dtype=jnp.float32),
     )
     total_sq = dist_reduce(local_sq, axis_name, "sum")
     return jnp.sqrt(total_sq)
@@ -161,14 +166,9 @@ def prepare_matrix_runtime_step(
         jnp.logical_not(permissive_spike_protection),
     )
 
-    effective_updates = jax.tree.map(
-        lambda g: (
-            g
-            if _is_aux_leaf(g)
-            else jnp.where(should_skip, jnp.zeros_like(g), g * clip_scale)
-        ),
+    effective_updates = _map_non_aux(
+        lambda g: jnp.where(should_skip, jnp.zeros_like(g), g * clip_scale),
         updates,
-        is_leaf=_is_aux_leaf,
     )
 
     mu_candidate = _tree_update_moment_f32(
@@ -279,11 +279,7 @@ def finish_matrix_runtime_step(
     new_updates = updates
 
     if guard_fn is not None:
-        new_updates = jax.tree.map(
-            lambda u: u if _is_aux_leaf(u) else guard_fn(u),
-            new_updates,
-            is_leaf=_is_aux_leaf,
-        )
+        new_updates = _map_non_aux(guard_fn, new_updates)
 
     if grad_clip_max_amps is not None:
         max_rms, max_val = (
@@ -291,21 +287,19 @@ def finish_matrix_runtime_step(
             if isinstance(grad_clip_max_amps, tuple)
             else (grad_clip_max_amps, 10.0)
         )
-        new_updates = jax.tree.map(
-            lambda u: (
-                u if _is_aux_leaf(u) else _clip_per_tensor_rms(u, max_rms, max_val)
-            ),
+        new_updates = _map_non_aux(
+            lambda u: _clip_per_tensor_rms(u, max_rms, max_val),
             new_updates,
-            is_leaf=_is_aux_leaf,
         )
 
-    if _has_nonzero_or_scheduled(weight_decay) and params is None:
+    has_weight_decay = _has_nonzero_or_scheduled(weight_decay)
+    if has_weight_decay and params is None:
         raise ValueError(
             "`params` must be provided to matrix optimizer updates when "
             "`weight_decay` is nonzero or scheduled."
         )
 
-    if _has_nonzero_or_scheduled(weight_decay):
+    if has_weight_decay:
         params = cast(base.Params, params)
         wd_step = _resolve_scalar(
             weight_decay,
@@ -318,14 +312,9 @@ def finish_matrix_runtime_step(
             _resolve_mask(weight_decay_mask, params),
         )
 
-    new_updates = jax.tree.map(
-        lambda u: (
-            u
-            if _is_aux_leaf(u)
-            else jnp.where(runtime.should_skip, jnp.zeros_like(u), u)
-        ),
+    new_updates = _map_non_aux(
+        lambda u: jnp.where(runtime.should_skip, jnp.zeros_like(u), u),
         new_updates,
-        is_leaf=_is_aux_leaf,
     )
 
     if use_magma:

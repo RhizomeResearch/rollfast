@@ -48,9 +48,19 @@ def apply_magma_internal(
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
 
     leaves_g, treedef = jax.tree.flatten(raw_gradients, is_leaf=is_leaf_fn)
-    leaves_mu, _ = jax.tree.flatten(first_moments, is_leaf=is_leaf_fn)
-    leaves_delta, _ = jax.tree.flatten(base_updates, is_leaf=is_leaf_fn)
-    leaves_s, _ = jax.tree.flatten(magma_s_prev, is_leaf=is_leaf_fn)
+
+    def flatten_matching(tree, name):
+        leaves, tree_treedef = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
+        if tree_treedef != treedef:
+            raise ValueError(
+                "Magma input trees must have matching structures; "
+                f"`{name}` does not match `raw_gradients`."
+            )
+        return leaves
+
+    leaves_mu = flatten_matching(first_moments, "first_moments")
+    leaves_delta = flatten_matching(base_updates, "base_updates")
+    leaves_s = flatten_matching(magma_s_prev, "magma_s_prev")
 
     if axis_name is not None:
         # Synchronize PRNG key across all devices so Bernoulli masks are identical.
@@ -100,9 +110,6 @@ def apply_magma_internal(
             norm_g_sq = dist_reduce(norm_g_sq, axis_name, "sum")
             norm_mu_sq = dist_reduce(norm_mu_sq, axis_name, "sum")
 
-        # denom = jnp.maximum(
-        #     jnp.sqrt(norm_g_sq + 1e-12) * jnp.sqrt(norm_mu_sq + 1e-12), 1e-9
-        # )
         denom = jnp.maximum(jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-12)
         cossim = jnp.nan_to_num(dot / denom, nan=0.0)
         cossim = jnp.clip(cossim, -1.0, 1.0)
@@ -114,9 +121,6 @@ def apply_magma_internal(
         # Singular block-wise Bernoulli scalar
         m_mask = jax.random.bernoulli(block_key, p).astype(delta.dtype)
 
-        # delta_magma = jnp.where(
-        #     m_mask, s_new.astype(delta.dtype) * delta, jnp.zeros_like(delta)
-        # )
         delta_magma = m_mask * s_new.astype(delta.dtype) * delta
 
         new_delta_leaves.append(delta_magma)

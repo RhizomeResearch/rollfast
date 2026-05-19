@@ -43,6 +43,7 @@ from rollfast.utils import (
     _momentum_grad_scale,
     _resolve_scalar,
     _tree_stochastic_cast,
+    _unzip_leaf_tuple_tree,
 )
 
 
@@ -205,18 +206,7 @@ def scale_by_pion(
             dim_nums,
             is_leaf=_is_dimension_numbers_leaf,
         )
-        m_in = jax.tree.map(
-            lambda x: x[0], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        v_in = jax.tree.map(
-            lambda x: x[1], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        m_out = jax.tree.map(
-            lambda x: x[2], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        v_out = jax.tree.map(
-            lambda x: x[3], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
+        m_in, v_in, m_out, v_out = _unzip_leaf_tuple_tree(states, 4)
         return ScaleByPionState(
             count=jnp.zeros([], jnp.int32),
             m_in=m_in,
@@ -281,17 +271,7 @@ def scale_by_pion(
             is_leaf=_is_dimension_numbers_leaf,
         )
 
-        new_updates = jax.tree.map(
-            lambda x: x[0], out, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        m_in = jax.tree.map(lambda x: x[1], out, is_leaf=lambda x: isinstance(x, tuple))
-        v_in = jax.tree.map(lambda x: x[2], out, is_leaf=lambda x: isinstance(x, tuple))
-        m_out = jax.tree.map(
-            lambda x: x[3], out, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        v_out = jax.tree.map(
-            lambda x: x[4], out, is_leaf=lambda x: isinstance(x, tuple)
-        )
+        new_updates, m_in, v_in, m_out, v_out = _unzip_leaf_tuple_tree(out, 5)
 
         if canonical_mu_dtype == jnp.bfloat16:
             key, sr_in, sr_vin, sr_out, sr_vout = jax.random.split(

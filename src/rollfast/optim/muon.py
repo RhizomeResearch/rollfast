@@ -42,15 +42,14 @@ from rollfast.optim.orthogonalization import (
 from rollfast.utils import (
     MomentumAccumulator,
     _apply_weight_decay_tree,
-    _cast_state_tree,
     _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
     _resolve_mask,
     _resolve_scalar,
+    _store_moment_tree,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
-    _tree_stochastic_cast,
     _tree_update_moment_f32,
     _zeros_like_tree,
 )
@@ -342,12 +341,12 @@ def scale_by_muon(
         else:
             new_magma_s = state.magma_s
 
-        if canonical_mu_dtype == jnp.bfloat16:
-            mu_stored = _tree_stochastic_cast(
-                mu, canonical_mu_dtype, cast(jax.Array, sr_key)
-            )
-        else:
-            mu_stored = _cast_state_tree(mu, canonical_mu_dtype)
+        mu_stored, _ = _store_moment_tree(
+            mu,
+            canonical_mu_dtype,
+            next_key,
+            sr_key=sr_key,
+        )
 
         return muon_updates, MuonState(
             count=cast(jax.Array, count_inc),

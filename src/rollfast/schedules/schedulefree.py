@@ -110,6 +110,55 @@ def _call_learning_rate(
     return learning_rate(count)
 
 
+def _make_wsd_schedule_pair(
+    *,
+    learning_rate: float,
+    adam_learning_rate: Optional[float],
+    total_steps: int,
+    warmup_fraction: float,
+    decay_fraction: float,
+):
+    matrix_schedule = wsd_schedule(
+        peak_lr=learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+    if adam_learning_rate is None or adam_learning_rate == learning_rate:
+        return matrix_schedule, matrix_schedule
+    return matrix_schedule, wsd_schedule(
+        peak_lr=adam_learning_rate,
+        total_steps=total_steps,
+        warmup_fraction=warmup_fraction,
+        decay_fraction=decay_fraction,
+    )
+
+
+def _make_dual_schedule_fn(
+    partition: Any,
+    matrix_label: str,
+    matrix_schedule: base.Schedule,
+    adam_schedule: base.Schedule,
+) -> Callable[[jax.typing.ArrayLike, Optional[base.Params]], Any]:
+    def dual_schedule_fn(count, params):
+        if params is None:
+            raise ValueError("dual schedule functions require `params`.")
+        labels = partition.labels(params)
+        matrix_lr = matrix_schedule(count)
+        adam_lr = adam_schedule(count)
+        return jax.tree.map(
+            lambda label: (
+                None
+                if label is None
+                else (matrix_lr if label == matrix_label else adam_lr)
+            ),
+            labels,
+            is_leaf=lambda x: x is None,
+        )
+
+    return dual_schedule_fn
+
+
 def schedule_free(
     base_optimizer: base.GradientTransformation,
     learning_rate: ScheduleFreeLearningRate,
@@ -635,9 +684,6 @@ def schedule_free_prism(
     polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free PRISM Optimizer with Partitioning, optionally using SF+."""
-    if adam_learning_rate is None:
-        adam_learning_rate = learning_rate
-
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -648,22 +694,13 @@ def schedule_free_prism(
     inner_weight_decay = 0.0 if use_adamc_enabled else weight_decay
     inner_weight_decay_mask = None if use_adamc_enabled else weight_decay_mask
 
-    prism_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    prism_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-
-    if adam_learning_rate == learning_rate:
-        adam_schedule = prism_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
 
@@ -730,19 +767,14 @@ def schedule_free_prism(
         param_labels=partition.labels,
     )
 
-    def dual_schedule_fn(count, params):
-        labels = partition.labels(params)
-        p_lr = prism_schedule(count)
-        a_lr = adam_schedule(count)
-        return jax.tree.map(
-            lambda l: None if l is None else (p_lr if l == "prism" else a_lr),
-            labels,
-            is_leaf=lambda x: x is None,
-        )
-
     return schedule_free(
         base_optimizer=base_opt,
-        learning_rate=dual_schedule_fn,
+        learning_rate=_make_dual_schedule_fn(
+            partition,
+            "prism",
+            prism_schedule,
+            adam_schedule,
+        ),
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
@@ -1106,9 +1138,6 @@ def schedule_free_aurora(
     polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free Aurora with Adam fallback for non-matrix leaves, optionally using SF+."""
-    if adam_learning_rate is None:
-        adam_learning_rate = learning_rate
-
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -1119,21 +1148,13 @@ def schedule_free_aurora(
     inner_weight_decay = 0.0 if use_adamc_enabled else weight_decay
     inner_weight_decay_mask = None if use_adamc_enabled else weight_decay_mask
 
-    aurora_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    aurora_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-    if adam_learning_rate == learning_rate:
-        adam_schedule = aurora_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     key_aurora, key_adam = jax.random.split(key, 2)
 
@@ -1224,21 +1245,14 @@ def schedule_free_aurora(
         param_labels=partition.labels,
     )
 
-    def dual_schedule_fn(count, params):
-        labels = partition.labels(params)
-        a_lr = aurora_schedule(count)
-        adam_lr = adam_schedule(count)
-        return jax.tree.map(
-            lambda label: (
-                None if label is None else (a_lr if label == "aurora" else adam_lr)
-            ),
-            labels,
-            is_leaf=lambda x: x is None,
-        )
-
     return schedule_free(
         base_optimizer=base_opt,
-        learning_rate=dual_schedule_fn,
+        learning_rate=_make_dual_schedule_fn(
+            partition,
+            "aurora",
+            aurora_schedule,
+            adam_schedule,
+        ),
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,

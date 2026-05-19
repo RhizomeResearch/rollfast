@@ -16,7 +16,6 @@ intended geometry. As with Muon, learning rates for matrix leaves often need
 their own tuning; the Adam fallback can use ``adam_learning_rate`` separately.
 """
 
-import math
 from typing import Any, Callable, NamedTuple, cast
 
 import jax
@@ -30,18 +29,17 @@ from rollfast.optim.dimension_numbers import (
     _compute_matrix_reshape,
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
-    _normalize_axes,
     _resolve_update_dimension_numbers,
     _validate_matrix_operand,
 )
+from rollfast.optim.muon import scale_by_muon_shape
 from rollfast.utils import (
     MomentumAccumulator,
-    _cast_state_tree,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
+    _store_moment_tree,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
-    _tree_stochastic_cast,
     _tree_update_moment_f32,
     _zeros_like_tree,
 )
@@ -81,28 +79,6 @@ def _rmnp_leaf_update(
             f"RMNP optimized parameters must have rank >= 2, got {update.ndim=}."
         )
     return _row_normalize_matrix(update, dim_nums, eps)
-
-
-def _shape_scale_leaf(
-    update: Any,
-    dim_nums: MatrixDimensionNumbers | None,
-    consistent_rms: jax.typing.ArrayLike | None,
-) -> Any:
-    if _is_aux_leaf(update) or dim_nums is None:
-        return update
-
-    reduction_axes, output_axes = _normalize_axes(update, dim_nums)
-    fan_in = math.prod(update.shape[axis] for axis in reduction_axes)
-    fan_out = math.prod(update.shape[axis] for axis in output_axes)
-
-    if consistent_rms is None:
-        scale = jnp.sqrt(jnp.maximum(1.0, fan_out / fan_in))
-    else:
-        scale = (
-            jnp.sqrt(jnp.asarray(max(fan_in, fan_out), dtype=jnp.float32))
-            * consistent_rms
-        )
-    return update * scale
 
 
 def _resolve_dimension_numbers(
@@ -218,12 +194,7 @@ def scale_by_rmnp(
                 is_leaf=_is_aux_leaf,
             )
 
-        if canonical_mu_dtype == jnp.bfloat16:
-            key, sr_key = jax.random.split(cast(jax.Array, state.key), 2)
-            mu = _tree_stochastic_cast(mu, canonical_mu_dtype, sr_key)
-        else:
-            key = state.key
-            mu = _cast_state_tree(mu, canonical_mu_dtype)
+        mu, key = _store_moment_tree(mu, canonical_mu_dtype, state.key)
 
         return rmnp_updates, ScaleByRmnpState(
             count=cast(jax.Array, count_inc), mu=mu, key=key
@@ -237,23 +208,10 @@ def scale_by_rmnp_shape(
     consistent_rms: jax.typing.ArrayLike | None = None,
 ) -> base.GradientTransformation:
     """Scale RMNP matrix directions using Muon-style shape factors."""
-
-    def update_fn(updates, state, params=None):
-        dim_nums = _resolve_dimension_numbers(
-            weight_dimension_numbers,
-            params=params,
-            updates=updates,
-            transform_name="scale_by_rmnp_shape",
-        )
-        scaled_updates = jax.tree.map(
-            lambda u, d: _shape_scale_leaf(u, d, consistent_rms),
-            updates,
-            dim_nums,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-        return scaled_updates, state
-
-    return base.GradientTransformation(base.init_empty_state, update_fn)
+    return scale_by_muon_shape(
+        weight_dimension_numbers=weight_dimension_numbers,
+        consistent_rms=consistent_rms,
+    )
 
 
 def rmnp(

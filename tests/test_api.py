@@ -24,3 +24,22 @@ def test_root_and_schedule_exports_public_config_helpers():
     assert schedules.GradClipMode is GradClipMode
     assert schedules.precond_update_prob_schedule is precond_update_prob_schedule
     assert schedules.WeightingMode is WeightingMode
+
+
+def test_root_all_matches_public_exports():
+    expected_exports = {
+        "adamw",
+        "apply_updates",
+        "aurora",
+        "kron",
+        "muon",
+        "pion",
+        "prism",
+        "rmnp",
+        "schedule_free",
+        "soda",
+        "trasmuon",
+    }
+    assert expected_exports <= set(rollfast.__all__)
+    for name in rollfast.__all__:
+        assert hasattr(rollfast, name)

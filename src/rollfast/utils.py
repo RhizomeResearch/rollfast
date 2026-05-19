@@ -302,6 +302,31 @@ def _tree_stochastic_cast(
     return jax.tree.unflatten(treedef, rounded_leaves)
 
 
+def _store_moment_tree(
+    tree: base.Params,
+    dtype: jax.typing.DTypeLike,
+    key: jax.Array | None,
+    *,
+    sr_key: jax.Array | None = None,
+) -> tuple[base.Params, jax.Array | None]:
+    """Store a moment tree, using stochastic rounding for BF16 state."""
+    target_dtype = jnp.dtype(dtype)
+    if target_dtype == jnp.dtype(jnp.bfloat16):
+        if sr_key is None:
+            key, sr_key = jax.random.split(cast(jax.Array, key), 2)
+        return _tree_stochastic_cast(tree, target_dtype, cast(jax.Array, sr_key)), key
+    return _cast_state_tree(tree, target_dtype), key
+
+
+def _unzip_leaf_tuple_tree(tree: base.Params, width: int) -> tuple[base.Params, ...]:
+    """Split a PyTree whose leaves are fixed-width tuples into tuple components."""
+    is_tuple_leaf = lambda x: isinstance(x, tuple) and len(x) == width
+    return tuple(
+        jax.tree.map(lambda x, i=i: x[i], tree, is_leaf=is_tuple_leaf)
+        for i in range(width)
+    )
+
+
 def _tree_update_moment_f32(
     updates: base.Updates,
     moments: base.Updates,

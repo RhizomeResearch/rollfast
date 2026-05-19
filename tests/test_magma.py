@@ -53,6 +53,20 @@ def test_magma_complex_leaves_use_real_hermitian_alignment():
     assert jnp.all(jnp.isfinite(next_s["w"]))
 
 
+def test_magma_rejects_mismatched_input_trees():
+    with pytest.raises(ValueError, match="first_moments.*raw_gradients"):
+        apply_magma_internal(
+            raw_gradients={"w": jnp.ones((2,), dtype=jnp.float32)},
+            first_moments={
+                "w": jnp.ones((2,), dtype=jnp.float32),
+                "b": jnp.ones((2,), dtype=jnp.float32),
+            },
+            base_updates={"w": jnp.ones((2,), dtype=jnp.float32)},
+            magma_s_prev={"w": jnp.array(0.5, dtype=jnp.float32)},
+            key=jnp.array([0, 0], dtype=jnp.uint32),
+        )
+
+
 @pytest.mark.parametrize("make_tx", [scale_by_aurora, scale_by_prism, scale_by_kron])
 def test_magma_enabled_transforms_validate_probability(make_tx):
     with pytest.raises(ValueError, match="magma_p"):

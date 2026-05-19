@@ -35,11 +35,11 @@ from rollfast.optim.orthogonalization import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
-    _cast_state_tree,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
-    _tree_stochastic_cast,
+    _store_moment_tree,
     _tree_update_moment_f32,
+    _unzip_leaf_tuple_tree,
     _validate_nonnegative_static_scalar,
     _validate_positive_static_scalar,
     _zeros_like_tree,
@@ -368,19 +368,11 @@ def scale_by_trasmuon(
             state.clip_last,
             is_leaf=_is_dimension_numbers_leaf,
         )
-        result_is_leaf = lambda x: isinstance(x, tuple) and len(x) == 5
-        tras_updates = jax.tree.map(lambda x: x[0], tras_result, is_leaf=result_is_leaf)
-        v_row = jax.tree.map(lambda x: x[1], tras_result, is_leaf=result_is_leaf)
-        energy_ref = jax.tree.map(lambda x: x[2], tras_result, is_leaf=result_is_leaf)
-        clip_ema = jax.tree.map(lambda x: x[3], tras_result, is_leaf=result_is_leaf)
-        clip_last = jax.tree.map(lambda x: x[4], tras_result, is_leaf=result_is_leaf)
+        tras_updates, v_row, energy_ref, clip_ema, clip_last = _unzip_leaf_tuple_tree(
+            tras_result, 5
+        )
 
-        if canonical_mu_dtype == jnp.bfloat16:
-            key, sr_key = jax.random.split(cast(jax.Array, state.key), 2)
-            mu = _tree_stochastic_cast(mu, canonical_mu_dtype, sr_key)
-        else:
-            key = state.key
-            mu = _cast_state_tree(mu, canonical_mu_dtype)
+        mu, key = _store_moment_tree(mu, canonical_mu_dtype, state.key)
 
         return tras_updates, ScaleByTrasMuonState(
             count=cast(jax.Array, count_inc),

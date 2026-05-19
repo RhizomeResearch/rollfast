@@ -57,6 +57,10 @@ def _is_array_like_leaf(x: Any) -> bool:
     return hasattr(x, "shape") and hasattr(x, "dtype")
 
 
+def _has_matrix_spec(dim_nums: Any) -> bool:
+    return dim_nums is not None and not isinstance(dim_nums, _masking.MaskedNode)
+
+
 def _validate_matrix_operand(
     x: Any,
     dim_nums: MatrixDimensionNumbers | None,
@@ -154,11 +158,7 @@ def _make_matrix_labels(
         lambda d, p: (
             None
             if p is None
-            else (
-                matrix_label
-                if d is not None and not isinstance(d, _masking.MaskedNode)
-                else fallback_label
-            )
+            else (matrix_label if _has_matrix_spec(d) else fallback_label)
         ),
         dim_nums_tree,
         params,
@@ -175,7 +175,7 @@ def _make_dimension_numbers_mask(
         lambda d, p: (
             False
             if p is None or isinstance(p, _masking.MaskedNode)
-            else d is not None and not isinstance(d, _masking.MaskedNode)
+            else _has_matrix_spec(d)
         ),
         dim_nums_tree,
         params,
@@ -279,16 +279,23 @@ def _compute_matrix_reshape(
         )
 
     reduction_axes, output_axes = _normalize_axes(x, dim_nums)
-    if set(reduction_axes) & set(output_axes):
+    reduction_set = set(reduction_axes)
+    output_set = set(output_axes)
+    if reduction_set & output_set:
         raise ValueError(
             f"Reduction and output axes must be disjoint. Got {reduction_axes} and {output_axes}."
         )
 
     batch_axes = tuple(
-        sorted(set(range(x.ndim)) - set(reduction_axes) - set(output_axes))
+        axis
+        for axis in range(x.ndim)
+        if axis not in reduction_set and axis not in output_set
     )
     transpose = batch_axes + reduction_axes + output_axes
-    inv_transpose = tuple(sorted(range(x.ndim), key=lambda i: transpose[i]))
+    inv_transpose_list = [0] * x.ndim
+    for output_axis, input_axis in enumerate(transpose):
+        inv_transpose_list[input_axis] = output_axis
+    inv_transpose = tuple(inv_transpose_list)
 
     axes2shape = lambda axes: tuple(x.shape[ax] for ax in axes)
 

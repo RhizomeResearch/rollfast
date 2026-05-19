@@ -817,6 +817,21 @@ and `retraction_steps` for its balanced-Stiefel solve.
 | `max_skew_triangular`       | `1.0`   | Threshold for diagonal approximation. If a dimension's aspect ratio squared exceeds this relative to total numel, it is treated as diagonal to save memory. |
 | `preconditioner_init_scale` | `None`  | Initial scale for $Q$. If `None`, it is estimated on the first step using gradient statistics.                                                              |
 
+#### Preconditioner Modes
+
+The geometry of the preconditioner update $dQ$ is controlled via
+`preconditioner_mode`.
+
+| Mode        | Formula                             | Description                                                                                                                       |
+| :---------- | :---------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
+| `Q0.5EQ1.5` | $dQ = Q^{0.5} \mathcal{E} Q^{1.5}$ | **Recommended**. Uses an online orthogonal Procrustes solver to keep $Q$ approximately SPD. Numerically stable for low precision. |
+| `EQ`        | $dQ = \mathcal{E} Q$               | Triangular preconditioner update. Requires triangular solves. Only mode compatible with triangular $Q$.                           |
+| `QUAD`      | Quadratic Form                      | Ensures $Q$ remains symmetric positive definite via quadratic form updates.                                                       |
+| `NS`        | Newton-Schulz                       | Iteratively projects $Q$ onto the SPD manifold using Newton-Schulz iterations. Exact but more expensive.                          |
+| `EXP`       | Matrix Exponential                  | Geodesic update on the SPD manifold. Uses matrix exponential.                                                                     |
+| `TAYLOR2`   | Taylor Expansion                    | Second-order Taylor approximation of the matrix exponential update.                                                               |
+| `HYPER`     | Hyperbolic                          | Multiplicative hyperbolic update.                                                                                                 |
+
 ### Magma Specifics
 
 Magma acts as an intervention layer for optimizer updates that expose
@@ -843,31 +858,14 @@ and prevent vanishing progress.
 | `magma_tau` | `2.0`   | Positive temperature parameter for the alignment sigmoid $\sigma(\text{cossim} / \tau)$. At default `2.0`, non-masked steps scale updates by ~0.5, which combined with 50% Bernoulli masking yields an expected magnitude attenuation of ~0.25x.                    |
 | `key`       | `jax.random.PRNGKey(42)` | PRNG key used to initialize Magma's stateful Bernoulli sampling stream. Pass an explicit JAX key when composing multiple Magma-enabled branches and split keys per branch when deterministic independence matters. |
 
-#### Preconditioner Modes
-
-The geometry of the preconditioner update $dQ$ is controlled via
-`preconditioner_mode`.
-
-| Mode        | Formula                             | Description                                                                                                                       |
-| :---------- | :---------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
-| `Q0.5EQ1.5` | $dQ = Q^{0.5} \mathcal{E} Q^{1.5}$ | **Recommended**. Uses an online orthogonal Procrustes solver to keep $Q$ approximately SPD. Numerically stable for low precision. |
-| `EQ`        | $dQ = \mathcal{E} Q$               | Triangular preconditioner update. Requires triangular solves. Only mode compatible with triangular $Q$.                           |
-| `QUAD`      | Quadratic Form                      | Ensures $Q$ remains symmetric positive definite via quadratic form updates.                                                       |
-| `NS`        | Newton-Schulz                       | Iteratively projects $Q$ onto the SPD manifold using Newton-Schulz iterations. Exact but more expensive.                          |
-| `EXP`       | Matrix Exponential                  | Geodesic update on the SPD manifold. Uses matrix exponential.                                                                     |
-| `TAYLOR2`   | Taylor Expansion                    | Second-order Taylor approximation of the matrix exponential update.                                                               |
-| `HYPER`     | Hyperbolic                          | Multiplicative hyperbolic update.                                                                                                 |
-
 ______________________________________________________________________
 
 ## Development Validation
 
-Before release, run the focused unit suite, the slower optional integration
-checks, and the repository validation checks:
+Before release, run the same validation surfaces used by CI:
 
 ```bash
-uv run pytest -q -m "not slow and not integration"
-uv run pytest -q -m "slow or integration"
+uv run ruff format --check src tests
 uv run ruff check src tests
 uv run ty check
 uv run pytest -q
