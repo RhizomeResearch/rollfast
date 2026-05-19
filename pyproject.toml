@@ -28,7 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "jax>=0.6.2",
-    "optax>=0.2.7",
+    "optax>=0.2.8",
 ]
 
 [project.urls]

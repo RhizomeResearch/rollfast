@@ -40,6 +40,46 @@ def test_scale_by_pion_schedule_uses_current_count_before_increment():
     assert not jnp.allclose(second_updates["w"], jnp.zeros_like(params["w"]))
 
 
+def test_scale_by_pion_heavy_ball_momentum_accumulator():
+    params = {"w": jnp.eye(4, dtype=jnp.float32)}
+    grad = jnp.arange(16, dtype=jnp.float32).reshape(4, 4) / 10.0
+    grads = {"w": grad}
+    tx = scale_by_pion(
+        learning_rate=0.01,
+        b1=0.5,
+        b2=0.0,
+        momentum_accumulator="heavy_ball",
+    )
+    _, state = tx.update(grads, tx.init(params), params)
+    state = cast(ScaleByPionState, state)
+    m_in = cast(dict[str, jax.Array], state.m_in)
+    expected = grad - grad.T
+
+    assert jnp.allclose(m_in["w"][0], expected)
+
+
+def test_scale_by_pion_bf16_state():
+    params = {"w": jnp.eye(4, dtype=jnp.float32)}
+    grads = {"w": jnp.arange(16, dtype=jnp.float32).reshape(4, 4) / 10.0}
+    tx = scale_by_pion(
+        learning_rate=0.01,
+        b1=0.0,
+        b2=0.0,
+        mu_dtype=jnp.bfloat16,
+    )
+    _, state = tx.update(grads, tx.init(params), params)
+    state = cast(ScaleByPionState, state)
+    m_in = cast(dict[str, jax.Array], state.m_in)
+    v_in = cast(dict[str, jax.Array], state.v_in)
+    m_out = cast(dict[str, jax.Array], state.m_out)
+    v_out = cast(dict[str, jax.Array], state.v_out)
+
+    assert m_in["w"].dtype == jnp.bfloat16
+    assert v_in["w"].dtype == jnp.bfloat16
+    assert m_out["w"].dtype == jnp.bfloat16
+    assert v_out["w"].dtype == jnp.bfloat16
+
+
 def test_pion_partitions_vectors_to_adam():
     params = {
         "w": jnp.eye(4, dtype=jnp.float32),

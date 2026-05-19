@@ -1,12 +1,26 @@
+"""PRISM matrix optimizers.
+
+PRISM routes rank-2 leaves to the matrix branch by default and sends other
+leaves to AdamW. ``mode="original"`` uses the shared Muon-family
+Newton-Schulz coefficient plumbing; ``mode="bidirectional"`` keeps its separate
+inverse-root coefficients.
+"""
+
 from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
-import optax
-from optax._src import base, combine, numerics, transform, utils
+from optax._src import base, combine, transform, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
+from rollfast.optim._matrix_runtime import (
+    apply_matrix_post_shape_lookahead,
+    finish_matrix_runtime_step,
+    init_matrix_magma_state,
+    init_matrix_momentum_state,
+    prepare_matrix_runtime_step,
+)
 from rollfast.optim.dimension_numbers import (
     DimNumsTree,
     MatrixDimensionNumbers,
@@ -15,16 +29,17 @@ from rollfast.optim.dimension_numbers import (
     _get_dimension_numbers,
     _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
-    _mask_dimension_numbers,
+    _make_matrix_partition_fns,
 )
-from rollfast.optim.magma import apply_magma_internal
-from rollfast.optim.orthogonalization import MUON_NS_COEFFS
+from rollfast.optim.orthogonalization import (
+    MUON_NS_COEFFS,
+    MuonNsCoeffs,
+    MuonPreconditioning,
+    quintic_newton_schulz,
+    resolve_ns_coeffs,
+)
 from rollfast.utils import (
-    _safe_bias_correction,
-    _tree_stochastic_cast,
-    _tree_update_moment_f32,
-    add_tiny,
-    dist_reduce,
+    MomentumAccumulator,
 )
 
 try:
@@ -119,79 +134,12 @@ def get_equinox_prism_spec(
     )
 
 
-def _make_param_labels(dim_nums_tree: base.Params) -> base.Params:
-    """Converts a dimension numbers tree into optimization labels.
-
-    Args:
-        dim_nums_tree: A PyTree of `PrismDimensionNumbers` or `None`.
-
-    Returns:
-        A PyTree of strings, where leaves are labeled 'prism' if a dimension spec
-        exists, and 'adam' otherwise.
-    """
-    return jax.tree.map(
-        lambda d: "prism" if d is not None else "adam",
-        dim_nums_tree,
-        is_leaf=_is_prism_leaf,
-    )
-
-
-def _prism_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
-    """Computes the global L2 norm of gradients across all parameters and devices.
-
-    Args:
-        grads: The gradients PyTree.
-        axis_name: The axis name for distributed reduction.
-
-    Returns:
-        A scalar float32 array representing the global L2 norm.
-    """
-    leaves = jax.tree.leaves(grads)
-    if not leaves:
-        return jnp.array(0.0, dtype=jnp.float32)
-    local_sq = sum(
-        (jnp.sum(numerics.abs_sq(x.astype(jnp.float32))) for x in leaves),
-        start=jnp.array(0.0, dtype=jnp.float32),
-    )
-    total_sq = dist_reduce(local_sq, axis_name, "sum")
-    return jnp.sqrt(total_sq)
-
-
-def _clip_per_tensor_rms(
-    u: jax.Array, max_rms: float = 1.0, max_val: float = 10.0
-) -> jax.Array:
-    """Clips a tensor based on its Root Mean Square (RMS) and absolute value.
-
-    This provides a dual-layer stability mechanism:
-    1. Scales the tensor down if its RMS exceeds `max_rms`.
-    2. Hard-clips values to the range `[-max_val, max_val]`.
-
-    Args:
-        u: The input tensor update.
-        max_rms: The maximum allowed Root Mean Square value.
-        max_val: The maximum absolute value for element-wise clipping.
-
-    Returns:
-        The clipped tensor.
-    """
-    rms = jnp.sqrt(jnp.mean(numerics.abs_sq(u)))
-    scale_factor = jnp.minimum(1.0, max_rms / (rms + 1e-9))
-    u = u * scale_factor
-    return jnp.clip(u, -max_val, max_val)
-
-
-def _newton_schulz_iterator_muon(x: jax.Array, coeffs: jax.Array) -> jax.Array:
-    """Performs a single step of the Newton-Schulz iteration."""
-    a = x @ x.T.conj()
-    b = coeffs[1] * a + coeffs[2] * (a @ a)
-    return coeffs[0] * x + (b @ x)
-
-
 def _quintic_newton_schulz(
     x: jax.Array,
     iters: int = 5,
     eps: float = 1e-8,
-    ns_coeffs: tuple[float, float, float] = _DEFAULT_NS_COEFFS,
+    preconditioning: MuonPreconditioning = "frobenius",
+    ns_coeffs: jax.Array | None = None,
 ) -> jax.Array:
     """Applies quintic Newton-Schulz orthogonalization to approximate the polar factor.
 
@@ -208,32 +156,26 @@ def _quintic_newton_schulz(
     Returns:
         The orthogonalized matrix.
     """
-    x_f32 = x.astype(jnp.float32)
-
-    # Standardize to (rows, cols) where rows >= cols for efficiency
-    transposed = False
-    if x_f32.shape[-2] > x_f32.shape[-1]:
-        x_f32 = jnp.swapaxes(x_f32, -1, -2)
-        transposed = True
-
-    # Use vector norm on the last two dimensions to handle vmapped inputs safely
-    norm = jnp.linalg.norm(x_f32, axis=(-2, -1), keepdims=True)
-    x_f32 = x_f32 / (norm + eps)
-
-    coeffs = jnp.asarray(ns_coeffs, dtype=x_f32.dtype)
-
-    def body_fn(_, x_):
-        return _newton_schulz_iterator_muon(x_, coeffs)
-
-    x_f32 = jax.lax.fori_loop(0, iters, body_fn, x_f32, unroll=True)
-
-    if transposed:
-        x_f32 = jnp.swapaxes(x_f32, -1, -2)
-
-    return x_f32
+    if ns_coeffs is None:
+        ns_coeffs = resolve_ns_coeffs(_DEFAULT_NS_COEFFS, iters)
+    return quintic_newton_schulz(
+        x,
+        ns_coeffs,
+        ns_steps=iters,
+        preconditioning=preconditioning,
+        eps=eps,
+    )
 
 
-def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
+def _apply_prism_math(
+    g,
+    m_raw,
+    m_target,
+    gamma,
+    ns_iters,
+    ns_coeffs,
+    preconditioning: MuonPreconditioning,
+):
     """Core PRISM mathematical operation: Innovation -> Augmentation -> Orthogonalization.
 
     1. Computes Innovation: `D_t = G_t - M_raw`
@@ -258,7 +200,12 @@ def _apply_prism_math(g, m_raw, m_target, gamma, ns_iters):
     augmented_M = jnp.concatenate([m_target, gamma * D_t], axis=-2)
 
     # Orthogonalize
-    augmented_O = _quintic_newton_schulz(augmented_M, iters=ns_iters)
+    augmented_O = _quintic_newton_schulz(
+        augmented_M,
+        iters=ns_iters,
+        preconditioning=preconditioning,
+        ns_coeffs=ns_coeffs,
+    )
 
     # Slice top block (split along the row dimension, which is -2)
     return augmented_O[..., : m_raw.shape[-2], :]
@@ -452,9 +399,11 @@ def _prism_ortho_step(
     mu_raw: jax.Array,
     gamma: float,
     ns_iters: int,
+    ns_coeffs: jax.Array,
     mu_nest: Optional[jax.Array] = None,
     dim_nums: Optional[PrismDimensionNumbers] = None,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
@@ -480,11 +429,27 @@ def _prism_ortho_step(
     # Original Newton-Schulz on augmented matrix
     if mode == "original":
         if is_fast_2d:
-            return _apply_prism_math(updates, mu_raw, m_target_eff, gamma, ns_iters)
+            return _apply_prism_math(
+                updates,
+                mu_raw,
+                m_target_eff,
+                gamma,
+                ns_iters,
+                ns_coeffs,
+                preconditioning,
+            )
         reshape_fn, inverse_fn = _compute_prism_reshape(updates, dim_nums)
-        O_flat = jax.vmap(lambda g, m, t: _apply_prism_math(g, m, t, gamma, ns_iters))(
-            reshape_fn(updates), reshape_fn(mu_raw), reshape_fn(m_target_eff)
-        )
+        O_flat = jax.vmap(
+            lambda g, m, t: _apply_prism_math(
+                g,
+                m,
+                t,
+                gamma,
+                ns_iters,
+                ns_coeffs,
+                preconditioning,
+            )
+        )(reshape_fn(updates), reshape_fn(mu_raw), reshape_fn(m_target_eff))
         return inverse_fn(O_flat)
 
     # Bidirectional: Shampoo-style double-sided matmul-invroot
@@ -532,7 +497,9 @@ def scale_by_prism(
     b1: float = 0.95,
     gamma: float = 1.0,
     ns_iters: int = 5,
+    ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
@@ -543,6 +510,7 @@ def scale_by_prism(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -566,8 +534,14 @@ def scale_by_prism(
         gamma: Damping coefficient for the innovation term. Controls the "anisotropy"
             of the spectral shaping.
         ns_iters: Number of Newton-Schulz iterations for orthogonalization.
+        ns_coeffs: Newton-Schulz coefficient preset or coefficients for
+            ``mode='original'``. Supports ``"standard"``, ``"dion"``,
+            ``"polar_express"``, a single ``(a, b, c)`` tuple, or an ordered
+            per-step ``(n, 3)`` schedule.
         mode: Spectral shaping algorithm. 'original' uses Newton-Schulz on the
             augmented matrix. 'bidirectional' applies Shampoo-style bilateral shaping.
+        preconditioning: Newton-Schulz input preconditioning for ``mode='original'``.
+            Ignored by ``mode='bidirectional'``.
         inv_steps: Iteration count for the matmul-invroot polynomial (mode bidirectional).
         inv_eps: Regularization epsilon inside the iterative inverse root.
         inv_scale: Coefficient scaling factor (>1.0 for conservative convergence).
@@ -580,6 +554,8 @@ def scale_by_prism(
         shape_nesterov: If True, applies spectral shaping to the Nesterov-accelerated
             momentum. If False, shapes the raw momentum.
         bias_correction: Whether to apply bias correction to the momentum.
+        momentum_accumulator: ``"ema"`` for exponential moving average momentum,
+            or ``"heavy_ball"`` for heavy-ball accumulation.
         mu_dtype: Data type for the momentum accumulator.
         raw_global_grad_clip: Threshold for global gradient norm clipping *before*
             momentum update.
@@ -612,48 +588,20 @@ def scale_by_prism(
         via Anisotropic Spectral Shaping.
         URL: https://leloykun.github.io/ponder/shampoo-prism/
     """
-    if mu_dtype is None:
-        mu_dtype = jnp.float32
-    else:
-        mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    canonical_mu_dtype = cast(
+        jax.typing.DTypeLike,
+        jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
+    )
 
     def init_fn(params):
-        mu = optax.tree.zeros_like(params, dtype=mu_dtype)
-
-        if use_magma:
-
-            def _init_s(x):
-                if x is None:
-                    return None
-                if isinstance(x, _masking.MaskedNode):
-                    return _masking.MaskedNode()
-                return jnp.array(0.5, dtype=jnp.float32)
-
-            magma_s = jax.tree.map(
-                _init_s,
-                params,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
-        else:
-            magma_s = ()
-
         return ScaleByPrismState(
             count=jnp.zeros([], jnp.int32),
-            mu=mu,
-            magma_s=magma_s,
+            mu=init_matrix_momentum_state(params, canonical_mu_dtype),
+            magma_s=init_matrix_magma_state(params, use_magma),
             key=key,
         )
 
     def update_fn(updates, state, params=None):
-        raw_gradients = updates
-
-        if use_magma:
-            next_state_key, sr_key1, magma_key = jax.random.split(state.key, 3)
-        else:
-            next_state_key, sr_key1 = jax.random.split(state.key, 2)
-            magma_key = None
-
-        # Strict requirement for params if dimension numbers are used
         if params is None:
             if weight_dimension_numbers is not None:
                 raise ValueError(
@@ -663,112 +611,35 @@ def scale_by_prism(
         else:
             resolved_dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
-        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
-
-        # Pre-Preconditioning Clipping (Global)
-        is_spike = jnp.array(False, dtype=jnp.bool_)
-        if raw_global_grad_clip is not None:
-            g_norm = _prism_global_norm(updates, axis_name=axis_name)
-            is_spike = g_norm > raw_global_grad_clip
-
-            clip_scale = jnp.where(
-                g_norm > raw_global_grad_clip,
-                raw_global_grad_clip / add_tiny(g_norm),
-                1.0,
-            )
-            updates = jax.tree.map(lambda g: g * clip_scale, updates)
-
-        should_skip = jnp.logical_and(
-            is_spike, jnp.logical_not(permissive_spike_protection)
-        )
-
-        effective_updates = jax.lax.cond(
-            should_skip,
-            lambda u: jax.tree.map(
-                lambda x: jnp.zeros_like(x) if x is not None else None, u
-            ),
-            lambda u: u,
+        runtime = prepare_matrix_runtime_step(
             updates,
+            count=state.count,
+            mu=state.mu,
+            key=state.key,
+            beta=b1,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=canonical_mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            use_magma=use_magma,
+            axis_name=axis_name,
         )
 
-        # Enforce unified FP32 tracking to prevent accumulator vanishing
-        mu_f32 = jax.lax.cond(
-            should_skip,
-            lambda: jax.tree.map(lambda m: m.astype(jnp.float32), state.mu),
-            lambda: _tree_update_moment_f32(effective_updates, state.mu, b1),
-        )
-
-        # Nesterov / Bias Correction (Strictly FP32)
-        mu_nest_f32 = mu_f32
-        if nesterov:
-            if bias_correction:
-                mu_bc_factor = 1.0 - b1**count_inc
-                mu_bc_factor_next = 1.0 - b1 ** numerics.safe_increment(count_inc)
-
-                mu_bc_f32 = _safe_bias_correction(mu_f32, mu_bc_factor_next)
-
-                # Explicitly bypass MaskedNodes for safe partitioned bias correction
-                updates_f32 = jax.tree.map(
-                    lambda x: (
-                        x
-                        if isinstance(x, _masking.MaskedNode)
-                        else (x.astype(jnp.float32) if x is not None else None)
-                    ),
-                    effective_updates,
-                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-                )
-                g_bc_f32 = _safe_bias_correction(updates_f32, mu_bc_factor)
-
-                mu_nest_f32 = jax.tree.map(
-                    lambda m, g: (
-                        m
-                        if isinstance(m, _masking.MaskedNode)
-                        else (b1 * m + (1.0 - b1) * g if m is not None else None)
-                    ),
-                    mu_bc_f32,
-                    g_bc_f32,
-                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-                )
-            else:
-                mu_nest_f32 = jax.tree.map(
-                    lambda m, g: (
-                        m
-                        if isinstance(m, _masking.MaskedNode)
-                        else (
-                            b1 * m
-                            + (1.0 - b1)
-                            * (g.astype(jnp.float32) if g is not None else 0.0)
-                            if m is not None
-                            else None
-                        )
-                    ),
-                    mu_f32,
-                    effective_updates,
-                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-                )
-        elif bias_correction:
-            mu_bc_factor = 1.0 - b1**count_inc
-            mu_nest_f32 = _safe_bias_correction(mu_f32, mu_bc_factor)
-
-        if mu_dtype == jnp.bfloat16:
-            mu_cast = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key1)
-        else:
-            mu_cast = optax.tree.cast(mu_f32, mu_dtype)
-
-        if shape_nesterov:
-            target_for_ortho_f32 = mu_nest_f32  # FP32, not mu_nest_cast
-        else:
-            target_for_ortho_f32 = jax.tree.map(lambda _: None, effective_updates)
-
+        resolved_ns_coeffs = resolve_ns_coeffs(ns_coeffs, ns_iters)
         prism_out = jax.tree.map(
             lambda g, m, target, dims: _prism_ortho_step(
                 g,
                 m,
                 gamma,
                 ns_iters,
+                resolved_ns_coeffs,
                 mu_nest=target,
                 dim_nums=dims,
                 mode=mode,
+                preconditioning=preconditioning,
                 inv_steps=inv_steps,
                 inv_eps=inv_eps,
                 inv_scale=inv_scale,
@@ -777,101 +648,39 @@ def scale_by_prism(
                 gamma_r=gamma_r,
                 precision=precision,
             ),
-            effective_updates,
-            mu_f32,
-            target_for_ortho_f32,
+            runtime.effective_updates,
+            runtime.mu_f32,
+            runtime.target_for_shape,
             resolved_dim_nums,
             is_leaf=_is_prism_leaf,
         )
-
-        if nesterov and not shape_nesterov:
-            new_updates = jax.tree.map(
-                lambda o, g: b1 * o + (1 - b1) * g, prism_out, effective_updates
-            )
-        else:
-            new_updates = prism_out
-
-        if grad_clip_max_amps is not None:
-            max_rms, max_val = (
-                grad_clip_max_amps
-                if isinstance(grad_clip_max_amps, tuple)
-                else (grad_clip_max_amps, 10.0)
-            )
-            new_updates = jax.tree.map(
-                lambda u: _clip_per_tensor_rms(u, max_rms, max_val), new_updates
-            )
-
-        _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
-        if _may_have_wd and params is not None:
-            wd_step = (
-                cast(
-                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
-                    weight_decay,
-                )(state.count)
-                if callable(weight_decay)
-                else weight_decay
-            )
-            _wd_mask = None
-            if weight_decay_mask is not None:
-                _wd_mask = (
-                    weight_decay_mask(params)
-                    if callable(weight_decay_mask)
-                    else weight_decay_mask
-                )
-
-            def _add_wd(u, p, m=True):
-                if _is_prism_leaf(u) or _is_prism_leaf(p):
-                    return u
-                if isinstance(m, _masking.MaskedNode) or m is None or not m:
-                    return u
-                return u + wd_step * p.astype(u.dtype)
-
-            if _wd_mask is not None:
-                new_updates = jax.tree.map(
-                    _add_wd, new_updates, params, _wd_mask, is_leaf=_is_prism_leaf
-                )
-            else:
-                new_updates = jax.tree.map(
-                    lambda u, p: _add_wd(u, p),
-                    new_updates,
-                    params,
-                    is_leaf=_is_prism_leaf,
-                )
-
-        new_updates = jax.lax.cond(
-            should_skip,
-            lambda u: jax.tree.map(jnp.zeros_like, u),
-            lambda u: u,
-            new_updates,
+        prism_out = apply_matrix_post_shape_lookahead(
+            prism_out,
+            runtime,
+            beta=b1,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            momentum_accumulator=momentum_accumulator,
+        )
+        final_updates, new_magma_s = finish_matrix_runtime_step(
+            prism_out,
+            runtime,
+            params=params,
+            magma_s=state.magma_s,
+            use_magma=use_magma,
+            magma_p=magma_p,
+            magma_tau=magma_tau,
+            weight_decay=weight_decay,
+            weight_decay_mask=weight_decay_mask,
+            grad_clip_max_amps=grad_clip_max_amps,
+            axis_name=axis_name,
         )
 
-        if use_magma:
-            final_updates, new_magma_s = apply_magma_internal(
-                raw_gradients=raw_gradients,
-                first_moments=mu_f32,
-                base_updates=new_updates,
-                magma_s_prev=state.magma_s,
-                key=magma_key,
-                p=magma_p,
-                tau=magma_tau,
-                axis_name=axis_name,
-            )
-        else:
-            final_updates = new_updates
-            new_magma_s = state.magma_s
-
-        if use_magma:
-            new_magma_s = jax.tree.map(
-                lambda new_s, old_s: jnp.where(should_skip, old_s, new_s),
-                new_magma_s,
-                state.magma_s,
-            )
-
         return final_updates, ScaleByPrismState(
-            count=count_inc,
-            mu=mu_cast,
+            count=runtime.count,
+            mu=runtime.mu_cast,
             magma_s=new_magma_s,
-            key=next_state_key,
+            key=runtime.next_key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)
@@ -884,7 +693,9 @@ def prism(
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
     ns_iters: int = 5,
+    ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
@@ -895,6 +706,7 @@ def prism(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -911,7 +723,7 @@ def prism(
     adam_eps: float = 1e-8,
     prism_weight_dimension_numbers: WeightDimNumOrFn | None = None,
 ) -> base.GradientTransformation:
-    """PRISM Optimizer with automatic partitioning (Muon-Style).
+    """PRISM optimizer with automatic matrix/AdamW partitioning.
 
     This function creates a composite optimizer that partitions parameters into two groups:
     1. 'prism': Matrices (or tensors with explicit specs) optimized via Spectral Shaping.
@@ -924,9 +736,15 @@ def prism(
         weight_decay: Weight decay applied to both PRISM and Adam branches.
         weight_decay_mask: Optional mask for weight decay.
         ns_iters: Number of Newton-Schulz iterations for PRISM.
+        ns_coeffs: Newton-Schulz coefficient preset or coefficients for
+            ``mode='original'``. Supports ``"standard"``, ``"dion"``,
+            ``"polar_express"``, a single ``(a, b, c)`` tuple, or an ordered
+            per-step ``(n, 3)`` schedule.
         mode: Spectral shaping algorithm for the PRISM branch.
             'original': Newton-Schulz on augmented [M; γD] (default, uses `ns_iters`).
             'bidirectional': Shampoo-style bilateral shaping (uses `inv_steps`).
+        preconditioning: Newton-Schulz input preconditioning for original mode.
+            Ignored by bidirectional mode.
         inv_steps: Polynomial iterations for mode 'bidirectional'.
         inv_eps: Regularization for the iterative inverse root solver.
         inv_scale: Convergence scaling (>1.0). Default 1.001.
@@ -938,6 +756,8 @@ def prism(
         nesterov: Whether to use Nesterov acceleration in PRISM.
         shape_nesterov: Whether to shape the Nesterov momentum or raw momentum.
         bias_correction: Whether to enable bias correction in PRISM.
+        momentum_accumulator: ``"ema"`` for exponential moving average momentum,
+            or ``"heavy_ball"`` for heavy-ball accumulation.
         grad_clip_max_amps: Post-shaping clipping configuration (RMS, Abs).
         raw_global_grad_clip: Global gradient norm clipping threshold.
         permissive_spike_protection: Behavior when global clip is triggered (Clip vs Skip).
@@ -948,7 +768,7 @@ def prism(
             equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
             50% of steps are masked. This yields an expected magnitude attenuation
             of ~0.25x. You may need to scale the global learning rate by ~4x to
-            maintain the original update volume.
+            maintain the undamped update volume.
         magma_p: Survival probability for the block-wise Bernoulli masking.
             Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
@@ -981,31 +801,16 @@ def prism(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    # Helper: Resolve specs from params
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(prism_weight_dimension_numbers, params)
-
-    # Label generation
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_prism_leaf,
-        )
-
-    # Spec Masking for the Prism chain
-    def prism_weight_dim_nums_fn(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return _mask_dimension_numbers(dim_nums)
+    partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
 
     prism_components = [
         scale_by_prism(
             b1=b1,
             gamma=gamma,
             ns_iters=ns_iters,
+            ns_coeffs=ns_coeffs,
             mode=mode,
+            preconditioning=preconditioning,
             inv_steps=inv_steps,
             inv_eps=inv_eps,
             inv_scale=inv_scale,
@@ -1016,11 +821,12 @@ def prism(
             nesterov=nesterov,
             shape_nesterov=shape_nesterov,
             bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
             mu_dtype=mu_dtype,
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=prism_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=use_magma,
             magma_p=magma_p,
             magma_tau=magma_tau,
@@ -1059,5 +865,5 @@ def prism(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )

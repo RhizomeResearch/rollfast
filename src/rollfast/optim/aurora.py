@@ -7,6 +7,9 @@ The core transforms return positive, unscaled gradient-like updates. The public
 `aurora` and `riemannian_aurora` helpers add decoupled weight decay and learning
 rate scaling in the same style as `rollfast.optim.adam.adamw` and
 `rollfast.optim.prism.prism`.
+
+Aurora intentionally does not use Muon/PRISM ``ns_coeffs``. Its polar update
+keeps the fixed simple-quintic reference path from the Aurora release.
 """
 
 from __future__ import annotations
@@ -15,11 +18,17 @@ from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
-import optax
-from optax._src import base, combine, numerics, transform, utils
+from optax._src import base, combine, transform, utils
 from optax.transforms import _masking
 
 from rollfast.optim.adam import adamw
+from rollfast.optim._matrix_runtime import (
+    apply_matrix_post_shape_lookahead,
+    finish_matrix_runtime_step,
+    init_matrix_magma_state,
+    init_matrix_momentum_state,
+    prepare_matrix_runtime_step,
+)
 from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
@@ -27,15 +36,10 @@ from rollfast.optim.dimension_numbers import (
     _get_dimension_numbers,
     _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
-    _mask_dimension_numbers,
+    _make_matrix_partition_fns,
 )
-from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
-    _safe_bias_correction,
-    _tree_stochastic_cast,
-    _tree_update_moment_f32,
-    add_tiny,
-    dist_reduce,
+    MomentumAccumulator,
 )
 
 try:
@@ -152,59 +156,6 @@ def _is_aux_leaf(x: Any) -> bool:
 
 def _is_dim_leaf(x: Any) -> bool:
     return _is_dimension_numbers_leaf(x)
-
-
-def _is_array_like(x: Any) -> bool:
-    return hasattr(x, "dtype") and hasattr(x, "shape")
-
-
-def _tree_cast_f32(tree: Any) -> Any:
-    return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else x.astype(jnp.float32),
-        tree,
-        is_leaf=_is_aux_leaf,
-    )
-
-
-def _zero_like_tree(tree: Any) -> Any:
-    return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else jnp.zeros_like(x),
-        tree,
-        is_leaf=_is_aux_leaf,
-    )
-
-
-def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
-    return jax.tree.map(
-        lambda x, y: x if _is_aux_leaf(x) else jnp.where(pred, x, y),
-        a,
-        b,
-        is_leaf=_is_aux_leaf,
-    )
-
-
-def _tree_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
-    """Global L2 norm over a PyTree, robust to MaskedNode/None leaves."""
-    leaves = jax.tree.leaves(grads, is_leaf=_is_aux_leaf)
-    sq_terms = [
-        jnp.sum(numerics.abs_sq(x.astype(jnp.float32)))
-        for x in leaves
-        if not _is_aux_leaf(x)
-    ]
-    if not sq_terms:
-        local_sq = jnp.array(0.0, dtype=jnp.float32)
-    else:
-        local_sq = sum(sq_terms, start=jnp.array(0.0, dtype=jnp.float32))
-    total_sq = dist_reduce(local_sq, axis_name, "sum")
-    return jnp.sqrt(total_sq)
-
-
-def _clip_per_tensor_rms(
-    u: jax.Array, max_rms: float = 1.0, max_val: float = 10.0
-) -> jax.Array:
-    rms = jnp.sqrt(jnp.mean(numerics.abs_sq(u)))
-    scale_factor = jnp.minimum(1.0, max_rms / (rms + 1e-9))
-    return jnp.clip(u * scale_factor, -max_val, max_val)
 
 
 def _guard_nonfinite_leaf(u: jax.Array) -> jax.Array:
@@ -535,6 +486,7 @@ def _scale_by_aurora_impl(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -566,10 +518,10 @@ def _scale_by_aurora_impl(
     if eps <= 0.0:
         raise ValueError(f"eps must be positive, got {eps}")
 
-    if mu_dtype is None:
-        mu_dtype = jnp.float32
-    else:
-        mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    canonical_mu_dtype = cast(
+        jax.typing.DTypeLike,
+        jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
+    )
     polar_compute_dtype = cast(
         jax.typing.DTypeLike, utils.canonicalize_dtype(polar_compute_dtype)
     )
@@ -578,37 +530,14 @@ def _scale_by_aurora_impl(
     )
 
     def init_fn(params):
-        mu = optax.tree.zeros_like(params, dtype=mu_dtype)
-
-        if use_magma:
-
-            def _init_s(x):
-                if x is None:
-                    return None
-                if isinstance(x, _masking.MaskedNode):
-                    return _masking.MaskedNode()
-                return jnp.array(0.5, dtype=jnp.float32)
-
-            magma_s = jax.tree.map(_init_s, params, is_leaf=_is_aux_leaf)
-        else:
-            magma_s = ()
-
         return ScaleByAuroraState(
             count=jnp.zeros([], jnp.int32),
-            mu=mu,
-            magma_s=magma_s,
+            mu=init_matrix_momentum_state(params, canonical_mu_dtype),
+            magma_s=init_matrix_magma_state(params, use_magma),
             key=key,
         )
 
     def update_fn(updates, state, params=None):
-        raw_gradients = updates
-
-        if use_magma:
-            next_state_key, sr_key, magma_key = jax.random.split(state.key, 3)
-        else:
-            next_state_key, sr_key = jax.random.split(state.key, 2)
-            magma_key = None
-
         if params is None:
             if weight_dimension_numbers is not None:
                 raise ValueError(
@@ -618,74 +547,21 @@ def _scale_by_aurora_impl(
         else:
             resolved_dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
-        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
-
-        if raw_global_grad_clip is not None:
-            g_norm = _tree_global_norm(updates, axis_name=axis_name)
-            is_spike = g_norm > raw_global_grad_clip
-            clip_scale = jnp.where(
-                is_spike, raw_global_grad_clip / add_tiny(g_norm), 1.0
-            )
-        else:
-            is_spike = jnp.array(False, dtype=jnp.bool_)
-            clip_scale = jnp.array(1.0, dtype=jnp.float32)
-
-        should_skip = jnp.logical_and(
-            is_spike, jnp.logical_not(permissive_spike_protection)
-        )
-
-        effective_updates = jax.tree.map(
-            lambda g: (
-                g
-                if _is_aux_leaf(g)
-                else jnp.where(should_skip, jnp.zeros_like(g), g * clip_scale)
-            ),
+        runtime = prepare_matrix_runtime_step(
             updates,
-            is_leaf=_is_aux_leaf,
-        )
-
-        mu_candidate = _tree_update_moment_f32(effective_updates, state.mu, b1)
-        mu_old_f32 = _tree_cast_f32(state.mu)
-        mu_f32 = _tree_where_scalar(should_skip, mu_old_f32, mu_candidate)
-
-        mu_nest_f32 = mu_f32
-        if nesterov:
-            if bias_correction:
-                mu_bc_factor = 1.0 - b1**count_inc
-                mu_bc_factor_next = 1.0 - b1 ** numerics.safe_increment(count_inc)
-                mu_bc_f32 = _safe_bias_correction(mu_f32, mu_bc_factor_next)
-                updates_f32 = _tree_cast_f32(effective_updates)
-                g_bc_f32 = _safe_bias_correction(updates_f32, mu_bc_factor)
-                mu_nest_f32 = jax.tree.map(
-                    lambda m, g: m if _is_aux_leaf(m) else b1 * m + (1.0 - b1) * g,
-                    mu_bc_f32,
-                    g_bc_f32,
-                    is_leaf=_is_aux_leaf,
-                )
-            else:
-                mu_nest_f32 = jax.tree.map(
-                    lambda m, g: (
-                        m
-                        if _is_aux_leaf(m)
-                        else b1 * m + (1.0 - b1) * g.astype(jnp.float32)
-                    ),
-                    mu_f32,
-                    effective_updates,
-                    is_leaf=_is_aux_leaf,
-                )
-        elif bias_correction:
-            mu_bc_factor = 1.0 - b1**count_inc
-            mu_nest_f32 = _safe_bias_correction(mu_f32, mu_bc_factor)
-
-        if mu_dtype == jnp.bfloat16:
-            mu_cast = _tree_stochastic_cast(mu_f32, mu_dtype, sr_key)
-        else:
-            mu_cast = optax.tree.cast(mu_f32, mu_dtype)
-
-        target_for_shape = (
-            mu_nest_f32
-            if shape_nesterov
-            else jax.tree.map(lambda _: None, effective_updates, is_leaf=_is_aux_leaf)
+            count=state.count,
+            mu=state.mu,
+            key=state.key,
+            beta=b1,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
+            mu_dtype=canonical_mu_dtype,
+            raw_global_grad_clip=raw_global_grad_clip,
+            permissive_spike_protection=permissive_spike_protection,
+            use_magma=use_magma,
+            axis_name=axis_name,
         )
 
         aurora_out = jax.tree.map(
@@ -707,123 +583,40 @@ def _scale_by_aurora_impl(
                 polar_output_dtype=polar_output_dtype,
                 precision=precision,
             ),
-            effective_updates,
-            mu_f32,
-            target_for_shape,
+            runtime.effective_updates,
+            runtime.mu_f32,
+            runtime.target_for_shape,
             resolved_dim_nums,
             is_leaf=_is_dim_leaf,
         )
-
-        if nesterov and not shape_nesterov:
-            new_updates = jax.tree.map(
-                lambda shaped, g: (
-                    shaped
-                    if _is_aux_leaf(shaped)
-                    else b1 * shaped + (1.0 - b1) * g.astype(jnp.float32)
-                ),
-                aurora_out,
-                effective_updates,
-                is_leaf=_is_aux_leaf,
-            )
-        else:
-            new_updates = aurora_out
-
-        if guard_nonfinite:
-            new_updates = jax.tree.map(
-                lambda u: u if _is_aux_leaf(u) else _guard_nonfinite_leaf(u),
-                new_updates,
-                is_leaf=_is_aux_leaf,
-            )
-
-        if grad_clip_max_amps is not None:
-            max_rms, max_val = (
-                grad_clip_max_amps
-                if isinstance(grad_clip_max_amps, tuple)
-                else (grad_clip_max_amps, 10.0)
-            )
-            new_updates = jax.tree.map(
-                lambda u: (
-                    u if _is_aux_leaf(u) else _clip_per_tensor_rms(u, max_rms, max_val)
-                ),
-                new_updates,
-                is_leaf=_is_aux_leaf,
-            )
-
-        _may_have_wd = not isinstance(weight_decay, (int, float)) or weight_decay > 0.0
-        if _may_have_wd and params is not None:
-            wd_step = (
-                cast(
-                    Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
-                    weight_decay,
-                )(state.count)
-                if callable(weight_decay)
-                else weight_decay
-            )
-            _wd_mask = None
-            if weight_decay_mask is not None:
-                _wd_mask = (
-                    weight_decay_mask(params)
-                    if callable(weight_decay_mask)
-                    else weight_decay_mask
-                )
-
-            def _add_wd(u, p, m=True):
-                if _is_aux_leaf(u) or _is_aux_leaf(p):
-                    return u
-                if isinstance(m, _masking.MaskedNode) or m is None or not m:
-                    return u
-                return u + wd_step * p.astype(jnp.float32)
-
-            if _wd_mask is not None:
-                new_updates = jax.tree.map(
-                    _add_wd, new_updates, params, _wd_mask, is_leaf=_is_aux_leaf
-                )
-            else:
-                new_updates = jax.tree.map(
-                    lambda u, p: _add_wd(u, p),
-                    new_updates,
-                    params,
-                    is_leaf=_is_aux_leaf,
-                )
-
-        new_updates = jax.tree.map(
-            lambda u: (
-                u if _is_aux_leaf(u) else jnp.where(should_skip, jnp.zeros_like(u), u)
-            ),
-            new_updates,
-            is_leaf=_is_aux_leaf,
+        aurora_out = apply_matrix_post_shape_lookahead(
+            aurora_out,
+            runtime,
+            beta=b1,
+            nesterov=nesterov,
+            shape_nesterov=shape_nesterov,
+            momentum_accumulator=momentum_accumulator,
+        )
+        final_updates, new_magma_s = finish_matrix_runtime_step(
+            aurora_out,
+            runtime,
+            params=params,
+            magma_s=state.magma_s,
+            use_magma=use_magma,
+            magma_p=magma_p,
+            magma_tau=magma_tau,
+            weight_decay=weight_decay,
+            weight_decay_mask=weight_decay_mask,
+            grad_clip_max_amps=grad_clip_max_amps,
+            axis_name=axis_name,
+            guard_fn=_guard_nonfinite_leaf if guard_nonfinite else None,
         )
 
-        if use_magma:
-            final_updates, new_magma_s = apply_magma_internal(
-                raw_gradients=raw_gradients,
-                first_moments=mu_f32,
-                base_updates=new_updates,
-                magma_s_prev=state.magma_s,
-                key=magma_key,
-                p=magma_p,
-                tau=magma_tau,
-                axis_name=axis_name,
-            )
-            new_magma_s = jax.tree.map(
-                lambda new_s, old_s: (
-                    new_s
-                    if _is_aux_leaf(new_s)
-                    else jnp.where(should_skip, old_s, new_s)
-                ),
-                new_magma_s,
-                state.magma_s,
-                is_leaf=_is_aux_leaf,
-            )
-        else:
-            final_updates = new_updates
-            new_magma_s = state.magma_s
-
         return final_updates, ScaleByAuroraState(
-            count=count_inc,
-            mu=mu_cast,
+            count=runtime.count,
+            mu=runtime.mu_cast,
             magma_s=new_magma_s,
-            key=next_state_key,
+            key=runtime.next_key,
         )
 
     return base.GradientTransformation(init_fn, update_fn)
@@ -841,6 +634,7 @@ def scale_by_aurora(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -873,6 +667,7 @@ def scale_by_aurora(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         mu_dtype=mu_dtype,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,
@@ -903,6 +698,7 @@ def scale_by_riemannian_aurora(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     mu_dtype: Optional[jax.typing.DTypeLike] = None,
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -937,6 +733,7 @@ def scale_by_riemannian_aurora(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         mu_dtype=mu_dtype,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,
@@ -974,6 +771,7 @@ def _partitioned_aurora(
     nesterov: bool,
     shape_nesterov: bool,
     bias_correction: bool,
+    momentum_accumulator: MomentumAccumulator,
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]],
     raw_global_grad_clip: Optional[float],
     permissive_spike_protection: bool,
@@ -995,21 +793,10 @@ def _partitioned_aurora(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(aurora_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dim_leaf,
-        )
-
-    def aurora_weight_dim_nums_fn(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return _mask_dimension_numbers(dim_nums)
+    partition = _make_matrix_partition_fns(
+        aurora_weight_dimension_numbers,
+        "aurora",
+    )
 
     if riemannian:
         aurora_scale = scale_by_riemannian_aurora(
@@ -1026,11 +813,12 @@ def _partitioned_aurora(
             nesterov=nesterov,
             shape_nesterov=shape_nesterov,
             bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
             mu_dtype=mu_dtype,
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=use_magma,
             magma_p=magma_p,
             magma_tau=magma_tau,
@@ -1053,11 +841,12 @@ def _partitioned_aurora(
             nesterov=nesterov,
             shape_nesterov=shape_nesterov,
             bias_correction=bias_correction,
+            momentum_accumulator=momentum_accumulator,
             mu_dtype=mu_dtype,
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=use_magma,
             magma_p=magma_p,
             magma_tau=magma_tau,
@@ -1096,7 +885,7 @@ def _partitioned_aurora(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )
 
 
@@ -1115,6 +904,7 @@ def aurora(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -1158,6 +948,7 @@ def aurora(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         grad_clip_max_amps=grad_clip_max_amps,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,
@@ -1193,6 +984,7 @@ def riemannian_aurora(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
     raw_global_grad_clip: Optional[float] = None,
     permissive_spike_protection: bool = True,
@@ -1230,6 +1022,7 @@ def riemannian_aurora(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         grad_clip_max_amps=grad_clip_max_amps,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,

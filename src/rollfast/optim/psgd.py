@@ -17,6 +17,7 @@ from optax.transforms import _masking
 
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
+    _apply_weight_decay_leaf,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     add_tiny,
@@ -31,7 +32,7 @@ class PreconditionerMode(str, Enum):
     computed covariance/Gram matrix G.
 
     Attributes:
-        EQ: dQ = E * Q. The original PSGD update. Maintains triangular Q.
+        EQ: dQ = E * Q. Triangular preconditioner update.
             Requires triangular solves.
         Q0P5EQ1P5: dQ = Q^0.5 * E * Q^1.5. Uses Procrustes rotation to
             update Q. Often more stable than EQ as it keeps Q closer to orthogonal.
@@ -1390,20 +1391,17 @@ def scale_by_kron(
                     else weight_decay_mask
                 )
 
-            def _add_wd(u, p, m=True):
-                if _is_psgd_leaf(u) or _is_psgd_leaf(p):
-                    return u
-                if isinstance(m, _masking.MaskedNode) or m is None or not m:
-                    return u
-                return u + wd_step * p.astype(u.dtype)
-
             if _wd_mask is not None:
                 updates = jax.tree.map(
-                    _add_wd, updates, params, _wd_mask, is_leaf=_is_psgd_leaf
+                    lambda u, p, m: _apply_weight_decay_leaf(u, p, wd_step, m),
+                    updates,
+                    params,
+                    _wd_mask,
+                    is_leaf=_is_psgd_leaf,
                 )
             else:
                 updates = jax.tree.map(
-                    lambda u, p: _add_wd(u, p),
+                    lambda u, p: _apply_weight_decay_leaf(u, p, wd_step),
                     updates,
                     params,
                     is_leaf=_is_psgd_leaf,

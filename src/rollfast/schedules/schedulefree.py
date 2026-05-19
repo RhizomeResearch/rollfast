@@ -1,3 +1,4 @@
+import inspect
 from enum import Enum
 from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
 
@@ -9,15 +10,17 @@ from optax._src import base, combine, numerics, transform
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import (
     AuroraWeightDimNumOrFn,
-    _is_dim_leaf,
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
 from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
-    _get_dimension_numbers,
-    _is_dimension_numbers_leaf,
-    _mask_dimension_numbers,
+    _make_matrix_partition_fns,
+)
+from rollfast.optim.orthogonalization import (
+    MUON_NS_COEFFS,
+    MuonNsCoeffs,
+    MuonPreconditioning,
 )
 from rollfast.optim.prism import (
     scale_by_prism,
@@ -73,6 +76,38 @@ class ScheduleFreeState(NamedTuple):
     polyak_lr: Optional[jax.Array] = None
     polyak_value: Optional[jax.Array] = None
     ip_term: Optional[jax.Array] = None
+
+
+def _call_learning_rate(
+    learning_rate: Callable[..., Any],
+    count: jax.Array,
+    params: Optional[base.Params],
+) -> Any:
+    try:
+        signature = inspect.signature(learning_rate)
+    except (TypeError, ValueError):
+        return learning_rate(count)
+
+    parameters = tuple(signature.parameters.values())
+    accepts_two_positional = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+    ) or (
+        sum(
+            parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            for parameter in parameters
+        )
+        >= 2
+    )
+
+    if accepts_two_positional:
+        return learning_rate(count, params)
+    if "params" in signature.parameters:
+        return learning_rate(count, params=params)
+    return learning_rate(count)
 
 
 def schedule_free(
@@ -234,6 +269,8 @@ def schedule_free(
             else adamc_weight_decay_mask
         )
         return _broadcast_to_params(mask, params)
+
+    base_optimizer = base.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
         dtype = (
@@ -547,7 +584,9 @@ def schedule_free_prism(
     prism_b1: float = 0.0,
     gamma: float = 1.0,
     ns_iters: int = 5,
+    ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
@@ -615,21 +654,7 @@ def schedule_free_prism(
             decay_fraction=decay_fraction,
         )
 
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(prism_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def prism_weight_dim_nums_fn(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return _mask_dimension_numbers(dim_nums)
+    partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
 
     key_prism, key_adam = jax.random.split(key, 2)
 
@@ -638,7 +663,9 @@ def schedule_free_prism(
             b1=prism_b1,
             gamma=gamma,
             ns_iters=ns_iters,
+            ns_coeffs=ns_coeffs,
             mode=mode,
+            preconditioning=preconditioning,
             inv_steps=inv_steps,
             inv_eps=inv_eps,
             inv_scale=inv_scale,
@@ -653,7 +680,7 @@ def schedule_free_prism(
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
             axis_name=axis_name,
-            weight_dimension_numbers=prism_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=False,
             weight_decay=0.0,
             weight_decay_mask=None,
@@ -689,11 +716,11 @@ def schedule_free_prism(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )
 
     def dual_schedule_fn(count, params):
-        labels = param_labels(params)
+        labels = partition.labels(params)
         p_lr = prism_schedule(count)
         a_lr = adam_schedule(count)
         return jax.tree.map(
@@ -1045,20 +1072,10 @@ def schedule_free_aurora(
 
     key_aurora, key_adam = jax.random.split(key, 2)
 
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(aurora_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dim_leaf,
-        )
-
-    def aurora_weight_dim_nums_fn(params):
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+    partition = _make_matrix_partition_fns(
+        aurora_weight_dimension_numbers,
+        "aurora",
+    )
 
     if riemannian:
         scale = scale_by_riemannian_aurora(
@@ -1078,7 +1095,7 @@ def schedule_free_aurora(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=False,
             weight_decay=0.0,
             weight_decay_mask=None,
@@ -1102,7 +1119,7 @@ def schedule_free_aurora(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=False,
             weight_decay=0.0,
             weight_decay_mask=None,
@@ -1139,11 +1156,11 @@ def schedule_free_aurora(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )
 
     def dual_schedule_fn(count, params):
-        labels = param_labels(params)
+        labels = partition.labels(params)
         a_lr = aurora_schedule(count)
         adam_lr = adam_schedule(count)
         return jax.tree.map(

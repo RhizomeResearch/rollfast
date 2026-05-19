@@ -5,7 +5,12 @@ import jax.numpy as jnp
 import optax
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
-from rollfast.optim.rmnp import rmnp, scale_by_rmnp, scale_by_rmnp_shape
+from rollfast.optim.rmnp import (
+    ScaleByRmnpState,
+    rmnp,
+    scale_by_rmnp,
+    scale_by_rmnp_shape,
+)
 
 
 def test_scale_by_rmnp_row_normalizes_matrix_momentum():
@@ -33,6 +38,33 @@ def test_scale_by_rmnp_shape_matches_muon_width_scaling():
     scaled = cast(dict[str, jax.Array], scaled)
 
     assert jnp.allclose(scaled["w"], jnp.ones((2, 8)) * 2.0)
+
+
+def test_scale_by_rmnp_heavy_ball_momentum_accumulator():
+    params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+    tx = scale_by_rmnp(
+        beta=0.5,
+        nesterov=False,
+        momentum_accumulator="heavy_ball",
+    )
+    state = tx.init(params)
+    _, state = tx.update(grads, state, params)
+    state = cast(ScaleByRmnpState, state)
+    mu = cast(dict[str, jax.Array], state.mu)
+
+    assert jnp.allclose(mu["w"], grads["w"])
+
+
+def test_scale_by_rmnp_bf16_momentum_state():
+    params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+    tx = scale_by_rmnp(beta=0.0, nesterov=False, mu_dtype=jnp.bfloat16)
+    _, state = tx.update(grads, tx.init(params), params)
+    state = cast(ScaleByRmnpState, state)
+    mu = cast(dict[str, jax.Array], state.mu)
+
+    assert mu["w"].dtype == jnp.bfloat16
 
 
 def test_rmnp_partitions_vectors_to_adam():

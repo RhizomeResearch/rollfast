@@ -1,23 +1,3 @@
-import math
-from typing import Any, Callable, NamedTuple, cast
-
-import jax
-import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
-from optax.transforms import _masking
-
-from rollfast.optim.adam import adamw
-from rollfast.optim.dimension_numbers import (
-    MatrixDimensionNumbers,
-    WeightDimNumOrFn,
-    _get_dimension_numbers,
-    _compute_matrix_reshape,
-    _is_dimension_numbers_leaf,
-    _mask_dimension_numbers,
-    _normalize_axes,
-)
-from rollfast.utils import _tree_stochastic_cast
-
 """RMNP usage notes.
 
 RMNP is a Muon-style matrix optimizer that replaces Newton-Schulz
@@ -36,6 +16,34 @@ intended geometry. As with Muon, learning rates for matrix leaves often need
 their own tuning; the Adam fallback can use ``adam_learning_rate`` separately.
 """
 
+import math
+from typing import Any, Callable, NamedTuple, cast
+
+import jax
+import jax.numpy as jnp
+from optax._src import base, combine, numerics, transform, utils
+
+from rollfast.optim.adam import adamw
+from rollfast.optim.dimension_numbers import (
+    MatrixDimensionNumbers,
+    WeightDimNumOrFn,
+    _get_dimension_numbers,
+    _compute_matrix_reshape,
+    _is_dimension_numbers_leaf,
+    _make_matrix_partition_fns,
+    _normalize_axes,
+)
+from rollfast.utils import (
+    MomentumAccumulator,
+    _cast_state_tree,
+    _is_aux_leaf,
+    _tree_bias_correction_momentum,
+    _tree_momentum_lookahead,
+    _tree_stochastic_cast,
+    _tree_update_moment_f32,
+    _zeros_like_tree,
+)
+
 
 class ScaleByRmnpState(NamedTuple):
     """State for RMNP's first-moment estimates."""
@@ -43,55 +51,6 @@ class ScaleByRmnpState(NamedTuple):
     count: jax.Array
     mu: base.Updates
     key: jax.Array | None
-
-
-def _is_aux_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, _masking.MaskedNode)
-
-
-def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
-    return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else jnp.zeros_like(x, dtype=dtype),
-        params,
-        is_leaf=_is_aux_leaf,
-    )
-
-
-def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
-    return jax.tree.map(
-        lambda x: x if _is_aux_leaf(x) else x.astype(dtype),
-        tree,
-        is_leaf=_is_aux_leaf,
-    )
-
-
-def _bias_correction(
-    moment: Any, beta: jax.typing.ArrayLike, count: jax.typing.ArrayLike
-) -> Any:
-    correction = 1.0 - jnp.power(jnp.asarray(beta, dtype=jnp.float32), count)
-    return jax.tree.map(
-        lambda m: m if _is_aux_leaf(m) else m.astype(jnp.float32) / correction,
-        moment,
-        is_leaf=_is_aux_leaf,
-    )
-
-
-def _update_moment(
-    updates: base.Updates,
-    moment: base.Updates,
-    beta: jax.typing.ArrayLike,
-) -> base.Updates:
-    beta32 = jnp.asarray(beta, dtype=jnp.float32)
-    return jax.tree.map(
-        lambda g, m: (
-            g
-            if _is_aux_leaf(g) or _is_aux_leaf(m)
-            else beta32 * m.astype(jnp.float32) + (1.0 - beta32) * g.astype(jnp.float32)
-        ),
-        updates,
-        moment,
-        is_leaf=_is_aux_leaf,
-    )
 
 
 def _row_normalize_matrix(
@@ -157,6 +116,7 @@ def scale_by_rmnp(
     *,
     nesterov: bool = True,
     adaptive: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
@@ -184,25 +144,40 @@ def scale_by_rmnp(
         dim_source = updates if params is None else params
         dim_nums = _resolve_dimension_numbers(weight_dimension_numbers, dim_source)
 
-        mu = _update_moment(updates, state.mu, beta)
+        mu = _tree_update_moment_f32(
+            updates,
+            state.mu,
+            beta,
+            momentum_accumulator=momentum_accumulator,
+        )
         count_inc = numerics.safe_increment(state.count)
 
         if nesterov:
-            mu_bc = _bias_correction(mu, beta, numerics.safe_increment(count_inc))
-            updates_bc = _bias_correction(updates, beta, count_inc)
-            beta32 = jnp.asarray(beta, dtype=jnp.float32)
-            direction = jax.tree.map(
-                lambda m, g: (
-                    m
-                    if _is_aux_leaf(m) or _is_aux_leaf(g)
-                    else beta32 * m + (1.0 - beta32) * g
-                ),
+            mu_bc = _tree_bias_correction_momentum(
+                mu,
+                beta,
+                numerics.safe_increment(count_inc),
+                momentum_accumulator=momentum_accumulator,
+            )
+            updates_bc = _tree_bias_correction_momentum(
+                updates,
+                beta,
+                count_inc,
+                momentum_accumulator=momentum_accumulator,
+            )
+            direction = _tree_momentum_lookahead(
                 mu_bc,
                 updates_bc,
-                is_leaf=_is_aux_leaf,
+                beta,
+                momentum_accumulator=momentum_accumulator,
             )
         else:
-            direction = _bias_correction(mu, beta, count_inc)
+            direction = _tree_bias_correction_momentum(
+                mu,
+                beta,
+                count_inc,
+                momentum_accumulator=momentum_accumulator,
+            )
 
         rmnp_updates = jax.tree.map(
             lambda u, d: _rmnp_leaf_update(u, d, eps),
@@ -264,6 +239,7 @@ def rmnp(
     *,
     nesterov: bool = True,
     adaptive: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
@@ -279,20 +255,7 @@ def rmnp(
 
     key_rmnp, key_adam = jax.random.split(key, 2)
 
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(rmnp_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("rmnp" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def rmnp_weight_dim_nums_fn(params):
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+    partition = _make_matrix_partition_fns(rmnp_weight_dimension_numbers, "rmnp")
 
     return combine.partition(
         transforms={
@@ -303,11 +266,12 @@ def rmnp(
                     mu_dtype=mu_dtype,
                     nesterov=nesterov,
                     adaptive=adaptive,
-                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
+                    momentum_accumulator=momentum_accumulator,
+                    weight_dimension_numbers=partition.masked_specs,
                     key=key_rmnp,
                 ),
                 scale_by_rmnp_shape(
-                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
+                    weight_dimension_numbers=partition.masked_specs,
                     consistent_rms=consistent_rms,
                 ),
                 transform.add_decayed_weights(weight_decay, weight_decay_mask),
@@ -326,7 +290,7 @@ def rmnp(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )
 
 

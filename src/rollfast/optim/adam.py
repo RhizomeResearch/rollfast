@@ -1,6 +1,5 @@
-# This code is coming mostly from Optax itself.
-# I just modified it to add support for Magma
-# and stochastic rounding
+"""AdamW variants with FP32 moments, stochastic BF16 storage, and Magma support."""
+
 from typing import Any, Callable, NamedTuple, Optional, Union, cast
 
 import jax
@@ -12,6 +11,7 @@ from optax.transforms import _masking
 
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
+    _apply_weight_decay_leaf,
     _safe_bias_correction,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
@@ -204,11 +204,7 @@ def scale_by_adam(
                 )
 
             adam_updates = jax.tree.map(
-                lambda u, p, m_leaf: (
-                    u
-                    if isinstance(u, _masking.MaskedNode) or u is None
-                    else (u + wd_step * p.astype(jnp.float32) if m_leaf else u)
-                ),
+                lambda u, p, m: _apply_weight_decay_leaf(u, p, wd_step, m),
                 adam_updates,
                 params,
                 resolved_mask,
@@ -342,7 +338,7 @@ def adamw(
             equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
             50% of steps are masked. This yields an expected magnitude attenuation
             of ~0.25x. You may need to scale the global learning rate by ~4x to
-            maintain the original update volume.
+            maintain the undamped update volume.
         magma_p: Survival probability for the block-wise Bernoulli masking.
             Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic

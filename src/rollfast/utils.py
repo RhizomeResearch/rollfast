@@ -1,9 +1,53 @@
-from typing import Any, Optional
+from typing import Any, Literal, Optional, TypeAlias
 
 import jax
 import jax.numpy as jnp
 from optax._src import base, numerics
 from optax.transforms import _masking
+
+MomentumAccumulator: TypeAlias = Literal["ema", "heavy_ball"]
+
+
+def _is_aux_leaf(x: Any) -> bool:
+    return x is None or isinstance(x, _masking.MaskedNode)
+
+
+def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+    return jax.tree.map(
+        lambda x: x if _is_aux_leaf(x) else jnp.zeros_like(x, dtype=dtype),
+        params,
+        is_leaf=_is_aux_leaf,
+    )
+
+
+def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+    return jax.tree.map(
+        lambda x: x if _is_aux_leaf(x) else x.astype(dtype),
+        tree,
+        is_leaf=_is_aux_leaf,
+    )
+
+
+def _init_magma_state(params: base.Params) -> base.Params:
+    return jax.tree.map(
+        lambda x: x if _is_aux_leaf(x) else jnp.array(0.5, dtype=jnp.float32),
+        params,
+        is_leaf=_is_aux_leaf,
+    )
+
+
+def _apply_weight_decay_leaf(
+    update: jax.Array,
+    param: jax.Array,
+    weight_decay_step: jax.typing.ArrayLike,
+    mask: Any = True,
+) -> jax.Array:
+    """Add decoupled weight decay to one update leaf with array-mask support."""
+    if _is_aux_leaf(update) or _is_aux_leaf(param) or _is_aux_leaf(mask):
+        return update
+
+    decayed_update = update + weight_decay_step * param.astype(update.dtype)
+    return jnp.where(jnp.asarray(mask, dtype=jnp.bool_), decayed_update, update)
 
 
 def add_tiny(x):
@@ -43,6 +87,21 @@ def _safe_bias_correction(tree, factor):
         ),
         tree,
         is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+    )
+
+
+def _momentum_grad_scale(
+    decay: jax.typing.ArrayLike,
+    momentum_accumulator: MomentumAccumulator,
+) -> jax.Array:
+    decay32 = jnp.asarray(decay, dtype=jnp.float32)
+    if momentum_accumulator == "ema":
+        return 1.0 - decay32
+    if momentum_accumulator == "heavy_ball":
+        return jnp.array(1.0, dtype=jnp.float32)
+    raise ValueError(
+        "momentum_accumulator must be 'ema' or 'heavy_ball', got "
+        f"{momentum_accumulator!r}."
     )
 
 
@@ -155,17 +214,28 @@ def _tree_stochastic_cast_like(
 
 
 def _tree_update_moment_f32(
-    updates: base.Updates, moments: base.Updates, decay: jax.typing.ArrayLike
+    updates: base.Updates,
+    moments: base.Updates,
+    decay: jax.typing.ArrayLike,
+    *,
+    momentum_accumulator: MomentumAccumulator = "ema",
 ) -> base.Updates:
     """
     Prevents accumulator truncation. Optax internally casts to the state's dtype.
     This enforces strict FP32 calculation regardless of the state's storage precision.
     """
+    decay32 = jnp.asarray(decay, dtype=jnp.float32)
+    grad_scale = _momentum_grad_scale(decay32, momentum_accumulator)
 
     def _update_moment_f32(g, t):
-        if g is None or t is None or isinstance(g, _masking.MaskedNode):
+        if (
+            g is None
+            or t is None
+            or isinstance(g, _masking.MaskedNode)
+            or isinstance(t, _masking.MaskedNode)
+        ):
             return g
-        return (1.0 - decay) * g.astype(jnp.float32) + decay * t.astype(jnp.float32)
+        return grad_scale * g.astype(jnp.float32) + decay32 * t.astype(jnp.float32)
 
     return jax.tree.map(
         _update_moment_f32,
@@ -184,7 +254,12 @@ def _tree_update_moment_sq_f32(
     """
 
     def _update_moment_sq_f32(g, t):
-        if g is None or t is None or isinstance(g, _masking.MaskedNode):
+        if (
+            g is None
+            or t is None
+            or isinstance(g, _masking.MaskedNode)
+            or isinstance(t, _masking.MaskedNode)
+        ):
             return g
         g_f32 = g.astype(jnp.float32)
         sq_norm = jnp.square(g_f32) if jnp.isrealobj(g) else numerics.abs_sq(g_f32)
@@ -202,6 +277,40 @@ def _compute_ema_f32(m, u, b1: jax.typing.ArrayLike):
     if m is None or u is None:
         return None
     return b1 * m.astype(jnp.float32) + (1.0 - b1) * u.astype(jnp.float32)
+
+
+def _tree_bias_correction_momentum(
+    tree: base.Updates,
+    decay: jax.typing.ArrayLike,
+    count: jax.typing.ArrayLike,
+    *,
+    momentum_accumulator: MomentumAccumulator,
+) -> base.Updates:
+    if momentum_accumulator == "heavy_ball":
+        return _cast_state_tree(tree, jnp.float32)
+    correction = 1.0 - jnp.power(jnp.asarray(decay, dtype=jnp.float32), count)
+    return _safe_bias_correction(tree, correction)
+
+
+def _tree_momentum_lookahead(
+    moments: base.Updates,
+    updates: base.Updates,
+    decay: jax.typing.ArrayLike,
+    *,
+    momentum_accumulator: MomentumAccumulator,
+) -> base.Updates:
+    decay32 = jnp.asarray(decay, dtype=jnp.float32)
+    grad_scale = _momentum_grad_scale(decay32, momentum_accumulator)
+    return jax.tree.map(
+        lambda m, g: (
+            m
+            if _is_aux_leaf(m) or _is_aux_leaf(g)
+            else decay32 * m.astype(jnp.float32) + grad_scale * g.astype(jnp.float32)
+        ),
+        moments,
+        updates,
+        is_leaf=_is_aux_leaf,
+    )
 
 
 def apply_updates(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, TypeAlias, cast
 
 import jax
 from optax._src import base
@@ -27,7 +27,32 @@ DimNumsTree = base.Params
 WeightDimNumOrFn = (
     MatrixDimensionNumbers | DimNumsTree | Callable[[base.Params], DimNumsTree]
 )
+# NOTE: `MatrixDimensionNumbers` as a single bare value is currently accepted by
+# the public type alias because PRISM exposed that shape before these helpers were
+# factorized. The implementation below still treats any non-callable, non-None
+# value as an already-aligned PyTree, so passing one bare spec to a partitioned
+# wrapper with dict/tree params raises a tree-structure mismatch instead of
+# broadcasting that spec to every eligible array leaf.
+#
+# Before changing this, discuss the intended interface with Clement:
+# - Option A: keep the inherited behavior and remove the bare
+#   `MatrixDimensionNumbers` case from the alias/docs, making callers pass a
+#   PyTree or callable when they want explicit routing.
+# - Option B: make a bare spec mean "use this spec for every non-auxiliary array
+#   leaf", probably with rank checks in `_compute_matrix_reshape`.
+# The important bit is to choose one meaning and make PRISM, Aurora, Muon, RMNP,
+# TrasMuon, NorMuon, and Pion agree.
+MaskOrFn: TypeAlias = Any | Callable[[base.Params], Any] | None
 ReshapeFn = Callable[[jax.Array], jax.Array]
+
+
+class _MatrixPartitionFns(NamedTuple):
+    """Resolved matrix optimizer routing helpers for one branch label."""
+
+    resolve: Callable[[base.Params], base.Params]
+    labels: Callable[[base.Params], base.Params]
+    masked_specs: Callable[[base.Params], base.Params]
+    default_mask: Callable[[base.Params], base.Params]
 
 
 def _is_dimension_numbers_leaf(x: Any) -> bool:
@@ -75,6 +100,82 @@ def _mask_dimension_numbers(dim_nums_tree: base.Params) -> base.Params:
     )
 
 
+def _make_matrix_labels(
+    dim_nums_tree: base.Params,
+    params: base.Params,
+    matrix_label: str,
+    fallback_label: str = "adam",
+) -> base.Params:
+    """Create optimizer branch labels from a resolved dimension-number tree."""
+    return jax.tree.map(
+        lambda d, p: (
+            None
+            if p is None
+            else (
+                matrix_label
+                if d is not None and not isinstance(d, _masking.MaskedNode)
+                else fallback_label
+            )
+        ),
+        dim_nums_tree,
+        params,
+        is_leaf=_is_dimension_numbers_leaf,
+    )
+
+
+def _make_dimension_numbers_mask(
+    dim_nums_tree: base.Params,
+    params: base.Params,
+) -> base.Params:
+    """Create a bool mask selecting leaves with real matrix dimension specs."""
+    return jax.tree.map(
+        lambda d, p: (
+            False
+            if p is None or isinstance(p, _masking.MaskedNode)
+            else d is not None and not isinstance(d, _masking.MaskedNode)
+        ),
+        dim_nums_tree,
+        params,
+        is_leaf=_is_dimension_numbers_leaf,
+    )
+
+
+def _make_matrix_partition_fns(
+    weight_dimension_numbers: WeightDimNumOrFn | None,
+    matrix_label: str,
+    fallback_label: str = "adam",
+) -> _MatrixPartitionFns:
+    """Build repeated matrix/fallback partition closures.
+
+    The default resolver preserves existing behavior: rank-2 array leaves route
+    to the matrix branch; all other leaves route to the fallback branch.
+    """
+
+    def resolve(params: base.Params) -> base.Params:
+        return _get_dimension_numbers(weight_dimension_numbers, params)
+
+    def labels(params: base.Params) -> base.Params:
+        return _make_matrix_labels(
+            resolve(params),
+            params,
+            matrix_label=matrix_label,
+            fallback_label=fallback_label,
+        )
+
+    def masked_specs(params: base.Params) -> base.Params:
+        return _mask_dimension_numbers(resolve(params))
+
+    def default_mask(params: base.Params) -> base.Params:
+        return _make_dimension_numbers_mask(resolve(params), params)
+
+    return _MatrixPartitionFns(
+        resolve=resolve,
+        labels=labels,
+        masked_specs=masked_specs,
+        default_mask=default_mask,
+    )
+
+
 def _is_standard_2d_spec(dim_nums: MatrixDimensionNumbers) -> bool:
     """Return whether a spec is the ordinary 2D ``(reduction=0, output=1)`` layout."""
     red = dim_nums.reduction_axis
@@ -90,16 +191,33 @@ def _normalize_axes(
     x: jax.Array, dim_nums: MatrixDimensionNumbers
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Normalize dimension specs to tuples of positive integers."""
-    reduction_axis = dim_nums.reduction_axis
-    reduction_axis = (
-        (reduction_axis,) if isinstance(reduction_axis, int) else reduction_axis
-    )
-    reduction_axes = tuple(ax % x.ndim for ax in reduction_axis)
-
-    output_axis = dim_nums.output_axis
-    output_axis = (output_axis,) if isinstance(output_axis, int) else output_axis
-    output_axes = tuple(ax % x.ndim for ax in output_axis)
+    reduction_axes = _normalize_axis_group(x, dim_nums.reduction_axis, "reduction_axis")
+    output_axes = _normalize_axis_group(x, dim_nums.output_axis, "output_axis")
     return reduction_axes, output_axes
+
+
+def _normalize_axis_group(
+    x: jax.Array,
+    axes: Sequence[int] | int,
+    name: str,
+) -> tuple[int, ...]:
+    axes_tuple = (axes,) if isinstance(axes, int) else tuple(axes)
+    if not axes_tuple:
+        raise ValueError(f"{name} must not be empty.")
+
+    normalized = []
+    for axis in axes_tuple:
+        if axis < -x.ndim or axis >= x.ndim:
+            raise ValueError(
+                f"{name} axis {axis} is out of bounds for rank-{x.ndim} parameter."
+            )
+        normalized.append(axis if axis >= 0 else axis + x.ndim)
+
+    normalized_tuple = tuple(normalized)
+    if len(set(normalized_tuple)) != len(normalized_tuple):
+        raise ValueError(f"{name} contains duplicate axes: {axes_tuple}.")
+
+    return normalized_tuple
 
 
 def _compute_matrix_reshape(
@@ -141,6 +259,7 @@ def _compute_matrix_reshape(
 
 __all__ = [
     "DimNumsTree",
+    "MaskOrFn",
     "MatrixDimensionNumbers",
     "ReshapeFn",
     "WeightDimNumOrFn",
