@@ -1,6 +1,7 @@
 """AdamW variants with FP32 moments, stochastic BF16 storage, and Magma support."""
 
-from typing import Any, Callable, NamedTuple, Optional, Union, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -32,7 +33,7 @@ class ScaleByAdamState(NamedTuple):
     mu: base.Updates
     nu: base.Updates
     magma_s: Any
-    key: Optional[jax.Array]
+    key: jax.Array | None
 
 
 def scale_by_adam(
@@ -40,15 +41,15 @@ def scale_by_adam(
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
     *,
     weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     nesterov: bool = False,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
     r"""Rescale updates according to the Adam algorithm.
@@ -240,15 +241,15 @@ def adamw(
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
     weight_decay: base.ScalarOrSchedule = 1e-4,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     *,
     nesterov: bool = False,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     r"""Adam with weight decay regularization.

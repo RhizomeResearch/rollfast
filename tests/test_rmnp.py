@@ -49,7 +49,7 @@ def test_scale_by_rmnp_rejects_direct_fallback_leaves():
     grads = jax.tree.map(jnp.ones_like, params)
     tx = scale_by_rmnp(beta=0.0, nesterov=False)
 
-    with pytest.raises(ValueError, match="scale_by_rmnp.*matrix dimension specs"):
+    with pytest.raises(ValueError, match=r"scale_by_rmnp.*matrix dimension specs"):
         tx.update(grads, tx.init(params), params)
 
 

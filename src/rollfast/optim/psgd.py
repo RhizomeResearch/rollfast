@@ -1,8 +1,8 @@
 import string
-from collections.abc import Callable as CallableABC
+from collections.abc import Callable
 from enum import Enum
 from functools import partial
-from typing import Any, Callable, List, NamedTuple, Optional, Tuple, Union, cast
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -78,9 +78,9 @@ class KronState(NamedTuple):
     """
 
     count: jax.Array
-    mu: Optional[Any]
+    mu: Any | None
     Qs_preconditioners: Any
-    Ls_lipschitz: Optional[Any]
+    Ls_lipschitz: Any | None
     needs_scale_init: jax.Array
     magma_s: Any
     key: jax.Array
@@ -88,7 +88,7 @@ class KronState(NamedTuple):
 
 def _compute_global_norm(
     grads: Any,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
 ) -> jax.Array:
     _is_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
     leaves = [x for x in jax.tree.leaves(grads, is_leaf=_is_leaf) if not _is_leaf(x)]
@@ -116,13 +116,13 @@ def _compute_global_norm(
 
 
 def _compute_global_rms_scale(
-    precond_grads: List[jax.Array],
+    precond_grads: list[jax.Array],
     max_rms: float,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
 ) -> jax.Array:
     """Computes scaling factor for global RMS constraint."""
     _is_leaf = lambda x: (
-        hasattr(x, "__class__") and x.__class__.__name__ == "MaskedNode" or x is None
+        (hasattr(x, "__class__") and x.__class__.__name__ == "MaskedNode") or x is None
     )
     valid_pgs = [pg for pg in precond_grads if not _is_leaf(pg)]
 
@@ -156,7 +156,7 @@ def _first_non_aux_dtype(leaves: list[Any]) -> jnp.dtype:
 
 
 def _compute_init_scale_from_grads(
-    grads: List[jax.Array],
+    grads: list[jax.Array],
     damping: float,
     dtype: jax.typing.DTypeLike = jnp.float32,
 ) -> jax.Array:
@@ -325,7 +325,7 @@ def _procrustes_step2(
 
 
 def _newton_schulz_spd(
-    Q: jax.Array, key: jax.Array, n_iters: int = 5, axis_name: Optional[str] = None
+    Q: jax.Array, key: jax.Array, n_iters: int = 5, axis_name: str | None = None
 ) -> jax.Array:
     """Projects matrix Q onto SPD manifold via Newton-Schultz polar decomposition.
 
@@ -518,7 +518,7 @@ def _solve_triangular_right(X: jax.Array, A: jax.Array) -> jax.Array:
     return solution
 
 
-def _conjB(Q: List[jax.Array], G: jax.Array, V: jax.Array) -> jax.Array:
+def _conjB(Q: list[jax.Array], G: jax.Array, V: jax.Array) -> jax.Array:
     """Computes conjB = V @ inv(Q) for EQ mode.
 
     Needed for the A^T A - B^T B update rule in EQ mode.
@@ -539,21 +539,21 @@ def _conjB(Q: List[jax.Array], G: jax.Array, V: jax.Array) -> jax.Array:
 
 
 def _update_precond_generic(
-    Q: List[jax.Array],
-    L: Optional[List[jax.Array]],
+    Q: list[jax.Array],
+    L: list[jax.Array] | None,
     X: jax.Array,
-    Y: Optional[jax.Array],
+    Y: jax.Array | None,
     total_numel: int,
-    exprs: Tuple[str, Tuple[str, ...], str],
+    exprs: tuple[str, tuple[str, ...], str],
     precond_lr: float,
     key: jax.Array,
     mode: str,
-    conjB: Optional[jax.Array] = None,
+    conjB: jax.Array | None = None,
     beta_l: float = 0.9,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     damping: float = 1e-9,
     ns_iters: int = 5,
-) -> Tuple[List[jax.Array], Optional[List[jax.Array]]]:
+) -> tuple[list[jax.Array], list[jax.Array] | None]:
     """Unified dense/triangular preconditioner update kernel.
 
     Args:
@@ -708,9 +708,9 @@ def _update_precond_generic(
 
 
 def _precond_grad(
-    Q: List[jax.Array],
+    Q: list[jax.Array],
     G: jax.Array,
-    exprs: Tuple[str, Tuple[str, ...], str],
+    exprs: tuple[str, tuple[str, ...], str],
 ) -> jax.Array:
     """Preconditions gradient G with preconditioner Q: P @ G = Q^H @ Q @ G."""
     exprP = exprs[-1]
@@ -718,16 +718,16 @@ def _precond_grad(
 
 
 def _precond_grad_eq(
-    Q: List[jax.Array],
+    Q: list[jax.Array],
     G: jax.Array,
-    exprs: Tuple[str, Tuple[str, ...], str],
+    exprs: tuple[str, tuple[str, ...], str],
 ) -> jax.Array:
     """Compute whitened gradient for EQ mode: A = Q @ G."""
     exprA = exprs[0]
     return jnp.einsum(exprA, *Q, G)
 
 
-def _balance_Q(Q: List[jax.Array], axis_name: Optional[str] = None) -> List[jax.Array]:
+def _balance_Q(Q: list[jax.Array], axis_name: str | None = None) -> list[jax.Array]:
     """Balances the dynamic ranges of Q factors to avoid overflow/underflow.
 
     Rescales factors so their norms are approximately equal, without changing
@@ -753,33 +753,33 @@ def scale_by_kron(
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
-    memory_save_mode: Optional[str] = None,
+    memory_save_mode: str | None = None,
     whiten_grad: bool = True,
     preconditioner_lr: float = 0.1,
-    preconditioner_init_scale: Optional[float] = None,
+    preconditioner_init_scale: float | None = None,
     update_preconditioner_first: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    precond_dtype: Optional[jax.typing.DTypeLike] = None,
-    precond_update_precision: Optional[str] = "tensorfloat32",
-    precond_grads_precision: Optional[str] = None,
-    scanned_layers: Optional[base.Params] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    precond_dtype: jax.typing.DTypeLike | None = None,
+    precond_update_precision: str | None = "tensorfloat32",
+    precond_grads_precision: str | None = None,
+    scanned_layers: base.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    preconditioner_mode: Union[str, PreconditionerMode] = PreconditionerMode.Q0P5EQ1P5,
+    preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
     beta_lipschitz: float = 0.9,
     track_lipschitz: bool = True,
     damping: float = 1e-9,
-    grad_clip_max_amps: float | Tuple[float, float] = (2.0, 10.0),
-    grad_clip_mode: Union[str, GradClipMode] = GradClipMode.PER_TENSOR_RMS,
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] = (2.0, 10.0),
+    grad_clip_mode: str | GradClipMode = GradClipMode.PER_TENSOR_RMS,
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
-    axis_name: Optional[str] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    axis_name: str | None = None,
     verbose: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -1058,7 +1058,7 @@ def scale_by_kron(
             scanned_layers_ = jax.tree.map(lambda _: False, updates)
 
         update_prob_in = preconditioner_update_probability
-        if isinstance(preconditioner_update_probability, CallableABC):
+        if isinstance(preconditioner_update_probability, Callable):
             update_prob_fn = cast(
                 Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike],
                 preconditioner_update_probability,
@@ -1478,38 +1478,38 @@ def kron(
     learning_rate: base.ScalarOrSchedule = 0.001,
     b1: float = 0.9,
     weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     preconditioner_update_probability: base.ScalarOrSchedule = (
         precond_update_prob_schedule()
     ),
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
-    memory_save_mode: Optional[str] = None,
+    memory_save_mode: str | None = None,
     whiten_grad: bool = True,
     update_preconditioner_first: bool = True,
     preconditioner_lr: float = 0.1,
-    preconditioner_init_scale: Optional[float] = None,
-    mu_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_update_precision: Optional[str] = "tensorfloat32",
-    precond_grads_precision: Optional[str] = None,
-    scanned_layers: Optional[base.Params] = None,
+    preconditioner_init_scale: float | None = None,
+    mu_dtype: str | jnp.dtype | None = None,
+    precond_dtype: str | jnp.dtype | None = None,
+    precond_update_precision: str | None = "tensorfloat32",
+    precond_grads_precision: str | None = None,
+    scanned_layers: base.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    preconditioner_mode: Union[str, PreconditionerMode] = PreconditionerMode.Q0P5EQ1P5,
+    preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
     beta_lipschitz: float = 0.9,
     track_lipschitz: bool = True,
     damping: float = 1e-9,
-    grad_clip_max_amps: float | Tuple[float, float] = (2.0, 10.0),
-    grad_clip_mode: Union[str, GradClipMode] = GradClipMode.PER_TENSOR_RMS,
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] = (2.0, 10.0),
+    grad_clip_mode: str | GradClipMode = GradClipMode.PER_TENSOR_RMS,
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     verbose: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
@@ -1526,7 +1526,7 @@ def kron(
         On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
         arXiv preprint arXiv:2602.15322.
     """
-    optimizer: List[Any] = [
+    optimizer: list[Any] = [
         scale_by_kron(
             b1=b1,
             preconditioner_update_probability=preconditioner_update_probability,

@@ -1,10 +1,10 @@
 from typing import cast
 
-import jax.numpy as jnp
 import jax
+import jax.numpy as jnp
 import pytest
 
-from rollfast.optim.psgd import KronState, scale_by_kron, kron
+from rollfast.optim.psgd import KronState, kron, scale_by_kron
 from tests._typing import as_array_dict
 
 
@@ -78,7 +78,7 @@ def test_scale_by_kron_requires_params_for_weight_decay():
         weight_decay=0.1,
     )
 
-    with pytest.raises(ValueError, match="params.*scale_by_kron"):
+    with pytest.raises(ValueError, match=r"params.*scale_by_kron"):
         tx.update(grads, tx.init(params))
 
 

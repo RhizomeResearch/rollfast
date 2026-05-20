@@ -6,7 +6,8 @@ to a global RMS target, and damps high-energy columns with a trust-region clip.
 Non-matrix leaves are routed to AdamW by the public ``trasmuon`` helper.
 """
 
-from typing import Any, Callable, NamedTuple, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -67,13 +68,9 @@ def _stat_shapes(
     reshape_fn, _ = _compute_matrix_reshape(param, dim_nums)
     matrix = reshape_fn(param)
     return (
-        matrix.shape[:-1] + (1,),
-        matrix.shape[:-2] + (1, 1),
-        matrix.shape[:-2]
-        + (
-            1,
-            matrix.shape[-1],
-        ),
+        (*matrix.shape[:-1], 1),
+        (*matrix.shape[:-2], 1, 1),
+        (*matrix.shape[:-2], 1, matrix.shape[-1]),
     )
 
 

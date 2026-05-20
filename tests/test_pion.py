@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import optax
 import pytest
 
-from rollfast.optim.pion import ScaleByPionState, pion, scale_by_pion
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
+from rollfast.optim.pion import ScaleByPionState, pion, scale_by_pion
 
 
 def test_scale_by_pion():

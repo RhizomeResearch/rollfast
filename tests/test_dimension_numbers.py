@@ -6,6 +6,11 @@ import pytest
 from optax.transforms import _masking
 
 import rollfast
+from rollfast.optim.aurora import (
+    AuroraDimensionNumbers,
+    scale_by_aurora,
+    scale_by_riemannian_aurora,
+)
 from rollfast.optim.dimension_numbers import (
     MatrixDimensionNumbers,
     _compute_matrix_reshape,
@@ -13,11 +18,8 @@ from rollfast.optim.dimension_numbers import (
     _make_matrix_partition_fns,
     _mask_dimension_numbers,
 )
-from rollfast.optim.prism import PrismDimensionNumbers
-from rollfast.optim.prism import scale_by_prism
-from rollfast.optim.aurora import AuroraDimensionNumbers
-from rollfast.optim.aurora import scale_by_aurora, scale_by_riemannian_aurora
 from rollfast.optim.muon import scale_by_muon
+from rollfast.optim.prism import PrismDimensionNumbers, scale_by_prism
 
 
 def test_prism_dimension_numbers_is_compatibility_alias():
@@ -206,5 +208,5 @@ def test_callable_dimension_specs_require_params_at_update():
 
     tx = scale_by_muon(ns_steps=2, weight_dimension_numbers=specs)
 
-    with pytest.raises(ValueError, match="params.*scale_by_muon"):
+    with pytest.raises(ValueError, match=r"params.*scale_by_muon"):
         tx.update(grads, tx.init(params))

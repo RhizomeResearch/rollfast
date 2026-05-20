@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import pytest
+
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import aurora, scale_by_aurora
 from rollfast.optim.magma import apply_magma_internal
@@ -54,7 +55,7 @@ def test_magma_complex_leaves_use_real_hermitian_alignment():
 
 
 def test_magma_rejects_mismatched_input_trees():
-    with pytest.raises(ValueError, match="first_moments.*raw_gradients"):
+    with pytest.raises(ValueError, match=r"first_moments.*raw_gradients"):
         apply_magma_internal(
             raw_gradients={"w": jnp.ones((2,), dtype=jnp.float32)},
             first_moments={

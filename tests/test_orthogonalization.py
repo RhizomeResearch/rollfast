@@ -1,6 +1,7 @@
-import pytest
-import jax.numpy as jnp
 from typing import cast
+
+import jax.numpy as jnp
+import pytest
 
 import rollfast
 from rollfast.optim import muon as muon_module

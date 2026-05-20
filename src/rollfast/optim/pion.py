@@ -21,7 +21,8 @@ input/output axes.
 """
 
 import math
-from typing import Any, Callable, NamedTuple, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp

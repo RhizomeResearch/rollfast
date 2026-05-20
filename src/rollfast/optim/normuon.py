@@ -6,8 +6,9 @@ by ``MatrixDimensionNumbers``. The default rescaling preserves the Muon update
 norm after normalization, matching the reference implementation.
 """
 
+from collections.abc import Callable
 from numbers import Real
-from typing import Any, Callable, Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -28,8 +29,8 @@ from rollfast.optim.muon import (
     MuonDimensionNumbers,
     scale_by_muon_shape,
 )
-from rollfast.optim.orthogonalization import MUON_NS_COEFFS
 from rollfast.optim.orthogonalization import (
+    MUON_NS_COEFFS,
     MuonNsCoeffs,
     MuonPreconditioning,
     orthogonalize_via_newton_schulz,
@@ -71,9 +72,9 @@ def _zeros_for_nu(
     matrix = reshape_fn(param)
     axis, _ = _normalize_axis_for_nor(matrix, normalization_axis)
     if axis == -1:
-        shape = matrix.shape[:-1] + (1,)
+        shape = (*matrix.shape[:-1], 1)
     else:
-        shape = matrix.shape[:-2] + (1, matrix.shape[-1])
+        shape = (*matrix.shape[:-2], 1, matrix.shape[-1])
     return jnp.zeros(shape, dtype=dtype)
 
 

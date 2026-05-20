@@ -1,4 +1,5 @@
-from typing import Any, Callable, Literal, NamedTuple, Optional, TypeAlias, cast
+from collections.abc import Callable
+from typing import Any, Literal, NamedTuple, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
@@ -6,7 +7,7 @@ from optax._src import base, numerics
 from optax.transforms import _masking
 
 MomentumAccumulator: TypeAlias = Literal["ema", "heavy_ball"]
-MaskOrFn: TypeAlias = Optional[Any | Callable[[base.Params], Any]]
+MaskOrFn: TypeAlias = Any | Callable[[base.Params], Any] | None
 
 
 def _is_aux_leaf(x: Any) -> bool:
@@ -194,7 +195,7 @@ def add_tiny(x):
     return x + jnp.finfo(x.dtype).tiny
 
 
-def dist_reduce(x: jax.Array, axis_name: Optional[str], op: str = "mean") -> jax.Array:
+def dist_reduce(x: jax.Array, axis_name: str | None, op: str = "mean") -> jax.Array:
     """Applies a distributed reduction (pmean, pmax, psum) if an axis name is provided.
 
     Args:

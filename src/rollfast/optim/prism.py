@@ -6,14 +6,14 @@ Newton-Schulz coefficient plumbing; ``mode="bidirectional"`` keeps its separate
 inverse-root coefficients.
 """
 
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 from optax._src import base, combine, transform, utils
 from optax.transforms import _masking
 
-from rollfast.optim.adam import adamw
 from rollfast.optim._matrix_runtime import (
     apply_matrix_post_shape_lookahead,
     finish_matrix_runtime_step,
@@ -21,14 +21,15 @@ from rollfast.optim._matrix_runtime import (
     init_matrix_momentum_state,
     prepare_matrix_runtime_step,
 )
+from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
     DimNumsTree,
     MatrixDimensionNumbers,
     WeightDimNumOrFn,
     _compute_matrix_reshape,
-    _make_equinox_matrix_spec,
     _is_dimension_numbers_leaf,
     _is_standard_2d_spec,
+    _make_equinox_matrix_spec,
     _make_matrix_partition_fns,
     _resolve_update_dimension_numbers,
     _validate_matrix_operand,
@@ -192,7 +193,7 @@ def _apply_prism_math(
     return augmented_O[..., : m_raw.shape[-2], :]
 
 
-def _invroot_coeffs_iter(r: int, steps: Optional[int] = None, scale: float = 1.0):
+def _invroot_coeffs_iter(r: int, steps: int | None = None, scale: float = 1.0):
     """Yields (a, b, c) scaled for degree-r inverse root: a/s, b/s^{r+1}, c/s^{2r+1}.
 
     Cycles the final steady-state entry when `steps` > table length.
@@ -239,7 +240,7 @@ def _double_sided_matmul_invroot(
     P: jax.Array,
     r: int,
     s: int = 1,
-    steps: Optional[int] = None,
+    steps: int | None = None,
     eps: float = 1e-5,
     scale: float = 1.001,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
@@ -381,16 +382,16 @@ def _prism_ortho_step(
     gamma: float,
     ns_iters: int,
     ns_coeffs: jax.Array,
-    mu_nest: Optional[jax.Array] = None,
-    dim_nums: Optional[PrismDimensionNumbers] = None,
+    mu_nest: jax.Array | None = None,
+    dim_nums: PrismDimensionNumbers | None = None,
     mode: str = "original",
     preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
-    gamma_l: Optional[float] = None,
-    gamma_r: Optional[float] = None,
+    gamma_l: float | None = None,
+    gamma_r: float | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
 ) -> jax.Array:
     """Orchestrates PRISM spectral shaping with mode selection.
@@ -472,7 +473,7 @@ class ScaleByPrismState(NamedTuple):
     count: jax.Array
     mu: base.Updates
     magma_s: Any
-    key: Optional[jax.Array]
+    key: jax.Array | None
 
 
 def scale_by_prism(
@@ -486,24 +487,24 @@ def scale_by_prism(
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
-    gamma_l: Optional[float] = None,
-    gamma_r: Optional[float] = None,
+    gamma_l: float | None = None,
+    gamma_r: float | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
     momentum_accumulator: MomentumAccumulator = "ema",
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    raw_global_grad_clip: Optional[float] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable]] = None,
-    axis_name: Optional[str] = None,
+    weight_decay_mask: Any | Callable | None = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
     """The core PRISM gradient transformation.
@@ -687,24 +688,24 @@ def _build_unscaled_prism_branch(
     inv_eps: float,
     inv_scale: float,
     eps_gram: float,
-    gamma_l: Optional[float],
-    gamma_r: Optional[float],
+    gamma_l: float | None,
+    gamma_r: float | None,
     precision: jax.lax.PrecisionLike,
     nesterov: bool,
     shape_nesterov: bool,
     bias_correction: bool,
     momentum_accumulator: MomentumAccumulator,
-    mu_dtype: Optional[jax.typing.DTypeLike],
-    raw_global_grad_clip: Optional[float],
+    mu_dtype: jax.typing.DTypeLike | None,
+    raw_global_grad_clip: float | None,
     permissive_spike_protection: bool,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]],
+    grad_clip_max_amps: float | tuple[float, float] | None,
     weight_dimension_numbers: WeightDimNumOrFn | None,
     use_magma: bool,
     magma_p: float,
     magma_tau: float,
     weight_decay: base.ScalarOrSchedule,
-    weight_decay_mask: Optional[Union[Any, Callable]],
-    axis_name: Optional[str],
+    weight_decay_mask: Any | Callable | None,
+    axis_name: str | None,
     key: jax.Array,
 ) -> base.GradientTransformation:
     """Build the unscaled PRISM direction branch shared by wrappers."""
@@ -755,7 +756,7 @@ def prism(
     b1: float = 0.95,
     gamma: float = 1.0,
     weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     ns_iters: int = 5,
     ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
@@ -764,24 +765,24 @@ def prism(
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
-    gamma_l: Optional[float] = None,
-    gamma_r: Optional[float] = None,
+    gamma_l: float | None = None,
+    gamma_r: float | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
     momentum_accumulator: MomentumAccumulator = "ema",
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     key: jax.Array = jax.random.PRNGKey(42),
     # Partitioning Arguments
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,

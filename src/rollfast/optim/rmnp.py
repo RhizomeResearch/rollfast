@@ -16,7 +16,8 @@ intended geometry. As with Muon, learning rates for matrix leaves often need
 their own tuning; the Adam fallback can use ``adam_learning_rate`` separately.
 """
 
-from typing import Any, Callable, NamedTuple, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp

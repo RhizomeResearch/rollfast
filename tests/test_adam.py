@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from rollfast.optim.adam import ScaleByAdamState, scale_by_adam, adamw
+from rollfast.optim.adam import ScaleByAdamState, adamw, scale_by_adam
 from tests._typing import as_array_dict
 
 
@@ -132,7 +132,7 @@ def test_scale_by_adam_requires_params_for_weight_decay():
     grads = jax.tree.map(jnp.zeros_like, params)
     tx = scale_by_adam(weight_decay=0.1)
 
-    with pytest.raises(ValueError, match="params.*scale_by_adam"):
+    with pytest.raises(ValueError, match=r"params.*scale_by_adam"):
         tx.update(grads, tx.init(params))
 
 

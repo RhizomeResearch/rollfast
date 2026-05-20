@@ -1,11 +1,11 @@
-import jax.numpy as jnp
 from typing import cast
 
 import jax
+import jax.numpy as jnp
 import pytest
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
-from rollfast.optim.prism import ScaleByPrismState, scale_by_prism, prism
+from rollfast.optim.prism import ScaleByPrismState, prism, scale_by_prism
 from tests._typing import as_array_dict
 
 

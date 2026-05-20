@@ -39,8 +39,8 @@ from rollfast.optim.prism import prism
 from rollfast.optim.psgd import (
     GradClipMode,
     PreconditionerMode,
-    precond_update_prob_schedule,
     kron,
+    precond_update_prob_schedule,
 )
 from rollfast.optim.rmnp import rmnp
 from rollfast.schedules.wsd import _make_wsd_schedule_pair

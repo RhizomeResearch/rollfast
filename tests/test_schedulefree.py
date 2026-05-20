@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 from optax._src import base
+
 import rollfast
 import rollfast.schedules as schedules
 import rollfast.schedules.schedulefree as schedulefree_module
@@ -14,10 +15,10 @@ from rollfast.schedules.schedulefree import (
     ScheduleFreeState,
     schedule_free,
     schedule_free_adam,
-    schedule_free_prism,
-    schedule_free_kron,
     schedule_free_aurora,
     schedule_free_eval_params,
+    schedule_free_kron,
+    schedule_free_prism,
 )
 from tests._typing import as_array_dict
 
@@ -61,7 +62,7 @@ def test_schedule_free_requires_params_on_update():
     grads = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
     tx = schedule_free(optax.sgd(0.01), learning_rate=0.01)
 
-    with pytest.raises(ValueError, match="params.*schedule_free"):
+    with pytest.raises(ValueError, match=r"params.*schedule_free"):
         tx.update(grads, tx.init(params))
 
 
@@ -158,7 +159,7 @@ def test_schedule_free_kron_does_not_expose_mu_dtype():
 
 
 def test_schedule_free_kron_rejects_negative_weight_decay():
-    with pytest.raises(ValueError, match="weight_decay.*nonnegative"):
+    with pytest.raises(ValueError, match=r"weight_decay.*nonnegative"):
         schedule_free_kron(learning_rate=0.01, total_steps=100, weight_decay=-0.1)
 
 

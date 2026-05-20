@@ -1,7 +1,7 @@
 """Shared runtime plumbing for matrix optimizer transforms."""
 
 from collections.abc import Callable
-from typing import Any, NamedTuple, Optional, Tuple, Union, cast
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,8 +29,8 @@ from rollfast.utils import (
     dist_reduce,
 )
 
-GradClipMaxAmps = Optional[Union[float, Tuple[float, float]]]
-MaskOrFn = Optional[Union[Any, Callable[[base.Params], Any]]]
+GradClipMaxAmps = float | tuple[float, float] | None
+MaskOrFn = Any | Callable[[base.Params], Any] | None
 
 
 class MatrixRuntimeStep(NamedTuple):
@@ -44,7 +44,7 @@ class MatrixRuntimeStep(NamedTuple):
     mu_cast: base.Updates
     should_skip: jax.Array
     next_key: jax.Array
-    magma_key: Optional[jax.Array]
+    magma_key: jax.Array | None
 
 
 def _tree_cast_f32(tree: Any) -> Any:
@@ -60,7 +60,7 @@ def _tree_where_scalar(pred: jax.Array, a: Any, b: Any) -> Any:
     )
 
 
-def _tree_global_norm(grads: Any, axis_name: Optional[str] = None) -> jax.Array:
+def _tree_global_norm(grads: Any, axis_name: str | None = None) -> jax.Array:
     local_sq = sum(
         (
             jnp.sum(
@@ -99,7 +99,7 @@ def _clip_per_tensor_rms(
 def _split_runtime_keys(
     key: jax.Array,
     use_magma: bool,
-) -> tuple[jax.Array, jax.Array, Optional[jax.Array]]:
+) -> tuple[jax.Array, jax.Array, jax.Array | None]:
     if use_magma:
         next_key, sr_key, magma_key = jax.random.split(key, 3)
         return next_key, sr_key, magma_key
@@ -132,10 +132,10 @@ def prepare_matrix_runtime_step(
     bias_correction: bool,
     momentum_accumulator: MomentumAccumulator,
     mu_dtype: jax.typing.DTypeLike,
-    raw_global_grad_clip: Optional[float],
+    raw_global_grad_clip: float | None,
     permissive_spike_protection: bool,
     use_magma: bool,
-    axis_name: Optional[str],
+    axis_name: str | None,
 ) -> MatrixRuntimeStep:
     """Prepare clipped gradients, momentum, and shaping targets for one step."""
     _validate_positive_static_scalar("raw_global_grad_clip", raw_global_grad_clip)
@@ -256,7 +256,7 @@ def finish_matrix_runtime_step(
     updates: base.Updates,
     runtime: MatrixRuntimeStep,
     *,
-    params: Optional[base.Params],
+    params: base.Params | None,
     magma_s: base.Params,
     use_magma: bool,
     magma_p: float,
@@ -264,8 +264,8 @@ def finish_matrix_runtime_step(
     weight_decay: base.ScalarOrSchedule,
     weight_decay_mask: MaskOrFn,
     grad_clip_max_amps: GradClipMaxAmps,
-    axis_name: Optional[str],
-    guard_fn: Optional[Callable[[jax.Array], jax.Array]] = None,
+    axis_name: str | None,
+    guard_fn: Callable[[jax.Array], jax.Array] | None = None,
 ) -> tuple[base.Updates, base.Params]:
     """Apply shared post-processing after optimizer-specific matrix shaping."""
     _validate_grad_clip_max_amps(grad_clip_max_amps)

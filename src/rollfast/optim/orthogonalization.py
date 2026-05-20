@@ -58,7 +58,7 @@ _PRECONDITIONINGS = ("frobenius", "spectral", "aol", "schatten")
 def _optimal_quintic(l: float, u: float) -> tuple[float, float, float]:
     if not 0 < l <= u:
         raise ValueError(f"l must satisfy 0 < l <= u, got l={l}, u={u}.")
-    if 1 - 1e-5 <= l / u:
+    if l / u >= 1 - 1e-5:
         return (15 / 8) / u, (-10 / 8) / (u**3), (3 / 8) / (u**5)
 
     q = (3 * l + u) / 4

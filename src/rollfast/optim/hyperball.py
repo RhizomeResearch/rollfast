@@ -16,12 +16,14 @@ after it.
 
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 from optax._src import base, combine, numerics
 
+import rollfast.optim.muon as optax_muon
 from rollfast.optim.adam import scale_by_adam
 from rollfast.optim.aurora import (
     AuroraWeightDimNumOrFn,
@@ -31,7 +33,6 @@ from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
     _make_matrix_partition_fns,
 )
-import rollfast.optim.muon as optax_muon
 from rollfast.optim.orthogonalization import MUON_NS_COEFFS, MuonPreconditioning
 from rollfast.optim.prism import (
     _build_unscaled_prism_branch,
@@ -52,7 +53,7 @@ from rollfast.utils import (
     dist_reduce,
 )
 
-MaskOrFn = Optional[Union[Any, Callable[[base.Params], Any]]]
+MaskOrFn = Any | Callable[[base.Params], Any] | None
 
 
 class HyperballState(NamedTuple):
@@ -73,21 +74,21 @@ def _is_array_like(x: Any) -> bool:
 def _leaf_l2_norm(
     x: jax.Array,
     *,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
 ) -> jax.Array:
     sq = jnp.sum(numerics.abs_sq(x.astype(jnp.float32)))
     sq = dist_reduce(sq, axis_name, "sum")
     return jnp.sqrt(sq)
 
 
-def _safe_norm(x: jax.Array, *, eps: float, axis_name: Optional[str]) -> jax.Array:
+def _safe_norm(x: jax.Array, *, eps: float, axis_name: str | None) -> jax.Array:
     return jnp.maximum(
         _leaf_l2_norm(x, axis_name=axis_name),
         jnp.asarray(eps, dtype=jnp.float32),
     )
 
 
-def _init_norm_tree(params: base.Params, axis_name: Optional[str]) -> base.Params:
+def _init_norm_tree(params: base.Params, axis_name: str | None) -> base.Params:
     return jax.tree.map(
         lambda p: p if _is_aux_leaf(p) else _leaf_l2_norm(p, axis_name=axis_name),
         params,
@@ -97,7 +98,7 @@ def _init_norm_tree(params: base.Params, axis_name: Optional[str]) -> base.Param
 
 def _all_true_mask(params: base.Params) -> base.Params:
     return jax.tree.map(
-        lambda p: False if _is_aux_leaf(p) else True,
+        lambda p: not _is_aux_leaf(p),
         params,
         is_leaf=_is_aux_leaf,
     )
@@ -180,7 +181,7 @@ def _hyperball_leaf_update(
     cautious_weight_decay: bool,
     fallback_weight_decay: bool,
     eps: float,
-    axis_name: Optional[str],
+    axis_name: str | None,
 ) -> Any:
     if _is_aux_leaf(update) or _is_aux_leaf(param) or _is_aux_leaf(init_norm):
         return update
@@ -235,12 +236,12 @@ def apply_hyperball(
     weight_decay_mask: MaskOrFn = None,
     *,
     hyperball_mask: MaskOrFn = None,
-    fallback_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    fallback_learning_rate: base.ScalarOrSchedule | None = None,
     fallback_weight_decay: bool = False,
     caution: bool = False,
     cautious_weight_decay: bool = False,
     eps: float = 1e-12,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Terminal Optax transform implementing Hyperball projection.
 
@@ -290,7 +291,7 @@ def apply_hyperball(
     def update_fn(
         updates: base.Updates,
         state: base.OptState,
-        params: Optional[base.Params] = None,
+        params: base.Params | None = None,
         **extra_args: Any,
     ) -> tuple[base.Updates, base.OptState]:
         if params is None:
@@ -364,7 +365,7 @@ def _build_unscaled_adam_branch(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array,
 ) -> base.GradientTransformation:
     """Build the unscaled Adam fallback branch used by Hyperball wrappers."""
@@ -401,7 +402,7 @@ def _partitioned_matrix_hyperball(
     caution: bool,
     cautious_weight_decay: bool,
     hyperball_eps: float,
-    axis_name: Optional[str],
+    axis_name: str | None,
 ) -> base.GradientTransformationExtraArgs:
     """Assemble a matrix/Adam partition followed by terminal Hyperball."""
     resolved_hyperball_mask = (
@@ -451,7 +452,7 @@ def adamw_hyperball(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Adam with Hyperball replacing decoupled weight decay on selected leaves."""
@@ -670,31 +671,31 @@ def kron_hyperball(
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
-    memory_save_mode: Optional[str] = None,
+    memory_save_mode: str | None = None,
     whiten_grad: bool = True,
     update_preconditioner_first: bool = True,
     preconditioner_lr: float = 0.1,
-    preconditioner_init_scale: Optional[float] = None,
-    mu_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_update_precision: Optional[str] = "tensorfloat32",
-    precond_grads_precision: Optional[str] = None,
-    scanned_layers: Optional[base.Params] = None,
+    preconditioner_init_scale: float | None = None,
+    mu_dtype: str | jnp.dtype | None = None,
+    precond_dtype: str | jnp.dtype | None = None,
+    precond_update_precision: str | None = "tensorfloat32",
+    precond_grads_precision: str | None = None,
+    scanned_layers: base.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    preconditioner_mode: Union[str, PreconditionerMode] = PreconditionerMode.Q0P5EQ1P5,
+    preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
     beta_lipschitz: float = 0.9,
     track_lipschitz: bool = True,
     damping: float = 1e-9,
-    grad_clip_max_amps: float | Tuple[float, float] = (2.0, 10.0),
-    grad_clip_mode: Union[str, GradClipMode] = GradClipMode.PER_TENSOR_RMS,
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] = (2.0, 10.0),
+    grad_clip_mode: str | GradClipMode = GradClipMode.PER_TENSOR_RMS,
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
     *,
     hyperball_mask: MaskOrFn = None,
@@ -769,23 +770,23 @@ def prism_hyperball(
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
-    gamma_l: Optional[float] = None,
-    gamma_r: Optional[float] = None,
+    gamma_l: float | None = None,
+    gamma_r: float | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
     momentum_accumulator: MomentumAccumulator = "ema",
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -892,17 +893,17 @@ def _partitioned_aurora_hyperball(
     shape_nesterov: bool,
     bias_correction: bool,
     momentum_accumulator: MomentumAccumulator,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]],
-    raw_global_grad_clip: Optional[float],
+    grad_clip_max_amps: float | tuple[float, float] | None,
+    raw_global_grad_clip: float | None,
     permissive_spike_protection: bool,
-    mu_dtype: Optional[jax.typing.DTypeLike],
-    axis_name: Optional[str],
+    mu_dtype: jax.typing.DTypeLike | None,
+    axis_name: str | None,
     use_magma: bool,
     magma_p: float,
     magma_tau: float,
     guard_nonfinite: bool,
     key: jax.Array,
-    adam_learning_rate: Optional[base.ScalarOrSchedule],
+    adam_learning_rate: base.ScalarOrSchedule | None,
     adam_b1: float,
     adam_b2: float,
     adam_eps: float,
@@ -1002,17 +1003,17 @@ def aurora_hyperball(
     shape_nesterov: bool = True,
     bias_correction: bool = False,
     momentum_accumulator: MomentumAccumulator = "ema",
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -1087,17 +1088,17 @@ def riemannian_aurora_hyperball(
     shape_nesterov: bool = True,
     bias_correction: bool = False,
     momentum_accumulator: MomentumAccumulator = "ema",
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,

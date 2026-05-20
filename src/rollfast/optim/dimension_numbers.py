@@ -46,11 +46,7 @@ class _MatrixPartitionFns(NamedTuple):
 
 
 def _is_dimension_numbers_leaf(x: Any) -> bool:
-    return (
-        x is None
-        or isinstance(x, MatrixDimensionNumbers)
-        or isinstance(x, _masking.MaskedNode)
-    )
+    return x is None or isinstance(x, (MatrixDimensionNumbers, _masking.MaskedNode))
 
 
 def _is_array_like_leaf(x: Any) -> bool:

@@ -2,13 +2,14 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
-from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
+
 from rollfast.optim.aurora import (
     ScaleByAuroraState,
     aurora,
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
+from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from tests._typing import as_array_dict
 
 

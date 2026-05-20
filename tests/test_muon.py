@@ -131,7 +131,7 @@ def test_scale_by_muon_rejects_direct_fallback_leaves():
     grads = _grads(params)
     tx = scale_by_muon(ns_steps=2)
 
-    with pytest.raises(ValueError, match="scale_by_muon.*matrix dimension specs"):
+    with pytest.raises(ValueError, match=r"scale_by_muon.*matrix dimension specs"):
         tx.update(grads, tx.init(params), params)
 
 
@@ -218,7 +218,7 @@ def test_scale_by_muon_requires_params_for_magma_weight_decay():
     grads = jax.tree.map(jnp.zeros_like, params)
     tx = scale_by_muon(use_magma=True, weight_decay=0.1, ns_steps=2)
 
-    with pytest.raises(ValueError, match="params.*scale_by_muon"):
+    with pytest.raises(ValueError, match=r"params.*scale_by_muon"):
         tx.update(grads, tx.init(params))
 
 

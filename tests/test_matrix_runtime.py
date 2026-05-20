@@ -317,7 +317,7 @@ def test_matrix_runtime_requires_params_for_weight_decay():
         axis_name=None,
     )
 
-    with pytest.raises(ValueError, match="params.*weight_decay"):
+    with pytest.raises(ValueError, match=r"params.*weight_decay"):
         finish_matrix_runtime_step(
             grads,
             runtime,
