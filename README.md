@@ -133,9 +133,9 @@ A wrapper that eliminates the need for complex learning rate schedules by
 maintaining two sequences of parameters: a primary sequence $z$ (stepped via the
 base optimizer) and an averaged sequence $x$ (used for evaluation). Available for PRISM, PSGD Kron, and Adam.
 
-- **Features**: Supports "Practical", "Schedulet", and "Theoretical" weighting modes for
-  theoretically grounded averaging.
-- **Reference**: *The Road Less Scheduled* (Defazio et al., 2024).
+- **Features**: Supports "Practical", "Schedulet", "Theoretical", and "Power" (SF+) weighting modes for
+  theoretically grounded averaging. Optionally supports the newer **ScheduleFree+** components (e.g., Polyak step sizes).
+- **Reference**: *The Road Less Scheduled* (Defazio et al., 2024) and *ScheduleFree+: Scaling Learning-Rate-Free & Schedule-Free Learning to Large Language Models* (Defazio, 2026).
 
 ### 9. Magma (Momentum-Aligned Gradient Masking)
 
@@ -652,6 +652,13 @@ If you use `rollfast` in your research, please cite the relevant papers for the 
   Title = {Schedulers for Schedule-free: Theoretically inspired hyperparameters},
   Year = {2025},
   Eprint = {arXiv:2511.07767},
+}
+
+@misc{defazio2026schedulefreeplus,
+  Author = {A. Defazio},
+  Title = {ScheduleFree+: Scaling Learning-Rate-Free \& Schedule-Free Learning to Large Language Models},
+  Year = {2026},
+  Eprint = {arXiv:2605.19095},
 }
 ```
 
