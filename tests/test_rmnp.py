@@ -3,9 +3,15 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
-from rollfast.optim.rmnp import rmnp, scale_by_rmnp, scale_by_rmnp_shape
+from rollfast.optim.rmnp import (
+    ScaleByRmnpState,
+    rmnp,
+    scale_by_rmnp,
+    scale_by_rmnp_shape,
+)
 
 
 def test_scale_by_rmnp_row_normalizes_matrix_momentum():
@@ -33,6 +39,63 @@ def test_scale_by_rmnp_shape_matches_muon_width_scaling():
     scaled = cast(dict[str, jax.Array], scaled)
 
     assert jnp.allclose(scaled["w"], jnp.ones((2, 8)) * 2.0)
+
+
+def test_scale_by_rmnp_rejects_direct_fallback_leaves():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.ones_like, params)
+    tx = scale_by_rmnp(beta=0.0, nesterov=False)
+
+    with pytest.raises(ValueError, match=r"scale_by_rmnp.*matrix dimension specs"):
+        tx.update(grads, tx.init(params), params)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta": -0.1},
+        {"beta": 1.0},
+        {"eps": 0.0},
+    ],
+)
+def test_scale_by_rmnp_rejects_invalid_static_parameters(kwargs):
+    with pytest.raises(ValueError):
+        scale_by_rmnp(**kwargs)
+
+
+def test_scale_by_rmnp_shape_rejects_invalid_consistent_rms():
+    with pytest.raises(ValueError, match="consistent_rms"):
+        scale_by_rmnp_shape(consistent_rms=0.0)
+
+
+def test_scale_by_rmnp_heavy_ball_momentum_accumulator():
+    params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+    tx = scale_by_rmnp(
+        beta=0.5,
+        nesterov=False,
+        momentum_accumulator="heavy_ball",
+    )
+    state = tx.init(params)
+    _, state = tx.update(grads, state, params)
+    state = cast(ScaleByRmnpState, state)
+    mu = cast(dict[str, jax.Array], state.mu)
+
+    assert jnp.allclose(mu["w"], grads["w"])
+
+
+def test_scale_by_rmnp_bf16_momentum_state():
+    params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"]) * 0.1}
+    tx = scale_by_rmnp(beta=0.0, nesterov=False, mu_dtype=jnp.bfloat16)
+    _, state = tx.update(grads, tx.init(params), params)
+    state = cast(ScaleByRmnpState, state)
+    mu = cast(dict[str, jax.Array], state.mu)
+
+    assert mu["w"].dtype == jnp.bfloat16
 
 
 def test_rmnp_partitions_vectors_to_adam():
@@ -80,3 +143,35 @@ def test_rmnp_applies_weight_decay_to_matrix_branch():
     next_params = cast(dict[str, jax.Array], optax.apply_updates(params, updates))
 
     assert jnp.all(next_params["w"] < params["w"])
+
+
+def test_rmnp_fallback_adam_inherits_weight_decay_by_default():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.zeros_like, params)
+
+    inherit_tx = rmnp(
+        learning_rate=1.0,
+        weight_decay=0.2,
+        beta=0.0,
+        nesterov=False,
+        weight_decay_mask={"w": False, "b": True},
+    )
+    override_tx = rmnp(
+        learning_rate=1.0,
+        weight_decay=0.2,
+        adam_weight_decay=0.0,
+        beta=0.0,
+        nesterov=False,
+        weight_decay_mask={"w": False, "b": True},
+    )
+
+    inherit_updates, _ = inherit_tx.update(grads, inherit_tx.init(params), params)
+    override_updates, _ = override_tx.update(grads, override_tx.init(params), params)
+    inherit_updates = cast(dict[str, jax.Array], inherit_updates)
+    override_updates = cast(dict[str, jax.Array], override_updates)
+
+    assert jnp.allclose(inherit_updates["b"], -0.2 * params["b"])
+    assert jnp.allclose(override_updates["b"], jnp.zeros_like(params["b"]))

@@ -1,5 +1,7 @@
+import inspect
+from collections.abc import Callable
 from enum import Enum
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -9,15 +11,17 @@ from optax._src import base, combine, numerics, transform
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import (
     AuroraWeightDimNumOrFn,
-    _is_dim_leaf,
     scale_by_aurora,
     scale_by_riemannian_aurora,
 )
 from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
-    _get_dimension_numbers,
-    _is_dimension_numbers_leaf,
-    _mask_dimension_numbers,
+    _make_matrix_partition_fns,
+)
+from rollfast.optim.orthogonalization import (
+    MUON_NS_COEFFS,
+    MuonNsCoeffs,
+    MuonPreconditioning,
 )
 from rollfast.optim.prism import (
     scale_by_prism,
@@ -28,13 +32,12 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule,
     scale_by_kron,
 )
-from rollfast.schedules.wsd import wsd_schedule
-from rollfast.utils import _stochastic_round_bf16
+from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
+from rollfast.utils import _stochastic_round_bf16, _validate_nonnegative_static_scalar
 
-ScheduleFreeLearningRate = Union[
-    base.ScalarOrSchedule,
-    Callable[[jax.typing.ArrayLike, Optional[base.Params]], Any],
-]
+ScheduleFreeLearningRate = (
+    base.ScalarOrSchedule | Callable[[jax.typing.ArrayLike, base.Params | None], Any]
+)
 
 
 class WeightingMode(str, Enum):
@@ -66,21 +69,97 @@ class ScheduleFreeState(NamedTuple):
     base_state: base.OptState
     z: base.Params
     key: jax.Array
-    lr_max: Optional[base.Params] = None
-    scheduled_lr: Optional[base.Params] = None
-    grad_l1_ema: Optional[jax.Array] = None
-    grad_l1_ema_corr: Optional[jax.Array] = None
-    polyak_lr: Optional[jax.Array] = None
-    polyak_value: Optional[jax.Array] = None
-    ip_term: Optional[jax.Array] = None
+    lr_max: base.Params | None = None
+    scheduled_lr: base.Params | None = None
+    grad_l1_ema: jax.Array | None = None
+    grad_l1_ema_corr: jax.Array | None = None
+    polyak_lr: jax.Array | None = None
+    polyak_value: jax.Array | None = None
+    ip_term: jax.Array | None = None
+
+
+def _call_learning_rate(
+    learning_rate: Callable[..., Any],
+    count: jax.Array,
+    params: base.Params | None,
+) -> Any:
+    try:
+        signature = inspect.signature(learning_rate)
+    except (TypeError, ValueError):
+        return learning_rate(count)
+
+    parameters = tuple(signature.parameters.values())
+    accepts_two_positional = any(
+        parameter.kind == inspect.Parameter.VAR_POSITIONAL for parameter in parameters
+    ) or (
+        sum(
+            parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            for parameter in parameters
+        )
+        >= 2
+    )
+
+    if accepts_two_positional:
+        return learning_rate(count, params)
+    if "params" in signature.parameters:
+        return learning_rate(count, params=params)
+    return learning_rate(count)
+
+
+def _make_dual_schedule_fn(
+    partition: Any,
+    matrix_label: str,
+    matrix_schedule: base.Schedule,
+    adam_schedule: base.Schedule,
+) -> Callable[[jax.typing.ArrayLike, base.Params | None], Any]:
+    def dual_schedule_fn(count, params):
+        if params is None:
+            raise ValueError("dual schedule functions require `params`.")
+        labels = partition.labels(params)
+        matrix_lr = matrix_schedule(count)
+        adam_lr = adam_schedule(count)
+        return jax.tree.map(
+            lambda label: (
+                None
+                if label is None
+                else (matrix_lr if label == matrix_label else adam_lr)
+            ),
+            labels,
+            is_leaf=lambda x: x is None,
+        )
+
+    return dual_schedule_fn
+
+
+def _append_decayed_weights_and_lr(
+    components: list[Any],
+    *,
+    weight_decay: float,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
+    learning_rate: base.ScalarOrSchedule,
+) -> list[Any]:
+    _validate_nonnegative_static_scalar("weight_decay", weight_decay)
+    _wd_is_nonzero = (
+        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
+    )
+    if _wd_is_nonzero:
+        components.append(
+            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+        )
+    components.append(transform.scale_by_learning_rate(learning_rate))
+    return components
 
 
 def schedule_free(
     base_optimizer: base.GradientTransformation,
     learning_rate: ScheduleFreeLearningRate,
     b1: float = 0.9,
-    weighting_mode: Union[str, WeightingMode] = WeightingMode.SCHEDULET,
-    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    weighting_mode: str | WeightingMode = WeightingMode.SCHEDULET,
+    state_dtype: jax.typing.DTypeLike | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
     *,
     r: float = 0.0,
@@ -88,15 +167,15 @@ def schedule_free(
     weight_lr_power: float = 2.0,
     use_lr_max: bool = False,
     b1_anneal_steps: int = 0,
-    b1_max: Optional[float] = 0.965,
+    b1_max: float | None = 0.965,
     polyak: bool = False,
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
     polyak_eps: float = 1e-30,
-    polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
+    polyak_axis_name: str | tuple[str, ...] | None = None,
     lr_max_init: float = 1e-8,
     adamc_weight_decay: float = 0.0,
-    adamc_weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    adamc_weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free wrapper with optional ScheduleFree+ components.
 
@@ -161,10 +240,7 @@ def schedule_free(
     def _resolve_learning_rate(count, params):
         if callable(learning_rate):
             lr_fn = cast(Any, learning_rate)
-            try:
-                lr_tree = lr_fn(count, params)
-            except TypeError:
-                lr_tree = lr_fn(count)
+            lr_tree = _call_learning_rate(lr_fn, count, params)
         else:
             lr_tree = learning_rate
         lr_tree = _broadcast_to_params(lr_tree, params)
@@ -235,6 +311,8 @@ def schedule_free(
         )
         return _broadcast_to_params(mask, params)
 
+    base_optimizer = base.with_extra_args_support(base_optimizer)
+
     def init_fn(params):
         dtype = (
             state_dtype
@@ -265,10 +343,21 @@ def schedule_free(
 
     def update_fn(updates, state, params=None, **extra_args):
         if params is None:
-            raise ValueError("schedule_free requires params to be passed to update().")
+            raise ValueError(
+                "`params` must be provided to `schedule_free.update`; "
+                "Schedule-Free needs the current parameters to interpolate "
+                "between the averaged and z sequences."
+            )
 
         next_state_key, sr_key = jax.random.split(state.key, 2)
         lr_tree = _resolve_learning_rate(state.step_count, params)
+        lr_leaves = jax.tree.leaves(lr_tree, is_leaf=lambda x: x is None)
+        if any(x is not None and x.shape != () for x in lr_leaves):
+            raise ValueError(
+                "schedule_free learning-rate leaves must be scalar values. "
+                "Return one scalar or a PyTree of scalar leaves from callable "
+                "learning-rate schedules."
+            )
 
         function_value = extra_args.get("function_value", None)
         if function_value is None:
@@ -529,7 +618,7 @@ def schedule_free(
     return base.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
-def _resolve_sf_plus_bool(schedule_free_plus: bool, override: Optional[bool]) -> bool:
+def _resolve_sf_plus_bool(schedule_free_plus: bool, override: bool | None) -> bool:
     return schedule_free_plus if override is None else override
 
 
@@ -539,35 +628,37 @@ def schedule_free_prism(
     # Schedule Config
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
-    weighting_mode: Union[str, WeightingMode] = WeightingMode.PRACTICAL,
+    weighting_mode: str | WeightingMode = WeightingMode.PRACTICAL,
     # Schedule-Free Config
     sf_b1: float = 0.90,
-    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    state_dtype: jax.typing.DTypeLike | None = None,
     # PRISM Config
     prism_b1: float = 0.0,
     gamma: float = 1.0,
     ns_iters: int = 5,
+    ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
-    gamma_l: Optional[float] = None,
-    gamma_r: Optional[float] = None,
+    gamma_l: float | None = None,
+    gamma_r: float | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     shape_nesterov: bool = True,
     weight_decay: float = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
     # Partitioning Arguments
-    adam_learning_rate: Optional[float] = None,
-    adam_b1: Optional[float] = None,
-    adam_b2: Optional[float] = None,
+    adam_learning_rate: float | None = None,
+    adam_b1: float | None = None,
+    adam_b2: float | None = None,
     adam_eps: float = 1e-8,
     prism_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     *,
@@ -575,19 +666,16 @@ def schedule_free_prism(
     sf_r: float = 0.0,
     sf_c_warmup: int = 0,
     sf_weight_lr_power: float = 2.0,
-    sf_use_lr_max: Optional[bool] = None,
+    sf_use_lr_max: bool | None = None,
     sf_b1_anneal_steps: int = 0,
-    sf_b1_max: Optional[float] = 0.965,
-    polyak: Optional[bool] = None,
-    use_adamc: Optional[bool] = None,
+    sf_b1_max: float | None = 0.965,
+    polyak: bool | None = None,
+    use_adamc: bool | None = None,
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
-    polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
+    polyak_axis_name: str | tuple[str, ...] | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free PRISM Optimizer with Partitioning, optionally using SF+."""
-    if adam_learning_rate is None:
-        adam_learning_rate = learning_rate
-
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -598,38 +686,15 @@ def schedule_free_prism(
     inner_weight_decay = 0.0 if use_adamc_enabled else weight_decay
     inner_weight_decay_mask = None if use_adamc_enabled else weight_decay_mask
 
-    prism_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    prism_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
 
-    if adam_learning_rate == learning_rate:
-        adam_schedule = prism_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
-
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(prism_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def prism_weight_dim_nums_fn(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return _mask_dimension_numbers(dim_nums)
+    partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
 
     key_prism, key_adam = jax.random.split(key, 2)
 
@@ -638,7 +703,9 @@ def schedule_free_prism(
             b1=prism_b1,
             gamma=gamma,
             ns_iters=ns_iters,
+            ns_coeffs=ns_coeffs,
             mode=mode,
+            preconditioning=preconditioning,
             inv_steps=inv_steps,
             inv_eps=inv_eps,
             inv_scale=inv_scale,
@@ -653,7 +720,7 @@ def schedule_free_prism(
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
             axis_name=axis_name,
-            weight_dimension_numbers=prism_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=False,
             weight_decay=0.0,
             weight_decay_mask=None,
@@ -661,17 +728,12 @@ def schedule_free_prism(
         ),
     ]
 
-    _wd_is_nonzero = (
-        inner_weight_decay > 0.0
-        if isinstance(inner_weight_decay, (int, float))
-        else True
+    _append_decayed_weights_and_lr(
+        prism_components,
+        weight_decay=inner_weight_decay,
+        weight_decay_mask=inner_weight_decay_mask,
+        learning_rate=prism_schedule,
     )
-    if _wd_is_nonzero:
-        prism_components.append(
-            transform.add_decayed_weights(inner_weight_decay, inner_weight_decay_mask)
-        )
-
-    prism_components.append(transform.scale_by_learning_rate(prism_schedule))
 
     base_opt = combine.partition(
         transforms={
@@ -689,22 +751,17 @@ def schedule_free_prism(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )
-
-    def dual_schedule_fn(count, params):
-        labels = param_labels(params)
-        p_lr = prism_schedule(count)
-        a_lr = adam_schedule(count)
-        return jax.tree.map(
-            lambda l: None if l is None else (p_lr if l == "prism" else a_lr),
-            labels,
-            is_leaf=lambda x: x is None,
-        )
 
     return schedule_free(
         base_optimizer=base_opt,
-        learning_rate=dual_schedule_fn,
+        learning_rate=_make_dual_schedule_fn(
+            partition,
+            "prism",
+            prism_schedule,
+            adam_schedule,
+        ),
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
@@ -730,13 +787,13 @@ def schedule_free_kron(
     # Schedule Config
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
-    weighting_mode: Union[str, WeightingMode] = WeightingMode.PRACTICAL,
+    weighting_mode: str | WeightingMode = WeightingMode.PRACTICAL,
     # Schedule-Free Config
     sf_b1: float = 0.9,
-    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    state_dtype: jax.typing.DTypeLike | None = None,
     # Standard Optimizer Args
     weight_decay: float = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     # PSGD Kron parameters
     preconditioner_update_probability: base.ScalarOrSchedule = (
         precond_update_prob_schedule()
@@ -744,42 +801,96 @@ def schedule_free_kron(
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
-    memory_save_mode: Optional[str] = None,
+    memory_save_mode: str | None = None,
     update_preconditioner_first: bool = True,
     preconditioner_lr: float = 0.1,
-    preconditioner_init_scale: Optional[float] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_update_precision: Optional[str] = "tensorfloat32",
-    precond_grads_precision: Optional[str] = None,
-    scanned_layers: Optional[base.Params] = None,
+    preconditioner_init_scale: float | None = None,
+    precond_dtype: str | jnp.dtype | None = None,
+    precond_update_precision: str | None = "tensorfloat32",
+    precond_grads_precision: str | None = None,
+    scanned_layers: base.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    preconditioner_mode: Union[str, PreconditionerMode] = PreconditionerMode.Q0P5EQ1P5,
+    preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
     beta_lipschitz: float = 0.9,
     track_lipschitz: bool = True,
     damping: float = 1e-9,
-    grad_clip_max_amps: float | Tuple[float, float] = (2.0, 10.0),
-    grad_clip_mode: Union[str, GradClipMode] = GradClipMode.PER_TENSOR_RMS,
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] = (2.0, 10.0),
+    grad_clip_mode: str | GradClipMode = GradClipMode.PER_TENSOR_RMS,
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
     *,
     schedule_free_plus: bool = False,
     sf_r: float = 0.0,
     sf_c_warmup: int = 0,
     sf_weight_lr_power: float = 2.0,
-    sf_use_lr_max: Optional[bool] = None,
+    sf_use_lr_max: bool | None = None,
     sf_b1_anneal_steps: int = 0,
-    sf_b1_max: Optional[float] = 0.965,
-    polyak: Optional[bool] = None,
-    use_adamc: Optional[bool] = None,
+    sf_b1_max: float | None = 0.965,
+    polyak: bool | None = None,
+    use_adamc: bool | None = None,
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
-    polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
+    polyak_axis_name: str | tuple[str, ...] | None = None,
 ) -> base.GradientTransformationExtraArgs:
-    """Schedule-Free PSGD Kron optimizer, optionally using SF+."""
+    """Schedule-Free PSGD Kron optimizer, optionally using SF+.
+
+    Uses the shared `rollfast.schedules.schedulefree` wrapper.
+
+    Args:
+        learning_rate: Peak learning rate.
+        total_steps: Total training steps (required for WSD schedule generation).
+        warmup_fraction: Fraction of steps for warmup.
+        decay_fraction: Fraction of steps for decay.
+        weighting_mode: The weighting strategy (Practical, Theoretical, Schedulet).
+        sf_b1: Schedule-free interpolation parameter (replaces momentum).
+        state_dtype: Dtype for schedule-free z-sequence.
+        weight_decay: Weight decay applied to the optimizer.
+        weight_decay_mask: Mask for weight decay.
+        preconditioner_update_probability: Probability (or schedule) of updating
+            the preconditioner matrix Q at each step.
+        max_size_triangular: Max size for a dimension to be considered for
+            dense/triangular preconditioning. Larger dims become diagonal.
+        max_skew_triangular: Max aspect ratio skew for dense factors.
+        min_ndim_triangular: Minimum tensor rank required for dense preconditioning.
+        memory_save_mode: Strategy to force diagonal approximations to save RAM.
+            Values: [None, 'one_diag', 'all_diag'].
+        update_preconditioner_first: Update Q before applying it to the gradient.
+        preconditioner_lr: Learning rate for the preconditioner matrix Q.
+        preconditioner_init_scale: Initial scale for Q. If None, computed on-the-fly.
+        precond_dtype: Dtype for preconditioner storage (e.g. float32, bfloat16).
+        precond_update_precision: JAX precision for Q update matmuls.
+        precond_grads_precision: JAX precision for gradient application matmuls.
+        scanned_layers: PyTree mask indicating layers that are vmapped/scanned.
+        lax_map_scanned_layers: Use lax.map for scanning (saves memory vs vmap).
+        lax_map_batch_size: Batch size for lax.map.
+        preconditioner_mode: Update rule for Q. See PreconditionerMode enum.
+        beta_lipschitz: EMA factor for Lipschitz constant estimation.
+        track_lipschitz: Enable adaptive step size for Q based on Lipschitz.
+        damping: Numerical damping for stability.
+        grad_clip_max_amps: (max_rms, max_val) for gradient clipping.
+        grad_clip_mode: Strategy for clipping ('per_tensor_rms' or 'global_rms').
+        raw_global_grad_clip: Threshold for global gradient norm clipping (spike protection).
+        permissive_spike_protection: If True, allows updates during spikes if prob=1.0.
+        newton_schulz_iters: Iterations for NS mode (default 5).
+        axis_name: Axis name for distributed (SPMD) reduction.
+        key: PRNG key for stochastic elements.
+
+    Returns:
+        A Schedule-Free gradient transformation.
+
+    References:
+        Defazio, A., Yang, X. A., Mehta, H., Mishchenko, K., Khaled, A., & Cutkosky, A. (2024).
+        The Road Less Scheduled.
+        arXiv preprint arXiv:2405.15682.
+
+        Pun, Y.-M., Buchholz, M., & Gower, R. M. (2025).
+        Schedulers for Schedule-free: Theoretically inspired hyperparameters.
+        arXiv preprint arXiv:2511.07767.
+    """
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -829,17 +940,12 @@ def schedule_free_kron(
         )
     ]
 
-    _wd_is_nonzero = (
-        inner_weight_decay > 0.0
-        if isinstance(inner_weight_decay, (int, float))
-        else True
+    _append_decayed_weights_and_lr(
+        base_opt_components,
+        weight_decay=inner_weight_decay,
+        weight_decay_mask=inner_weight_decay_mask,
+        learning_rate=lr_schedule,
     )
-    if _wd_is_nonzero:
-        base_opt_components.append(
-            transform.add_decayed_weights(inner_weight_decay, inner_weight_decay_mask)
-        )
-
-    base_opt_components.append(transform.scale_by_learning_rate(lr_schedule))
     base_optimizer = combine.chain(*base_opt_components)
 
     return schedule_free(
@@ -870,32 +976,32 @@ def schedule_free_adam(
     # Schedule Config
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
-    weighting_mode: Union[str, WeightingMode] = WeightingMode.PRACTICAL,
+    weighting_mode: str | WeightingMode = WeightingMode.PRACTICAL,
     # Schedule-Free Config
     sf_b1: float = 0.9,
-    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    state_dtype: jax.typing.DTypeLike | None = None,
     # Adam Config
-    b1: Optional[float] = None,
-    b2: Optional[float] = None,
+    b1: float | None = None,
+    b2: float | None = None,
     eps: float = 1e-8,
     weight_decay: float = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
     *,
     schedule_free_plus: bool = False,
     sf_r: float = 0.0,
     sf_c_warmup: int = 0,
     sf_weight_lr_power: float = 2.0,
-    sf_use_lr_max: Optional[bool] = None,
+    sf_use_lr_max: bool | None = None,
     sf_b1_anneal_steps: int = 0,
-    sf_b1_max: Optional[float] = 0.965,
-    polyak: Optional[bool] = None,
-    use_adamc: Optional[bool] = None,
+    sf_b1_max: float | None = 0.965,
+    polyak: bool | None = None,
+    use_adamc: bool | None = None,
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
-    polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
+    polyak_axis_name: str | tuple[str, ...] | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free Adam optimizer, optionally using ScheduleFree+.
 
@@ -968,9 +1074,9 @@ def schedule_free_aurora(
     total_steps: int,
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
-    weighting_mode: Union[str, Any] = "practical",
+    weighting_mode: str | Any = "practical",
     sf_b1: float = 0.90,
-    state_dtype: Optional[jax.typing.DTypeLike] = None,
+    state_dtype: jax.typing.DTypeLike | None = None,
     aurora_b1: float = 0.0,
     pp_iterations: int = 2,
     pp_beta: float = 0.5,
@@ -986,17 +1092,17 @@ def schedule_free_aurora(
     eps: float = 1e-7,
     shape_nesterov: bool = True,
     weight_decay: float = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     guard_nonfinite: bool = True,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[float] = None,
-    adam_b1: Optional[float] = None,
-    adam_b2: Optional[float] = None,
+    adam_learning_rate: float | None = None,
+    adam_b1: float | None = None,
+    adam_b2: float | None = None,
     adam_eps: float = 1e-8,
     aurora_weight_dimension_numbers: AuroraWeightDimNumOrFn | None = None,
     *,
@@ -1004,19 +1110,16 @@ def schedule_free_aurora(
     sf_r: float = 0.0,
     sf_c_warmup: int = 0,
     sf_weight_lr_power: float = 2.0,
-    sf_use_lr_max: Optional[bool] = None,
+    sf_use_lr_max: bool | None = None,
     sf_b1_anneal_steps: int = 0,
-    sf_b1_max: Optional[float] = 0.965,
-    polyak: Optional[bool] = None,
-    use_adamc: Optional[bool] = None,
+    sf_b1_max: float | None = 0.965,
+    polyak: bool | None = None,
+    use_adamc: bool | None = None,
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
-    polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
+    polyak_axis_name: str | tuple[str, ...] | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Schedule-Free Aurora with Adam fallback for non-matrix leaves, optionally using SF+."""
-    if adam_learning_rate is None:
-        adam_learning_rate = learning_rate
-
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -1027,38 +1130,20 @@ def schedule_free_aurora(
     inner_weight_decay = 0.0 if use_adamc_enabled else weight_decay
     inner_weight_decay_mask = None if use_adamc_enabled else weight_decay_mask
 
-    aurora_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    aurora_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-    if adam_learning_rate == learning_rate:
-        adam_schedule = aurora_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     key_aurora, key_adam = jax.random.split(key, 2)
 
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(aurora_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dim_leaf,
-        )
-
-    def aurora_weight_dim_nums_fn(params):
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+    partition = _make_matrix_partition_fns(
+        aurora_weight_dimension_numbers,
+        "aurora",
+    )
 
     if riemannian:
         scale = scale_by_riemannian_aurora(
@@ -1078,7 +1163,7 @@ def schedule_free_aurora(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=False,
             weight_decay=0.0,
             weight_decay_mask=None,
@@ -1102,7 +1187,7 @@ def schedule_free_aurora(
             raw_global_grad_clip=raw_global_grad_clip,
             permissive_spike_protection=permissive_spike_protection,
             grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
+            weight_dimension_numbers=partition.masked_specs,
             use_magma=False,
             weight_decay=0.0,
             weight_decay_mask=None,
@@ -1112,16 +1197,12 @@ def schedule_free_aurora(
         )
 
     aurora_components = [scale]
-    _wd_is_nonzero = (
-        inner_weight_decay > 0.0
-        if isinstance(inner_weight_decay, (int, float))
-        else True
+    _append_decayed_weights_and_lr(
+        aurora_components,
+        weight_decay=inner_weight_decay,
+        weight_decay_mask=inner_weight_decay_mask,
+        learning_rate=aurora_schedule,
     )
-    if _wd_is_nonzero:
-        aurora_components.append(
-            transform.add_decayed_weights(inner_weight_decay, inner_weight_decay_mask)
-        )
-    aurora_components.append(transform.scale_by_learning_rate(aurora_schedule))
 
     base_opt = combine.partition(
         transforms={
@@ -1139,24 +1220,17 @@ def schedule_free_aurora(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )
-
-    def dual_schedule_fn(count, params):
-        labels = param_labels(params)
-        a_lr = aurora_schedule(count)
-        adam_lr = adam_schedule(count)
-        return jax.tree.map(
-            lambda label: (
-                None if label is None else (a_lr if label == "aurora" else adam_lr)
-            ),
-            labels,
-            is_leaf=lambda x: x is None,
-        )
 
     return schedule_free(
         base_optimizer=base_opt,
-        learning_rate=dual_schedule_fn,
+        learning_rate=_make_dual_schedule_fn(
+            partition,
+            "aurora",
+            aurora_schedule,
+            adam_schedule,
+        ),
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
@@ -1177,7 +1251,7 @@ def schedule_free_aurora(
 
 
 def schedule_free_eval_params(state: base.OptState, params: base.Params):
-    """Params for evaluation of :func:`optax.contrib.schedule_free`.
+    """Params for evaluation from Rollfast's Schedule-Free state.
 
     Args:
         state: The optimizer state (must be a ScheduleFreeState).
@@ -1199,3 +1273,16 @@ def schedule_free_eval_params(state: base.OptState, params: base.Params):
         z,
         is_leaf=lambda x: x is None,
     )
+
+
+__all__ = [
+    "ScheduleFreeLearningRate",
+    "ScheduleFreeState",
+    "WeightingMode",
+    "schedule_free",
+    "schedule_free_adam",
+    "schedule_free_aurora",
+    "schedule_free_eval_params",
+    "schedule_free_kron",
+    "schedule_free_prism",
+]

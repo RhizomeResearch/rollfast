@@ -12,8 +12,8 @@ from rollfast.schedules.schedulefree import (
     schedule_free_kron,
     schedule_free_prism,
 )
-from tests._typing import as_array_dict
 from rollfast.utils import apply_updates, apply_updates_prefix
+from tests._typing import as_array_dict
 
 # Base optimizers and their kwargs
 base_optimizers = [

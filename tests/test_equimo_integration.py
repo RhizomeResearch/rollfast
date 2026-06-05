@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+import optax
 import pytest
 
 try:
@@ -11,9 +12,13 @@ try:
 except ImportError:
     EQUINOX_EQUIMO_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(
-    not EQUINOX_EQUIMO_AVAILABLE, reason="equinox or equimo not available"
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not EQUINOX_EQUIMO_AVAILABLE, reason="equinox or equimo not available"
+    ),
+]
 
 if EQUINOX_EQUIMO_AVAILABLE:
     from rollfast.optim.adam import adamw
@@ -81,7 +86,16 @@ def run_opt_step(model, tx, x, y, key):
 
     loss, grads = loss_fn(model, x, y, key)
     updates, opt_state = tx.update(grads, opt_state, params)
-    model = eqx.combine(updates, static)
+    del opt_state
+    updated_params = optax.apply_updates(params, updates)
+    model = eqx.combine(updated_params, static)
+
+    update_leaves = jax.tree.leaves(updates, is_leaf=lambda x: x is None)
+    finite_updates = [
+        jnp.all(jnp.isfinite(update)) for update in update_leaves if update is not None
+    ]
+    assert jnp.all(jnp.asarray(finite_updates))
+    assert jnp.all(jnp.isfinite(loss))
     return model, loss
 
 

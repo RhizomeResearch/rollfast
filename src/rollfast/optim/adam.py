@@ -1,21 +1,28 @@
-# This code is coming mostly from Optax itself.
-# I just modified it to add support for Magma
-# and stochastic rounding
-from typing import Any, Callable, NamedTuple, Optional, Union, cast
+"""AdamW variants with FP32 moments, stochastic BF16 storage, and Magma support."""
+
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 import optax
 import optax.tree
 from optax._src import base, combine, numerics, transform, utils
-from optax.transforms import _masking
 
-from rollfast.optim.magma import apply_magma_internal
+from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
+    _apply_weight_decay_tree,
+    _cast_state_tree,
+    _has_nonzero_or_scheduled,
+    _init_magma_state,
+    _is_aux_leaf,
+    _resolve_mask,
+    _resolve_scalar,
     _safe_bias_correction,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
+    _zeros_like_tree,
 )
 
 
@@ -26,7 +33,7 @@ class ScaleByAdamState(NamedTuple):
     mu: base.Updates
     nu: base.Updates
     magma_s: Any
-    key: Optional[jax.Array]
+    key: jax.Array | None
 
 
 def scale_by_adam(
@@ -34,15 +41,15 @@ def scale_by_adam(
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
     *,
     weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     nesterov: bool = False,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
     r"""Rescale updates according to the Adam algorithm.
@@ -55,9 +62,12 @@ def scale_by_adam(
         eps: Term added to the denominator to improve numerical stability.
         eps_root: Term added to the denominator inside the square-root to improve
             numerical stability when backpropagating gradients through the rescaling.
-        mu_dtype: Optional `dtype` to be used for the first order accumulator; if
-            `None` then the `dtype` is inferred from `params` and `updates`.
-        weight_decay: Strength of the weight decay regularization (only used if use_magma=True).
+        mu_dtype: Optional dtype for Adam state storage. Real dtypes are used for
+            both first and second moments; complex first moments keep a real
+            second-moment tree.
+        weight_decay: Optional decoupled weight decay applied inside this transform
+            when `params` are provided. Public `adamw` only passes nonzero decay here
+            when `use_magma=True`; otherwise it applies decay as a separate transform.
         weight_decay_mask: A tree with same structure as (or a prefix of) the params PyTree,
             or a Callable that returns such a pytree given the params/updates.
             The leaves should be booleans, `True` for leaves/subtrees you want to
@@ -66,7 +76,7 @@ def scale_by_adam(
             Nesterov momentum is described in [Dozat 2016]
         use_magma: If True, applies Momentum-aligned gradient masking (Magma).
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.
@@ -83,31 +93,24 @@ def scale_by_adam(
         arXiv preprint arXiv:2602.15322.
     """
 
-    if mu_dtype is None:
-        mu_dtype = jnp.float32
-    else:
-        mu_dtype = utils.canonicalize_dtype(mu_dtype)
+    if use_magma:
+        validate_magma_args(magma_p, magma_tau)
+
+    canonical_mu_dtype = cast(
+        jax.typing.DTypeLike,
+        jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
+    )
+    canonical_nu_dtype = (
+        jnp.float32
+        if jnp.issubdtype(jnp.dtype(canonical_mu_dtype), jnp.complexfloating)
+        else canonical_mu_dtype
+    )
 
     def init_fn(params):
-        mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # First moment
-        nu = optax.tree.zeros_like(params, dtype=mu_dtype)  # Second moment
+        mu = _zeros_like_tree(params, canonical_mu_dtype)  # First moment
+        nu = optax.tree.zeros_like(params, dtype=canonical_nu_dtype)  # Second moment
 
-        if use_magma:
-
-            def _init_s(x):
-                if x is None:
-                    return None
-                if isinstance(x, _masking.MaskedNode):
-                    return _masking.MaskedNode()
-                return jnp.array(0.5, dtype=jnp.float32)
-
-            magma_s = jax.tree.map(
-                _init_s,
-                params,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
-        else:
-            magma_s = ()
+        magma_s = _init_magma_state(params) if use_magma else ()
 
         return ScaleByAdamState(
             count=jnp.zeros([], jnp.int32),
@@ -140,27 +143,19 @@ def scale_by_adam(
 
             # Explicitly bypass MaskedNodes. Attempting .astype() on a MaskedNode
             # triggers an AttributeError during partitioned gradient routing.
-            updates_f32 = jax.tree.map(
-                lambda x: (
-                    x
-                    if isinstance(x, _masking.MaskedNode)
-                    else (x.astype(jnp.float32) if x is not None else None)
-                ),
-                updates,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-            )
+            updates_f32 = _cast_state_tree(updates, jnp.float32)
             g_bc = _safe_bias_correction(updates_f32, mu_bc_factor)
 
             # MaskedNodes cannot be mathematically multiplied or added.
             mu_hat = jax.tree.map(
                 lambda m, g: (
                     m
-                    if isinstance(m, _masking.MaskedNode)
+                    if _is_aux_leaf(m)
                     else (b1 * m + (1.0 - b1) * g if m is not None else None)
                 ),
                 mu_bc,
                 g_bc,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                is_leaf=_is_aux_leaf,
             )
         else:
             mu_hat = _safe_bias_correction(mu_f32, mu_bc_factor)
@@ -173,46 +168,36 @@ def scale_by_adam(
         adam_updates = jax.tree.map(
             lambda m, v: (
                 m
-                if isinstance(m, _masking.MaskedNode)
+                if _is_aux_leaf(m)
                 else (None if m is None else m / (jnp.sqrt(v + eps_root) + eps))
             ),
             mu_hat,
             nu_hat,
-            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            is_leaf=_is_aux_leaf,
         )
 
-        wd_step = (
-            cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], weight_decay)(
-                state.count
+        if _has_nonzero_or_scheduled(weight_decay) and params is None:
+            raise ValueError(
+                "`params` must be provided to `scale_by_adam.update` when "
+                "`weight_decay` is nonzero or scheduled."
             )
-            if callable(weight_decay)
-            else weight_decay
-        )
 
         if params is not None:
-            # Resolve the mask tree natively
-            resolved_mask = (
-                weight_decay_mask(params)
-                if callable(weight_decay_mask)
-                else weight_decay_mask
-            )
+            wd_step = _resolve_scalar(weight_decay, state.count)
+            resolved_mask = _resolve_mask(weight_decay_mask, params)
             if resolved_mask is None:
                 resolved_mask = jax.tree.map(
                     lambda _: True,
                     params,
-                    is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                    is_leaf=_is_aux_leaf,
                 )
 
-            adam_updates = jax.tree.map(
-                lambda u, p, m_leaf: (
-                    u
-                    if isinstance(u, _masking.MaskedNode) or u is None
-                    else (u + wd_step * p.astype(jnp.float32) if m_leaf else u)
-                ),
+            adam_updates = _apply_weight_decay_tree(
                 adam_updates,
                 params,
+                wd_step,
                 resolved_mask,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                is_leaf=_is_aux_leaf,
             )
 
         # Intercept and mathematically project Delta_t through Magma logic
@@ -231,13 +216,13 @@ def scale_by_adam(
             final_updates = adam_updates
             new_magma_s = state.magma_s
 
-        if mu_dtype == jnp.bfloat16:
+        if canonical_mu_dtype == jnp.bfloat16:
             k1, k2 = jax.random.split(sr_key)
             mu_stored = _tree_stochastic_cast(mu_f32, jnp.bfloat16, k1)
             nu_stored = _tree_stochastic_cast(nu_f32, jnp.bfloat16, k2)
         else:
-            mu_stored = mu_f32
-            nu_stored = nu_f32
+            mu_stored = _cast_state_tree(mu_f32, canonical_mu_dtype)
+            nu_stored = _cast_state_tree(nu_f32, canonical_nu_dtype)
 
         return final_updates, ScaleByAdamState(
             count=count_inc,
@@ -256,15 +241,15 @@ def adamw(
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
     weight_decay: base.ScalarOrSchedule = 1e-4,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     *,
     nesterov: bool = False,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     r"""Adam with weight decay regularization.
@@ -342,9 +327,9 @@ def adamw(
             equilibrium tau=2.0, non-masked steps scale updates by ~0.5, and
             50% of steps are masked. This yields an expected magnitude attenuation
             of ~0.25x. You may need to scale the global learning rate by ~4x to
-            maintain the original update volume.
+            maintain the undamped update volume.
         magma_p: Survival probability for the block-wise Bernoulli masking.
-            Dictates the likelihood (0.0 < p <= 1.0) that a parameter block's update
+            Dictates the likelihood (0.0 <= p <= 1.0) that a parameter block's update
             survives at a given step. A value of 1.0 effectively bypasses stochastic
             dropping (though Magma EMA damping still applies). The default of 0.5 was
             empirically validated as optimal for transformer pre-training.
@@ -410,10 +395,7 @@ def adamw(
         )
     ]
 
-    _wd_is_nonzero = (
-        weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
-    )
-    if _wd_is_nonzero and not use_magma:
+    if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
         components.append(
             transform.add_decayed_weights(weight_decay, weight_decay_mask)
         )

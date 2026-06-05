@@ -1,22 +1,3 @@
-import math
-from typing import Any, Callable, NamedTuple, cast
-
-import jax
-import jax.numpy as jnp
-from optax._src import base, combine, numerics, utils
-from optax.transforms import _masking
-
-from rollfast.optim.adam import adamw
-from rollfast.optim.dimension_numbers import (
-    MatrixDimensionNumbers,
-    WeightDimNumOrFn,
-    _get_dimension_numbers,
-    _compute_matrix_reshape,
-    _is_dimension_numbers_leaf,
-    _mask_dimension_numbers,
-)
-from rollfast.utils import _tree_stochastic_cast
-
 """Pion usage notes.
 
 Pion preserves each optimized matrix's singular values by construction. Treat the
@@ -39,6 +20,35 @@ higher-rank tensors such as convolution kernels, provide explicit
 input/output axes.
 """
 
+import math
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
+
+import jax
+import jax.numpy as jnp
+from optax._src import base, combine, numerics, utils
+from optax.transforms import _masking
+
+from rollfast.optim.adam import adamw
+from rollfast.optim.dimension_numbers import (
+    MatrixDimensionNumbers,
+    WeightDimNumOrFn,
+    _compute_matrix_reshape,
+    _get_dimension_numbers,
+    _is_dimension_numbers_leaf,
+    _make_matrix_partition_fns,
+)
+from rollfast.utils import (
+    MomentumAccumulator,
+    _cast_state_tree,
+    _momentum_grad_scale,
+    _resolve_scalar,
+    _tree_stochastic_cast,
+    _unzip_leaf_tuple_tree,
+    _validate_beta_static_scalar,
+    _validate_positive_static_scalar,
+)
+
 
 class ScaleByPionState(NamedTuple):
     """State for Pion's Lie-algebra moment estimates."""
@@ -49,16 +59,6 @@ class ScaleByPionState(NamedTuple):
     m_out: base.Updates
     v_out: base.Updates
     key: jax.Array | None
-
-
-def _resolve_scalar(
-    value: base.ScalarOrSchedule,
-    count: jax.typing.ArrayLike,
-) -> jax.typing.ArrayLike:
-    if callable(value):
-        schedule = cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], value)
-        return schedule(count)
-    return value
 
 
 def _zeros_for_pion(
@@ -84,16 +84,6 @@ def _zeros_for_pion(
     m_out = jnp.zeros((batch, rows, rows), dtype=dtype)
     v_out = jnp.zeros((batch, rows, rows), dtype=dtype)
     return m_in, v_in, m_out, v_out
-
-
-def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
-    return jax.tree.map(
-        lambda x: (
-            x if isinstance(x, _masking.MaskedNode) or x is None else x.astype(dtype)
-        ),
-        tree,
-        is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
-    )
 
 
 def _e2(
@@ -123,6 +113,7 @@ def _pion_matrix_update(
     alternating: bool,
     count: jax.Array,
     precision: jax.lax.PrecisionLike,
+    momentum_accumulator: MomentumAccumulator,
 ) -> tuple[Any, Any, Any, Any, Any]:
     if isinstance(param, _masking.MaskedNode) or isinstance(grad, _masking.MaskedNode):
         node = _masking.MaskedNode()
@@ -139,9 +130,10 @@ def _pion_matrix_update(
     G_out = jnp.matmul(G, jnp.swapaxes(W, -1, -2), precision=precision)
     G_out = G_out - jnp.swapaxes(G_out, -1, -2)
 
-    m_in = b1 * m_in_prev.astype(jnp.float32) + (1.0 - b1) * G_in
+    grad_scale = _momentum_grad_scale(b1, momentum_accumulator)
+    m_in = b1 * m_in_prev.astype(jnp.float32) + grad_scale * G_in
     v_in = b2 * v_in_prev.astype(jnp.float32) + (1.0 - b2) * jnp.square(G_in)
-    m_out = b1 * m_out_prev.astype(jnp.float32) + (1.0 - b1) * G_out
+    m_out = b1 * m_out_prev.astype(jnp.float32) + grad_scale * G_out
     v_out = b2 * v_out_prev.astype(jnp.float32) + (1.0 - b2) * jnp.square(G_out)
 
     A_in = -m_in / (jnp.sqrt(v_in) + eps)
@@ -191,6 +183,7 @@ def scale_by_pion(
     eps: float = 1e-8,
     alternating: bool = True,
     mu_dtype: jax.typing.DTypeLike | None = None,
+    momentum_accumulator: MomentumAccumulator = "ema",
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     key: jax.Array = jax.random.PRNGKey(42),
@@ -203,6 +196,10 @@ def scale_by_pion(
     approximation. The returned Optax update is ``W_next - W`` because Optax
     applies updates by addition.
     """
+    _validate_beta_static_scalar("b1", b1)
+    _validate_beta_static_scalar("b2", b2)
+    _validate_positive_static_scalar("rms_constant", rms_constant)
+    _validate_positive_static_scalar("eps", eps)
     canonical_mu_dtype = cast(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
@@ -216,18 +213,7 @@ def scale_by_pion(
             dim_nums,
             is_leaf=_is_dimension_numbers_leaf,
         )
-        m_in = jax.tree.map(
-            lambda x: x[0], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        v_in = jax.tree.map(
-            lambda x: x[1], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        m_out = jax.tree.map(
-            lambda x: x[2], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        v_out = jax.tree.map(
-            lambda x: x[3], states, is_leaf=lambda x: isinstance(x, tuple)
-        )
+        m_in, v_in, m_out, v_out = _unzip_leaf_tuple_tree(states, 4)
         return ScaleByPionState(
             count=jnp.zeros([], jnp.int32),
             m_in=m_in,
@@ -243,6 +229,25 @@ def scale_by_pion(
 
         count_inc = numerics.safe_increment(state.count)
         dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
+
+        unsupported = jax.tree.leaves(
+            jax.tree.map(
+                lambda p, d: (
+                    p is not None
+                    and not isinstance(p, _masking.MaskedNode)
+                    and d is None
+                ),
+                params,
+                dim_nums,
+                is_leaf=_is_dimension_numbers_leaf,
+            )
+        )
+        if any(unsupported):
+            raise ValueError(
+                "`scale_by_pion` only supports leaves with Pion dimension specs. "
+                "Use the public `pion` wrapper for Adam fallback leaves, or pass "
+                "a `weight_dimension_numbers` tree that marks every updated leaf."
+            )
 
         out = jax.tree.map(
             lambda g, p, mi, vi, mo, vo, d: _pion_matrix_update(
@@ -261,6 +266,7 @@ def scale_by_pion(
                 alternating,
                 state.count,
                 precision,
+                momentum_accumulator,
             ),
             updates,
             params,
@@ -272,17 +278,7 @@ def scale_by_pion(
             is_leaf=_is_dimension_numbers_leaf,
         )
 
-        new_updates = jax.tree.map(
-            lambda x: x[0], out, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        m_in = jax.tree.map(lambda x: x[1], out, is_leaf=lambda x: isinstance(x, tuple))
-        v_in = jax.tree.map(lambda x: x[2], out, is_leaf=lambda x: isinstance(x, tuple))
-        m_out = jax.tree.map(
-            lambda x: x[3], out, is_leaf=lambda x: isinstance(x, tuple)
-        )
-        v_out = jax.tree.map(
-            lambda x: x[4], out, is_leaf=lambda x: isinstance(x, tuple)
-        )
+        new_updates, m_in, v_in, m_out, v_out = _unzip_leaf_tuple_tree(out, 5)
 
         if canonical_mu_dtype == jnp.bfloat16:
             key, sr_in, sr_vin, sr_out, sr_vout = jax.random.split(
@@ -319,6 +315,7 @@ def pion(
     eps: float = 1e-8,
     alternating: bool = True,
     mu_dtype: jax.typing.DTypeLike | None = None,
+    momentum_accumulator: MomentumAccumulator = "ema",
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     pion_weight_dimension_numbers: WeightDimNumOrFn | None = None,
@@ -333,27 +330,16 @@ def pion(
 
     Matrix leaves are optimized by Pion's orthogonal-equivalence update. Leaves
     without a Pion dimension specification, such as biases and normalization
-    scales, are optimized by AdamW.
+    scales, are optimized by AdamW. ``weight_decay`` applies only to those AdamW
+    fallback leaves; additive decay is intentionally not applied to Pion-managed
+    matrices because it would change their singular spectrum.
     """
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
     key_pion, key_adam = jax.random.split(key, 2)
 
-    def get_resolved_dim_nums(params):
-        return _get_dimension_numbers(pion_weight_dimension_numbers, params)
-
-    def param_labels(params):
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("pion" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def pion_weight_dim_nums_fn(params):
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
+    partition = _make_matrix_partition_fns(pion_weight_dimension_numbers, "pion")
 
     return combine.partition(
         transforms={
@@ -365,7 +351,8 @@ def pion(
                 eps=eps,
                 alternating=alternating,
                 mu_dtype=mu_dtype,
-                weight_dimension_numbers=pion_weight_dim_nums_fn,
+                momentum_accumulator=momentum_accumulator,
+                weight_dimension_numbers=partition.masked_specs,
                 precision=precision,
                 key=key_pion,
             ),
@@ -380,5 +367,5 @@ def pion(
                 key=key_adam,
             ),
         },
-        param_labels=param_labels,
+        param_labels=partition.labels,
     )

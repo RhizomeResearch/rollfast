@@ -5,6 +5,14 @@ from optax.transforms import _masking
 from rollfast.utils import dist_reduce
 
 
+def validate_magma_args(p: float, tau: float) -> None:
+    """Validate Magma constructor arguments before they enter JAX control flow."""
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"magma_p must be in [0, 1], got {p!r}.")
+    if tau <= 0.0:
+        raise ValueError(f"magma_tau must be positive, got {tau!r}.")
+
+
 def apply_magma_internal(
     raw_gradients,
     first_moments,
@@ -40,9 +48,19 @@ def apply_magma_internal(
     is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
 
     leaves_g, treedef = jax.tree.flatten(raw_gradients, is_leaf=is_leaf_fn)
-    leaves_mu, _ = jax.tree.flatten(first_moments, is_leaf=is_leaf_fn)
-    leaves_delta, _ = jax.tree.flatten(base_updates, is_leaf=is_leaf_fn)
-    leaves_s, _ = jax.tree.flatten(magma_s_prev, is_leaf=is_leaf_fn)
+
+    def flatten_matching(tree, name):
+        leaves, tree_treedef = jax.tree.flatten(tree, is_leaf=is_leaf_fn)
+        if tree_treedef != treedef:
+            raise ValueError(
+                "Magma input trees must have matching structures; "
+                f"`{name}` does not match `raw_gradients`."
+            )
+        return leaves
+
+    leaves_mu = flatten_matching(first_moments, "first_moments")
+    leaves_delta = flatten_matching(base_updates, "base_updates")
+    leaves_s = flatten_matching(magma_s_prev, "magma_s_prev")
 
     if axis_name is not None:
         # Synchronize PRNG key across all devices so Bernoulli masks are identical.
@@ -60,27 +78,38 @@ def apply_magma_internal(
     for g, mu, delta, s_prev, block_key in zip(
         leaves_g, leaves_mu, leaves_delta, leaves_s, subkeys
     ):
-        if g is None or isinstance(g, _masking.MaskedNode):
+        if (
+            g is None
+            or mu is None
+            or delta is None
+            or isinstance(g, _masking.MaskedNode)
+            or isinstance(mu, _masking.MaskedNode)
+            or isinstance(delta, _masking.MaskedNode)
+        ):
             new_delta_leaves.append(delta)
             new_s_leaves.append(s_prev)
             continue
 
-        g_f32 = g.astype(jnp.float32)
-        mu_f32 = mu.astype(jnp.float32)
+        compute_dtype = (
+            jnp.complex64
+            if jnp.issubdtype(g.dtype, jnp.complexfloating)
+            or jnp.issubdtype(mu.dtype, jnp.complexfloating)
+            else jnp.float32
+        )
+        g_acc = g.astype(compute_dtype)
+        mu_acc = mu.astype(compute_dtype)
 
-        # Block-wise inner product and norms
-        dot = jnp.sum(g_f32 * mu_f32)
-        norm_g_sq = jnp.sum(g_f32**2)
-        norm_mu_sq = jnp.sum(mu_f32**2)
+        # Block-wise real cosine similarity; vdot conjugates the first argument
+        # so complex leaves get the Hermitian inner product.
+        dot = jnp.real(jnp.vdot(g_acc, mu_acc)).astype(jnp.float32)
+        norm_g_sq = jnp.real(jnp.vdot(g_acc, g_acc)).astype(jnp.float32)
+        norm_mu_sq = jnp.real(jnp.vdot(mu_acc, mu_acc)).astype(jnp.float32)
 
         if axis_name is not None:
             dot = dist_reduce(dot, axis_name, "sum")
             norm_g_sq = dist_reduce(norm_g_sq, axis_name, "sum")
             norm_mu_sq = dist_reduce(norm_mu_sq, axis_name, "sum")
 
-        # denom = jnp.maximum(
-        #     jnp.sqrt(norm_g_sq + 1e-12) * jnp.sqrt(norm_mu_sq + 1e-12), 1e-9
-        # )
         denom = jnp.maximum(jnp.sqrt(norm_g_sq) * jnp.sqrt(norm_mu_sq), 1e-12)
         cossim = jnp.nan_to_num(dot / denom, nan=0.0)
         cossim = jnp.clip(cossim, -1.0, 1.0)
@@ -92,9 +121,6 @@ def apply_magma_internal(
         # Singular block-wise Bernoulli scalar
         m_mask = jax.random.bernoulli(block_key, p).astype(delta.dtype)
 
-        # delta_magma = jnp.where(
-        #     m_mask, s_new.astype(delta.dtype) * delta, jnp.zeros_like(delta)
-        # )
         delta_magma = m_mask * s_new.astype(delta.dtype) * delta
 
         new_delta_leaves.append(delta_magma)

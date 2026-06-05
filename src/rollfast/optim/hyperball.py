@@ -16,29 +16,26 @@ after it.
 
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-import optax.contrib._muon as optax_muon
 from optax._src import base, combine, numerics
-from optax.transforms import _masking
 
+import rollfast.optim.muon as optax_muon
 from rollfast.optim.adam import scale_by_adam
 from rollfast.optim.aurora import (
     AuroraWeightDimNumOrFn,
-    scale_by_aurora,
-    scale_by_riemannian_aurora,
+    _build_unscaled_aurora_branch,
 )
 from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
-    _get_dimension_numbers,
-    _is_dimension_numbers_leaf,
-    _mask_dimension_numbers,
+    _make_matrix_partition_fns,
 )
-from rollfast.optim.orthogonalization import MUON_NS_COEFFS
+from rollfast.optim.orthogonalization import MUON_NS_COEFFS, MuonPreconditioning
 from rollfast.optim.prism import (
-    scale_by_prism,
+    _build_unscaled_prism_branch,
 )
 from rollfast.optim.psgd import (
     GradClipMode,
@@ -46,10 +43,17 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule,
     scale_by_kron,
 )
-from rollfast.optim.rmnp import scale_by_rmnp, scale_by_rmnp_shape
-from rollfast.utils import dist_reduce
+from rollfast.optim.rmnp import _build_unscaled_rmnp_branch
+from rollfast.utils import (
+    MomentumAccumulator,
+    _is_aux_leaf,
+    _resolve_mask,
+    _resolve_scalar,
+    _validate_nonnegative_static_scalar,
+    dist_reduce,
+)
 
-MaskOrFn = Optional[Union[Any, Callable[[base.Params], Any]]]
+MaskOrFn = Any | Callable[[base.Params], Any] | None
 
 
 class HyperballState(NamedTuple):
@@ -57,10 +61,6 @@ class HyperballState(NamedTuple):
 
     count: jax.Array
     init_norm: base.Params
-
-
-def _is_aux_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, _masking.MaskedNode)
 
 
 def _is_bool_leaf(x: Any) -> bool:
@@ -71,35 +71,24 @@ def _is_array_like(x: Any) -> bool:
     return hasattr(x, "shape") and hasattr(x, "dtype")
 
 
-def _resolve_scalar(
-    value: base.ScalarOrSchedule,
-    count: jax.Array,
-) -> jax.typing.ArrayLike:
-    if callable(value):
-        return cast(Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike], value)(
-            count
-        )
-    return value
-
-
 def _leaf_l2_norm(
     x: jax.Array,
     *,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
 ) -> jax.Array:
     sq = jnp.sum(numerics.abs_sq(x.astype(jnp.float32)))
     sq = dist_reduce(sq, axis_name, "sum")
     return jnp.sqrt(sq)
 
 
-def _safe_norm(x: jax.Array, *, eps: float, axis_name: Optional[str]) -> jax.Array:
+def _safe_norm(x: jax.Array, *, eps: float, axis_name: str | None) -> jax.Array:
     return jnp.maximum(
         _leaf_l2_norm(x, axis_name=axis_name),
         jnp.asarray(eps, dtype=jnp.float32),
     )
 
 
-def _init_norm_tree(params: base.Params, axis_name: Optional[str]) -> base.Params:
+def _init_norm_tree(params: base.Params, axis_name: str | None) -> base.Params:
     return jax.tree.map(
         lambda p: p if _is_aux_leaf(p) else _leaf_l2_norm(p, axis_name=axis_name),
         params,
@@ -109,7 +98,7 @@ def _init_norm_tree(params: base.Params, axis_name: Optional[str]) -> base.Param
 
 def _all_true_mask(params: base.Params) -> base.Params:
     return jax.tree.map(
-        lambda p: False if _is_aux_leaf(p) else True,
+        lambda p: not _is_aux_leaf(p),
         params,
         is_leaf=_is_aux_leaf,
     )
@@ -126,23 +115,6 @@ def _default_rank2_hyperball_mask(params: base.Params) -> base.Params:
         params,
         is_leaf=_is_aux_leaf,
     )
-
-
-def _is_mask_callable(mask: Any) -> bool:
-    callable_leaves = jax.tree.leaves(jax.tree.map(callable, mask))
-    return callable(mask) and len(callable_leaves) > 0 and all(callable_leaves)
-
-
-def _resolve_mask(
-    mask: MaskOrFn,
-    params: base.Params,
-    default_fn: Callable[[base.Params], base.Params],
-) -> base.Params:
-    if mask is None:
-        return default_fn(params)
-    if _is_mask_callable(mask):
-        return cast(Callable[[base.Params], Any], mask)(params)
-    return cast(base.Params, mask)
 
 
 def _mask_leaf_value(mask_leaf: Any) -> jax.Array:
@@ -209,7 +181,7 @@ def _hyperball_leaf_update(
     cautious_weight_decay: bool,
     fallback_weight_decay: bool,
     eps: float,
-    axis_name: Optional[str],
+    axis_name: str | None,
 ) -> Any:
     if _is_aux_leaf(update) or _is_aux_leaf(param) or _is_aux_leaf(init_norm):
         return update
@@ -264,12 +236,12 @@ def apply_hyperball(
     weight_decay_mask: MaskOrFn = None,
     *,
     hyperball_mask: MaskOrFn = None,
-    fallback_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    fallback_learning_rate: base.ScalarOrSchedule | None = None,
     fallback_weight_decay: bool = False,
     caution: bool = False,
     cautious_weight_decay: bool = False,
     eps: float = 1e-12,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Terminal Optax transform implementing Hyperball projection.
 
@@ -307,6 +279,8 @@ def apply_hyperball(
     """
     if eps <= 0.0:
         raise ValueError(f"eps must be positive, got {eps}")
+    if isinstance(weight_decay, (int, float)):
+        _validate_nonnegative_static_scalar("weight_decay", weight_decay)
 
     def init_fn(params: base.Params) -> HyperballState:
         return HyperballState(
@@ -317,7 +291,7 @@ def apply_hyperball(
     def update_fn(
         updates: base.Updates,
         state: base.OptState,
-        params: Optional[base.Params] = None,
+        params: base.Params | None = None,
         **extra_args: Any,
     ) -> tuple[base.Updates, base.OptState]:
         if params is None:
@@ -380,6 +354,85 @@ def apply_hyperball(
 scale_by_hyperball = apply_hyperball
 
 
+def _build_unscaled_adam_branch(
+    *,
+    b1: jax.typing.ArrayLike,
+    b2: jax.typing.ArrayLike,
+    eps: jax.typing.ArrayLike,
+    eps_root: jax.typing.ArrayLike = 0.0,
+    mu_dtype: jax.typing.DTypeLike | None,
+    nesterov: bool,
+    use_magma: bool = False,
+    magma_p: float = 0.5,
+    magma_tau: float = 2.0,
+    axis_name: str | None = None,
+    key: jax.Array,
+) -> base.GradientTransformation:
+    """Build the unscaled Adam fallback branch used by Hyperball wrappers."""
+    return scale_by_adam(
+        b1=b1,
+        b2=b2,
+        eps=eps,
+        eps_root=eps_root,
+        mu_dtype=mu_dtype,
+        weight_decay=0.0,
+        weight_decay_mask=None,
+        nesterov=nesterov,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        axis_name=axis_name,
+        key=key,
+    )
+
+
+def _partitioned_matrix_hyperball(
+    *,
+    matrix_label: str,
+    matrix_branch: base.GradientTransformation,
+    adam_branch: base.GradientTransformation,
+    param_labels: Any,
+    default_hyperball_mask: MaskOrFn,
+    learning_rate: base.ScalarOrSchedule,
+    fallback_learning_rate: base.ScalarOrSchedule,
+    weight_decay: base.ScalarOrSchedule,
+    weight_decay_mask: MaskOrFn,
+    hyperball_mask: MaskOrFn,
+    fallback_weight_decay: bool,
+    caution: bool,
+    cautious_weight_decay: bool,
+    hyperball_eps: float,
+    axis_name: str | None,
+) -> base.GradientTransformationExtraArgs:
+    """Assemble a matrix/Adam partition followed by terminal Hyperball."""
+    resolved_hyperball_mask = (
+        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
+    )
+    partitioned_updates = combine.partition(
+        transforms={
+            matrix_label: matrix_branch,
+            "adam": adam_branch,
+        },
+        param_labels=param_labels,
+    )
+
+    return combine.chain(
+        partitioned_updates,
+        apply_hyperball(
+            learning_rate=learning_rate,
+            fallback_learning_rate=fallback_learning_rate,
+            weight_decay=weight_decay,
+            weight_decay_mask=weight_decay_mask,
+            hyperball_mask=resolved_hyperball_mask,
+            fallback_weight_decay=fallback_weight_decay,
+            caution=caution,
+            cautious_weight_decay=cautious_weight_decay,
+            eps=hyperball_eps,
+            axis_name=axis_name,
+        ),
+    )
+
+
 def adamw_hyperball(
     learning_rate: base.ScalarOrSchedule,
     b1: jax.typing.ArrayLike = 0.9,
@@ -399,7 +452,7 @@ def adamw_hyperball(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Adam with Hyperball replacing decoupled weight decay on selected leaves."""
@@ -435,7 +488,7 @@ def adamw_hyperball(
 
 def muon_hyperball(
     learning_rate: base.ScalarOrSchedule,
-    ns_coeffs: Any = MUON_NS_COEFFS,
+    ns_coeffs: optax_muon.MuonNsCoeffs = MUON_NS_COEFFS,
     ns_steps: jax.typing.ArrayLike = 5,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
@@ -445,6 +498,8 @@ def muon_hyperball(
     *,
     nesterov: bool = True,
     adaptive: bool = False,
+    preconditioning: MuonPreconditioning = "frobenius",
+    momentum_accumulator: MomentumAccumulator = "ema",
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
@@ -456,7 +511,11 @@ def muon_hyperball(
     caution: bool = False,
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
+    use_magma: bool = False,
+    magma_p: float = 0.5,
+    magma_tau: float = 2.0,
     axis_name: str | None = None,
+    key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Muon/Adam partition with Hyperball replacing decoupled weight decay.
 
@@ -467,153 +526,60 @@ def muon_hyperball(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    if muon_weight_dimension_numbers is None:
-        use_default_muon_specs = True
+    key_muon, key_adam = jax.random.split(key, 2)
 
-        def param_labels(params: base.Params) -> base.Params:
-            return jax.tree.map(
-                lambda p: (
-                    None
-                    if _is_aux_leaf(p)
-                    else ("muon" if getattr(p, "ndim", 0) == 2 else "adam")
-                ),
-                params,
-                is_leaf=_is_aux_leaf,
-            )
-
-        def get_resolved_dim_nums(params: base.Params) -> base.Params:
-            return jax.tree.map(
-                lambda p: (
-                    optax_muon.MuonDimensionNumbers()
-                    if not _is_aux_leaf(p) and getattr(p, "ndim", 0) == 2
-                    else _masking.MaskedNode()
-                ),
-                params,
-                is_leaf=lambda x: _is_aux_leaf(x),
-            )
-
-    else:
-        use_default_muon_specs = False
-
-        def get_resolved_dim_nums(params: base.Params) -> Any:
-            if callable(muon_weight_dimension_numbers):
-                dim_num_fn = cast(
-                    Callable[[base.Params], Any], muon_weight_dimension_numbers
-                )
-                return dim_num_fn(params)
-            return muon_weight_dimension_numbers
-
-        def param_labels(params: base.Params) -> base.Params:
-            dim_nums = get_resolved_dim_nums(params)
-
-            def populate_subtree(dim_num, subtree):
-                return jax.tree.map(
-                    lambda p: (
-                        None
-                        if _is_aux_leaf(p)
-                        else ("muon" if dim_num is not None else "adam")
-                    ),
-                    subtree,
-                    is_leaf=_is_aux_leaf,
-                )
-
-            return jax.tree.map(
-                populate_subtree,
-                dim_nums,
-                params,
-                is_leaf=lambda x: (
-                    x is None or isinstance(x, optax_muon.MuonDimensionNumbers)
-                ),
-            )
-
-        dim_nums_arg = muon_weight_dimension_numbers
-
-    def muon_weight_dim_nums_fn(params: base.Params) -> base.Params:
-        if use_default_muon_specs:
-            return get_resolved_dim_nums(params)
-
-        if callable(dim_nums_arg):
-            dim_num_fn = cast(Callable[[base.Params], Any], dim_nums_arg)
-            dim_nums = dim_num_fn(params)
-        else:
-            dim_nums = dim_nums_arg
-        mask = jax.tree.map(lambda label: label == "muon", param_labels(params))
-
-        def populate_subtree(dim_num, submask):
-            return jax.tree.map(
-                lambda m: dim_num if m else _masking.MaskedNode(),
-                submask,
-            )
-
-        return jax.tree.map(
-            populate_subtree,
-            dim_nums,
-            mask,
-            is_leaf=lambda x: (
-                x is None
-                or isinstance(x, optax_muon.MuonDimensionNumbers)
-                or isinstance(x, _masking.MaskedNode)
-            ),
-        )
-
-    default_hyperball_mask = _spec_mask_from_resolver(
-        get_resolved_dim_nums,
-        is_leaf=lambda x: (
-            x is None
-            or isinstance(x, optax_muon.MuonDimensionNumbers)
-            or isinstance(x, _masking.MaskedNode)
-        ),
+    partition = _make_matrix_partition_fns(muon_weight_dimension_numbers, "muon")
+    muon_branch = optax_muon._build_unscaled_muon_branch(
+        ns_coeffs=ns_coeffs,
+        ns_steps=ns_steps,
+        beta=beta,
+        eps=eps,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        adaptive=adaptive,
+        preconditioning=preconditioning,
+        weight_dimension_numbers=partition.masked_specs,
+        orthogonalize_fn=optax_muon.orthogonalize_via_newton_schulz,
+        momentum_accumulator=momentum_accumulator,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        consistent_rms=consistent_rms,
+        weight_decay=0.0,
+        weight_decay_mask=None,
+        axis_name=axis_name,
+        key=key_muon,
     )
-    resolved_hyperball_mask = (
-        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
+    adam_branch = _build_unscaled_adam_branch(
+        b1=adam_b1,
+        b2=adam_b2,
+        eps=eps,
+        eps_root=adam_eps_root,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        axis_name=axis_name,
+        key=key_adam,
     )
 
-    partitioned_updates = combine.partition(
-        transforms={
-            "muon": combine.chain(
-                optax_muon.scale_by_muon(
-                    ns_coeffs=ns_coeffs,
-                    ns_steps=ns_steps,
-                    beta=beta,
-                    eps=eps,
-                    mu_dtype=mu_dtype,
-                    nesterov=nesterov,
-                    adaptive=adaptive,
-                    weight_dimension_numbers=muon_weight_dim_nums_fn,
-                ),
-                optax_muon.scale_by_shape(
-                    weight_dimension_numbers=muon_weight_dim_nums_fn,
-                    consistent_rms=consistent_rms,
-                ),
-            ),
-            "adam": scale_by_adam(
-                b1=adam_b1,
-                b2=adam_b2,
-                eps=eps,
-                eps_root=adam_eps_root,
-                mu_dtype=mu_dtype,
-                weight_decay=0.0,
-                weight_decay_mask=None,
-                nesterov=nesterov,
-            ),
-        },
-        param_labels=param_labels,
-    )
-
-    return combine.chain(
-        partitioned_updates,
-        apply_hyperball(
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            weight_decay_mask=weight_decay_mask,
-            hyperball_mask=resolved_hyperball_mask,
-            fallback_learning_rate=adam_learning_rate,
-            fallback_weight_decay=fallback_weight_decay,
-            caution=caution,
-            cautious_weight_decay=cautious_weight_decay,
-            eps=hyperball_eps,
-            axis_name=axis_name,
-        ),
+    return _partitioned_matrix_hyperball(
+        matrix_label="muon",
+        matrix_branch=muon_branch,
+        adam_branch=adam_branch,
+        param_labels=partition.labels,
+        default_hyperball_mask=partition.default_mask,
+        learning_rate=learning_rate,
+        fallback_learning_rate=adam_learning_rate,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        hyperball_mask=hyperball_mask,
+        fallback_weight_decay=fallback_weight_decay,
+        caution=caution,
+        cautious_weight_decay=cautious_weight_decay,
+        hyperball_eps=hyperball_eps,
+        axis_name=axis_name,
     )
 
 
@@ -627,6 +593,7 @@ def rmnp_hyperball(
     *,
     nesterov: bool = True,
     adaptive: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
@@ -652,75 +619,44 @@ def rmnp_hyperball(
 
     key_rmnp, key_adam = jax.random.split(key, 2)
 
-    def get_resolved_dim_nums(params: base.Params) -> base.Params:
-        return _get_dimension_numbers(rmnp_weight_dimension_numbers, params)
-
-    def param_labels(params: base.Params) -> base.Params:
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("rmnp" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def rmnp_weight_dim_nums_fn(params: base.Params) -> base.Params:
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
-
-    default_hyperball_mask = _spec_mask_from_resolver(
-        get_resolved_dim_nums,
-        is_leaf=_is_dimension_numbers_leaf,
+    partition = _make_matrix_partition_fns(rmnp_weight_dimension_numbers, "rmnp")
+    rmnp_branch = _build_unscaled_rmnp_branch(
+        beta=beta,
+        eps=eps,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        adaptive=adaptive,
+        momentum_accumulator=momentum_accumulator,
+        weight_dimension_numbers=partition.masked_specs,
+        consistent_rms=consistent_rms,
+        key=key_rmnp,
     )
-    resolved_hyperball_mask = (
-        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
-    )
-
-    partitioned_updates = combine.partition(
-        transforms={
-            "rmnp": combine.chain(
-                scale_by_rmnp(
-                    beta=beta,
-                    eps=eps,
-                    mu_dtype=mu_dtype,
-                    nesterov=nesterov,
-                    adaptive=adaptive,
-                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
-                    key=key_rmnp,
-                ),
-                scale_by_rmnp_shape(
-                    weight_dimension_numbers=rmnp_weight_dim_nums_fn,
-                    consistent_rms=consistent_rms,
-                ),
-            ),
-            "adam": scale_by_adam(
-                b1=adam_b1,
-                b2=adam_b2,
-                eps=eps,
-                eps_root=adam_eps_root,
-                mu_dtype=mu_dtype,
-                weight_decay=0.0,
-                weight_decay_mask=None,
-                nesterov=nesterov,
-                key=key_adam,
-            ),
-        },
-        param_labels=param_labels,
+    adam_branch = _build_unscaled_adam_branch(
+        b1=adam_b1,
+        b2=adam_b2,
+        eps=eps,
+        eps_root=adam_eps_root,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        key=key_adam,
     )
 
-    return combine.chain(
-        partitioned_updates,
-        apply_hyperball(
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-            weight_decay_mask=weight_decay_mask,
-            hyperball_mask=resolved_hyperball_mask,
-            fallback_learning_rate=adam_learning_rate,
-            fallback_weight_decay=fallback_weight_decay,
-            caution=caution,
-            cautious_weight_decay=cautious_weight_decay,
-            eps=hyperball_eps,
-            axis_name=axis_name,
-        ),
+    return _partitioned_matrix_hyperball(
+        matrix_label="rmnp",
+        matrix_branch=rmnp_branch,
+        adam_branch=adam_branch,
+        param_labels=partition.labels,
+        default_hyperball_mask=partition.default_mask,
+        learning_rate=learning_rate,
+        fallback_learning_rate=adam_learning_rate,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        hyperball_mask=hyperball_mask,
+        fallback_weight_decay=fallback_weight_decay,
+        caution=caution,
+        cautious_weight_decay=cautious_weight_decay,
+        hyperball_eps=hyperball_eps,
+        axis_name=axis_name,
     )
 
 
@@ -735,31 +671,31 @@ def kron_hyperball(
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
-    memory_save_mode: Optional[str] = None,
+    memory_save_mode: str | None = None,
     whiten_grad: bool = True,
     update_preconditioner_first: bool = True,
     preconditioner_lr: float = 0.1,
-    preconditioner_init_scale: Optional[float] = None,
-    mu_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_dtype: Optional[Union[str, jnp.dtype]] = None,
-    precond_update_precision: Optional[str] = "tensorfloat32",
-    precond_grads_precision: Optional[str] = None,
-    scanned_layers: Optional[base.Params] = None,
+    preconditioner_init_scale: float | None = None,
+    mu_dtype: str | jnp.dtype | None = None,
+    precond_dtype: str | jnp.dtype | None = None,
+    precond_update_precision: str | None = "tensorfloat32",
+    precond_grads_precision: str | None = None,
+    scanned_layers: base.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
-    preconditioner_mode: Union[str, PreconditionerMode] = PreconditionerMode.Q0P5EQ1P5,
+    preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
     beta_lipschitz: float = 0.9,
     track_lipschitz: bool = True,
     damping: float = 1e-9,
-    grad_clip_max_amps: float | Tuple[float, float] = (2.0, 10.0),
-    grad_clip_mode: Union[str, GradClipMode] = GradClipMode.PER_TENSOR_RMS,
-    raw_global_grad_clip: Optional[float] = None,
+    grad_clip_max_amps: float | tuple[float, float] = (2.0, 10.0),
+    grad_clip_mode: str | GradClipMode = GradClipMode.PER_TENSOR_RMS,
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    axis_name: Optional[str] = None,
+    axis_name: str | None = None,
     key: jax.Array = jax.random.PRNGKey(42),
     *,
     hyperball_mask: MaskOrFn = None,
@@ -820,27 +756,6 @@ def kron_hyperball(
     )
 
 
-def _spec_mask_from_resolver(
-    resolver: Callable[[base.Params], base.Params],
-    *,
-    is_leaf: Callable[[Any], bool],
-) -> Callable[[base.Params], base.Params]:
-    def _mask(params: base.Params) -> base.Params:
-        specs = resolver(params)
-        return jax.tree.map(
-            lambda spec, p: (
-                False
-                if _is_aux_leaf(p)
-                else (spec is not None and not isinstance(spec, _masking.MaskedNode))
-            ),
-            specs,
-            params,
-            is_leaf=is_leaf,
-        )
-
-    return _mask
-
-
 def prism_hyperball(
     learning_rate: base.ScalarOrSchedule,
     b1: float = 0.95,
@@ -848,27 +763,30 @@ def prism_hyperball(
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
     ns_iters: int = 5,
+    ns_coeffs: optax_muon.MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
     eps_gram: float = 1e-6,
-    gamma_l: Optional[float] = None,
-    gamma_r: Optional[float] = None,
+    gamma_l: float | None = None,
+    gamma_r: float | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    momentum_accumulator: MomentumAccumulator = "ema",
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -889,90 +807,67 @@ def prism_hyperball(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    def get_resolved_dim_nums(params: base.Params) -> base.Params:
-        return _get_dimension_numbers(prism_weight_dimension_numbers, params)
-
-    def param_labels(params: base.Params) -> base.Params:
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def prism_weight_dim_nums_fn(params: base.Params) -> base.Params:
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
-
-    default_hyperball_mask = _spec_mask_from_resolver(
-        get_resolved_dim_nums,
-        is_leaf=_is_dimension_numbers_leaf,
+    partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
+    prism_branch = _build_unscaled_prism_branch(
+        b1=b1,
+        gamma=gamma,
+        ns_iters=ns_iters,
+        ns_coeffs=ns_coeffs,
+        mode=mode,
+        preconditioning=preconditioning,
+        inv_steps=inv_steps,
+        inv_eps=inv_eps,
+        inv_scale=inv_scale,
+        eps_gram=eps_gram,
+        gamma_l=gamma_l,
+        gamma_r=gamma_r,
+        precision=precision,
+        nesterov=nesterov,
+        shape_nesterov=shape_nesterov,
+        bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
+        mu_dtype=mu_dtype,
+        raw_global_grad_clip=raw_global_grad_clip,
+        permissive_spike_protection=permissive_spike_protection,
+        grad_clip_max_amps=grad_clip_max_amps,
+        weight_dimension_numbers=partition.masked_specs,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        weight_decay=0.0,
+        weight_decay_mask=None,
+        axis_name=axis_name,
+        key=key_prism,
     )
-    resolved_hyperball_mask = (
-        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
-    )
-
-    partitioned_updates = combine.partition(
-        transforms={
-            "prism": scale_by_prism(
-                b1=b1,
-                gamma=gamma,
-                ns_iters=ns_iters,
-                mode=mode,
-                inv_steps=inv_steps,
-                inv_eps=inv_eps,
-                inv_scale=inv_scale,
-                eps_gram=eps_gram,
-                gamma_l=gamma_l,
-                gamma_r=gamma_r,
-                precision=precision,
-                nesterov=nesterov,
-                shape_nesterov=shape_nesterov,
-                bias_correction=bias_correction,
-                mu_dtype=mu_dtype,
-                raw_global_grad_clip=raw_global_grad_clip,
-                permissive_spike_protection=permissive_spike_protection,
-                grad_clip_max_amps=grad_clip_max_amps,
-                weight_dimension_numbers=prism_weight_dim_nums_fn,
-                use_magma=use_magma,
-                magma_p=magma_p,
-                magma_tau=magma_tau,
-                weight_decay=0.0,
-                weight_decay_mask=None,
-                axis_name=axis_name,
-                key=key_prism,
-            ),
-            "adam": scale_by_adam(
-                b1=adam_b1,
-                b2=adam_b2,
-                eps=adam_eps,
-                mu_dtype=mu_dtype,
-                weight_decay=0.0,
-                weight_decay_mask=None,
-                use_magma=use_magma,
-                magma_p=magma_p,
-                magma_tau=magma_tau,
-                axis_name=axis_name,
-                key=key_adam,
-            ),
-        },
-        param_labels=param_labels,
+    adam_branch = _build_unscaled_adam_branch(
+        b1=adam_b1,
+        b2=adam_b2,
+        eps=adam_eps,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        axis_name=axis_name,
+        key=key_adam,
     )
 
-    return combine.chain(
-        partitioned_updates,
-        apply_hyperball(
-            learning_rate=learning_rate,
-            fallback_learning_rate=adam_learning_rate,
-            weight_decay=weight_decay,
-            weight_decay_mask=weight_decay_mask,
-            hyperball_mask=resolved_hyperball_mask,
-            fallback_weight_decay=fallback_weight_decay,
-            caution=caution,
-            cautious_weight_decay=cautious_weight_decay,
-            eps=hyperball_eps,
-            axis_name=axis_name,
-        ),
+    return _partitioned_matrix_hyperball(
+        matrix_label="prism",
+        matrix_branch=prism_branch,
+        adam_branch=adam_branch,
+        param_labels=partition.labels,
+        default_hyperball_mask=partition.default_mask,
+        learning_rate=learning_rate,
+        fallback_learning_rate=adam_learning_rate,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        hyperball_mask=hyperball_mask,
+        fallback_weight_decay=fallback_weight_decay,
+        caution=caution,
+        cautious_weight_decay=cautious_weight_decay,
+        hyperball_eps=hyperball_eps,
+        axis_name=axis_name,
     )
 
 
@@ -997,17 +892,18 @@ def _partitioned_aurora_hyperball(
     nesterov: bool,
     shape_nesterov: bool,
     bias_correction: bool,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]],
-    raw_global_grad_clip: Optional[float],
+    momentum_accumulator: MomentumAccumulator,
+    grad_clip_max_amps: float | tuple[float, float] | None,
+    raw_global_grad_clip: float | None,
     permissive_spike_protection: bool,
-    mu_dtype: Optional[jax.typing.DTypeLike],
-    axis_name: Optional[str],
+    mu_dtype: jax.typing.DTypeLike | None,
+    axis_name: str | None,
     use_magma: bool,
     magma_p: float,
     magma_tau: float,
     guard_nonfinite: bool,
     key: jax.Array,
-    adam_learning_rate: Optional[base.ScalarOrSchedule],
+    adam_learning_rate: base.ScalarOrSchedule | None,
     adam_b1: float,
     adam_b2: float,
     adam_eps: float,
@@ -1022,120 +918,72 @@ def _partitioned_aurora_hyperball(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    def get_resolved_dim_nums(params: base.Params) -> base.Params:
-        return _get_dimension_numbers(aurora_weight_dimension_numbers, params)
-
-    def param_labels(params: base.Params) -> base.Params:
-        dim_nums = get_resolved_dim_nums(params)
-        return jax.tree.map(
-            lambda d, p: None if p is None else ("aurora" if d is not None else "adam"),
-            dim_nums,
-            params,
-            is_leaf=_is_dimension_numbers_leaf,
-        )
-
-    def aurora_weight_dim_nums_fn(params: base.Params) -> base.Params:
-        return _mask_dimension_numbers(get_resolved_dim_nums(params))
-
-    if riemannian:
-        aurora_transform = scale_by_riemannian_aurora(
-            b1=b1,
-            outer_steps=outer_steps,
-            cg_steps=cg_steps,
-            riemannian_eta=riemannian_eta,
-            retraction_steps=retraction_steps,
-            polar_ns_iters=polar_ns_iters,
-            polar_compute_dtype=polar_compute_dtype,
-            polar_output_dtype=polar_output_dtype,
-            precision=precision,
-            eps=eps,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=0.0,
-            weight_decay_mask=None,
-            axis_name=axis_name,
-            guard_nonfinite=guard_nonfinite,
-            key=key_aurora,
-        )
-    else:
-        aurora_transform = scale_by_aurora(
-            b1=b1,
-            pp_iterations=pp_iterations,
-            pp_beta=pp_beta,
-            polar_ns_iters=polar_ns_iters,
-            polar_compute_dtype=polar_compute_dtype,
-            polar_output_dtype=polar_output_dtype,
-            precision=precision,
-            eps=eps,
-            nesterov=nesterov,
-            shape_nesterov=shape_nesterov,
-            bias_correction=bias_correction,
-            mu_dtype=mu_dtype,
-            raw_global_grad_clip=raw_global_grad_clip,
-            permissive_spike_protection=permissive_spike_protection,
-            grad_clip_max_amps=grad_clip_max_amps,
-            weight_dimension_numbers=aurora_weight_dim_nums_fn,
-            use_magma=use_magma,
-            magma_p=magma_p,
-            magma_tau=magma_tau,
-            weight_decay=0.0,
-            weight_decay_mask=None,
-            axis_name=axis_name,
-            guard_nonfinite=guard_nonfinite,
-            key=key_aurora,
-        )
-
-    default_hyperball_mask = _spec_mask_from_resolver(
-        get_resolved_dim_nums,
-        is_leaf=_is_dimension_numbers_leaf,
-    )
-    resolved_hyperball_mask = (
-        hyperball_mask if hyperball_mask is not None else default_hyperball_mask
+    partition = _make_matrix_partition_fns(
+        aurora_weight_dimension_numbers,
+        "aurora",
     )
 
-    partitioned_updates = combine.partition(
-        transforms={
-            "aurora": aurora_transform,
-            "adam": scale_by_adam(
-                b1=adam_b1,
-                b2=adam_b2,
-                eps=adam_eps,
-                mu_dtype=mu_dtype,
-                weight_decay=0.0,
-                weight_decay_mask=None,
-                use_magma=use_magma,
-                magma_p=magma_p,
-                magma_tau=magma_tau,
-                axis_name=axis_name,
-                key=key_adam,
-            ),
-        },
-        param_labels=param_labels,
+    aurora_transform = _build_unscaled_aurora_branch(
+        riemannian=riemannian,
+        b1=b1,
+        weight_decay=0.0,
+        weight_decay_mask=None,
+        pp_iterations=pp_iterations,
+        pp_beta=pp_beta,
+        outer_steps=outer_steps,
+        cg_steps=cg_steps,
+        riemannian_eta=riemannian_eta,
+        retraction_steps=retraction_steps,
+        polar_ns_iters=polar_ns_iters,
+        polar_compute_dtype=polar_compute_dtype,
+        polar_output_dtype=polar_output_dtype,
+        precision=precision,
+        eps=eps,
+        nesterov=nesterov,
+        shape_nesterov=shape_nesterov,
+        bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
+        grad_clip_max_amps=grad_clip_max_amps,
+        raw_global_grad_clip=raw_global_grad_clip,
+        permissive_spike_protection=permissive_spike_protection,
+        mu_dtype=mu_dtype,
+        axis_name=axis_name,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        guard_nonfinite=guard_nonfinite,
+        key=key_aurora,
+        weight_dimension_numbers=partition.masked_specs,
+    )
+    adam_branch = _build_unscaled_adam_branch(
+        b1=adam_b1,
+        b2=adam_b2,
+        eps=adam_eps,
+        mu_dtype=mu_dtype,
+        nesterov=nesterov,
+        use_magma=use_magma,
+        magma_p=magma_p,
+        magma_tau=magma_tau,
+        axis_name=axis_name,
+        key=key_adam,
     )
 
-    return combine.chain(
-        partitioned_updates,
-        apply_hyperball(
-            learning_rate=learning_rate,
-            fallback_learning_rate=adam_learning_rate,
-            weight_decay=weight_decay,
-            weight_decay_mask=weight_decay_mask,
-            hyperball_mask=resolved_hyperball_mask,
-            fallback_weight_decay=fallback_weight_decay,
-            caution=caution,
-            cautious_weight_decay=cautious_weight_decay,
-            eps=hyperball_eps,
-            axis_name=axis_name,
-        ),
+    return _partitioned_matrix_hyperball(
+        matrix_label="aurora",
+        matrix_branch=aurora_transform,
+        adam_branch=adam_branch,
+        param_labels=partition.labels,
+        default_hyperball_mask=partition.default_mask,
+        learning_rate=learning_rate,
+        fallback_learning_rate=adam_learning_rate,
+        weight_decay=weight_decay,
+        weight_decay_mask=weight_decay_mask,
+        hyperball_mask=hyperball_mask,
+        fallback_weight_decay=fallback_weight_decay,
+        caution=caution,
+        cautious_weight_decay=cautious_weight_decay,
+        hyperball_eps=hyperball_eps,
+        axis_name=axis_name,
     )
 
 
@@ -1154,17 +1002,18 @@ def aurora_hyperball(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    momentum_accumulator: MomentumAccumulator = "ema",
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -1197,6 +1046,7 @@ def aurora_hyperball(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         grad_clip_max_amps=grad_clip_max_amps,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,
@@ -1237,17 +1087,18 @@ def riemannian_aurora_hyperball(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
-    grad_clip_max_amps: Optional[Union[float, Tuple[float, float]]] = (2.0, 10.0),
-    raw_global_grad_clip: Optional[float] = None,
+    momentum_accumulator: MomentumAccumulator = "ema",
+    grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
+    raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
-    mu_dtype: Optional[jax.typing.DTypeLike] = None,
-    axis_name: Optional[str] = None,
+    mu_dtype: jax.typing.DTypeLike | None = None,
+    axis_name: str | None = None,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array = jax.random.PRNGKey(42),
-    adam_learning_rate: Optional[base.ScalarOrSchedule] = None,
+    adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -1280,6 +1131,7 @@ def riemannian_aurora_hyperball(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         grad_clip_max_amps=grad_clip_max_amps,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,

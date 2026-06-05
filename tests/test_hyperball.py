@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
+import rollfast
 import rollfast.optim.hyperball as hyperball_module
 from rollfast.optim.hyperball import (
     HyperballState,
@@ -160,6 +161,11 @@ def test_apply_hyperball_rejects_nonpositive_eps():
         apply_hyperball(learning_rate=0.01, eps=0.0)
 
 
+def test_apply_hyperball_rejects_negative_weight_decay():
+    with pytest.raises(ValueError, match=r"weight_decay.*nonnegative"):
+        apply_hyperball(learning_rate=0.01, weight_decay=-0.1)
+
+
 def test_kron_hyperball():
     params = _params()
     grads = _grads()
@@ -197,10 +203,37 @@ def test_kron_hyperball_accepts_extra_grad_args():
             kron_hyperball,
             {"learning_rate": 0.01, "preconditioner_update_probability": 1.0},
         ),
-        (muon_hyperball, {"learning_rate": 0.01, "ns_steps": 2}),
-        (rmnp_hyperball, {"learning_rate": 0.01}),
-        (prism_hyperball, {"learning_rate": 0.01, "ns_iters": 2}),
-        (aurora_hyperball, {"learning_rate": 0.01, "polar_ns_iters": 2}),
+        (
+            muon_hyperball,
+            {
+                "learning_rate": 0.01,
+                "ns_steps": 2,
+                "momentum_accumulator": "heavy_ball",
+                "use_magma": True,
+                "magma_p": 1.0,
+            },
+        ),
+        (
+            rmnp_hyperball,
+            {"learning_rate": 0.01, "momentum_accumulator": "heavy_ball"},
+        ),
+        (
+            prism_hyperball,
+            {
+                "learning_rate": 0.01,
+                "ns_iters": 2,
+                "preconditioning": "spectral",
+                "momentum_accumulator": "heavy_ball",
+            },
+        ),
+        (
+            aurora_hyperball,
+            {
+                "learning_rate": 0.01,
+                "polar_ns_iters": 2,
+                "momentum_accumulator": "heavy_ball",
+            },
+        ),
         (
             riemannian_aurora_hyperball,
             {
@@ -209,6 +242,7 @@ def test_kron_hyperball_accepts_extra_grad_args():
                 "cg_steps": 2,
                 "retraction_steps": 1,
                 "polar_ns_iters": 2,
+                "momentum_accumulator": "heavy_ball",
             },
         ),
     ],
@@ -227,6 +261,9 @@ def test_hyperball_optimizer_wrappers(optimizer_fn, kwargs):
 def test_public_aliases():
     assert scale_by_hyperball is apply_hyperball
     assert hyperball_riemannian_aurora is riemannian_aurora_hyperball
+    assert rollfast.apply_hyperball is apply_hyperball
+    assert rollfast.scale_by_hyperball is apply_hyperball
+    assert rollfast.hyperball_riemannian_aurora is riemannian_aurora_hyperball
 
 
 def test_muon_hyperball_routes_vectors_to_adam_fallback():
@@ -288,3 +325,119 @@ def test_partitioned_hyperball_wrappers_forward_axis_name(monkeypatch):
     )
 
     assert captured_axis_names == ["devices", "devices"]
+
+
+def test_muon_hyperball_forwards_magma_axis_and_key_to_partition_branches(
+    monkeypatch,
+):
+    captured_muon = {}
+    captured_adam = {}
+    shape_calls = []
+    key = jax.random.PRNGKey(7)
+    key_muon, key_adam = jax.random.split(key, 2)
+
+    def fake_scale_by_muon(**kwargs):
+        captured_muon.update(kwargs)
+        return optax.identity()
+
+    def fake_scale_by_adam(**kwargs):
+        captured_adam.update(kwargs)
+        return optax.identity()
+
+    def fake_scale_by_shape(**kwargs):
+        shape_calls.append(kwargs)
+        return optax.identity()
+
+    monkeypatch.setattr(
+        hyperball_module.optax_muon, "scale_by_muon", fake_scale_by_muon
+    )
+    monkeypatch.setattr(
+        hyperball_module.optax_muon, "scale_by_shape", fake_scale_by_shape
+    )
+    monkeypatch.setattr(hyperball_module, "scale_by_adam", fake_scale_by_adam)
+
+    hyperball_module.muon_hyperball(
+        learning_rate=0.01,
+        ns_steps=2,
+        consistent_rms=0.2,
+        use_magma=True,
+        magma_p=0.75,
+        magma_tau=1.5,
+        axis_name="devices",
+        key=key,
+    )
+
+    assert captured_muon["use_magma"] is True
+    assert captured_muon["shape_updates"] is True
+    assert captured_muon["consistent_rms"] == 0.2
+    assert captured_muon["magma_p"] == 0.75
+    assert captured_muon["magma_tau"] == 1.5
+    assert captured_muon["axis_name"] == "devices"
+    assert jnp.array_equal(captured_muon["key"], key_muon)
+    assert shape_calls == []
+    assert captured_adam["use_magma"] is True
+    assert captured_adam["magma_p"] == 0.75
+    assert captured_adam["magma_tau"] == 1.5
+    assert captured_adam["axis_name"] == "devices"
+    assert jnp.array_equal(captured_adam["key"], key_adam)
+
+
+def test_prism_and_aurora_hyperball_forward_nesterov_to_adam_fallback(monkeypatch):
+    captured_adam = []
+
+    def fake_scale_by_adam(**kwargs):
+        captured_adam.append(kwargs)
+        return optax.identity()
+
+    monkeypatch.setattr(hyperball_module, "scale_by_adam", fake_scale_by_adam)
+    monkeypatch.setattr(
+        hyperball_module, "_build_unscaled_prism_branch", lambda **_: optax.identity()
+    )
+    monkeypatch.setattr(
+        hyperball_module, "_build_unscaled_aurora_branch", lambda **_: optax.identity()
+    )
+
+    hyperball_module.prism_hyperball(
+        learning_rate=0.01,
+        ns_iters=2,
+        nesterov=False,
+    )
+    hyperball_module.aurora_hyperball(
+        learning_rate=0.01,
+        polar_ns_iters=2,
+        nesterov=False,
+    )
+
+    assert [kwargs["nesterov"] for kwargs in captured_adam] == [False, False]
+
+
+def test_muon_hyperball_keeps_external_shape_scaling_without_magma(monkeypatch):
+    captured_muon = {}
+    shape_calls = []
+
+    def fake_scale_by_muon(**kwargs):
+        captured_muon.update(kwargs)
+        return optax.identity()
+
+    def fake_scale_by_shape(**kwargs):
+        shape_calls.append(kwargs)
+        return optax.identity()
+
+    monkeypatch.setattr(
+        hyperball_module.optax_muon, "scale_by_muon", fake_scale_by_muon
+    )
+    monkeypatch.setattr(
+        hyperball_module.optax_muon, "scale_by_shape", fake_scale_by_shape
+    )
+
+    hyperball_module.muon_hyperball(
+        learning_rate=0.01,
+        ns_steps=2,
+        consistent_rms=0.2,
+        use_magma=False,
+    )
+
+    assert captured_muon["shape_updates"] is False
+    assert captured_muon["consistent_rms"] == 0.2
+    assert len(shape_calls) == 1
+    assert shape_calls[0]["consistent_rms"] == 0.2

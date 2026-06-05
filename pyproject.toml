@@ -4,7 +4,8 @@ version = "0.4.2"
 description = "JAX implementation of experimental optimizers and schedulers."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "clementpoiret", email = "clement@linux.com" }
 ]
@@ -28,7 +29,12 @@ classifiers = [
 ]
 dependencies = [
     "jax>=0.6.2",
-    "optax>=0.2.7",
+    "optax>=0.2.8,<0.3.0",
+]
+
+[project.optional-dependencies]
+equinox = [
+    "equinox>=0.13.6",
 ]
 
 [project.urls]
@@ -37,14 +43,13 @@ Repository = "https://github.com/clementpoiret/rollfast"
 Issues = "https://github.com/clementpoiret/rollfast/issues"
 
 [build-system]
-requires = ["uv_build>=0.9.7,<0.11.0"]
+requires = ["uv_build>=0.9.7,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
     "equimo>=0.5.0a17",
     "equinox>=0.13.6",
-    "pre-commit>=4.5.1",
     "pytest>=9.0.2",
     "ruff>=0.15.7",
     "ty>=0.0.24",
@@ -55,3 +60,9 @@ ignore = ["E731", "E741", "F722"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/test_equimo_integration.py" = ["F401"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that exercise optional third-party integrations",
+    "slow: tests that are slower than the focused unit suite",
+]

@@ -1,24 +1,4 @@
-from typing import Any, Callable, NamedTuple
-
-import jax
-import jax.numpy as jnp
-import optax
-from optax._src import base
-
-from rollfast.optim.adam import adamw
-from rollfast.optim.dimension_numbers import WeightDimNumOrFn
-from rollfast.optim.orthogonalization import MUON_NS_COEFFS
-from rollfast.optim.prism import prism
-from rollfast.optim.psgd import (
-    GradClipMode,
-    PreconditionerMode,
-    precond_update_prob_schedule,
-    kron,
-)
-from rollfast.optim.rmnp import rmnp
-from rollfast.schedules.wsd import wsd_schedule
-
-"""SODA usage notes.
+"""SODA optimizer wrappers.
 
 SODA is a wrapper for base optimizers that already return full additive Optax
 parameter deltas, including learning-rate scaling. It adds the practical SODA
@@ -40,6 +20,32 @@ non-additive optimizers whose invariants would be broken by an additive anchor
 term, such as Pion's spectrum-preserving step.
 """
 
+from typing import NamedTuple
+
+import jax
+import jax.numpy as jnp
+import optax
+from optax._src import base
+
+from rollfast.optim.adam import adamw
+from rollfast.optim.dimension_numbers import WeightDimNumOrFn
+from rollfast.optim.muon import muon
+from rollfast.optim.orthogonalization import (
+    MUON_NS_COEFFS,
+    MuonNsCoeffs,
+    MuonPreconditioning,
+)
+from rollfast.optim.prism import prism
+from rollfast.optim.psgd import (
+    GradClipMode,
+    PreconditionerMode,
+    kron,
+    precond_update_prob_schedule,
+)
+from rollfast.optim.rmnp import rmnp
+from rollfast.schedules.wsd import _make_wsd_schedule_pair
+from rollfast.utils import MomentumAccumulator
+
 
 class SodaState(NamedTuple):
     """State for the practical SODA wrapper."""
@@ -47,13 +53,6 @@ class SodaState(NamedTuple):
     count: jax.Array
     base_state: base.OptState
     z0: base.Params
-
-
-def _call_base_update(base_optimizer, updates, state, params, extra_args):
-    try:
-        return base_optimizer.update(updates, state, params, **extra_args)
-    except TypeError:
-        return base_optimizer.update(updates, state, params)
 
 
 def soda(
@@ -71,6 +70,7 @@ def soda(
     include weight decay. SODA replaces tuned weight decay with a parameter-free
     initialization-centered anchor term.
     """
+    base_optimizer = base.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
         dtype = (
@@ -93,8 +93,8 @@ def soda(
         if params is None:
             raise ValueError("`params` must be provided to `soda`.")
 
-        base_updates, new_base_state = _call_base_update(
-            base_optimizer, updates, state.base_state, params, extra_args
+        base_updates, new_base_state = base_optimizer.update(
+            updates, state.base_state, params, **extra_args
         )
         denom = state.count.astype(jnp.float32) + 2.0
 
@@ -143,8 +143,9 @@ def soda_adam(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """Adam base optimizer wrapped with SODA."""
-    lr_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    lr_schedule, _ = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=None,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
@@ -175,7 +176,9 @@ def soda_prism(
     b1: float = 0.95,
     gamma: float = 1.0,
     ns_iters: int = 5,
+    ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
+    preconditioning: MuonPreconditioning = "frobenius",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
     inv_scale: float = 1.001,
@@ -186,6 +189,7 @@ def soda_prism(
     nesterov: bool = True,
     shape_nesterov: bool = True,
     bias_correction: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
     raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
@@ -199,21 +203,13 @@ def soda_prism(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """PRISM base optimizer wrapped with SODA."""
-    prism_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    prism_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-    if adam_learning_rate is None:
-        adam_schedule = prism_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     base_optimizer = prism(
         learning_rate=prism_schedule,
@@ -222,7 +218,9 @@ def soda_prism(
         weight_decay=0.0,
         weight_decay_mask=None,
         ns_iters=ns_iters,
+        ns_coeffs=ns_coeffs,
         mode=mode,
+        preconditioning=preconditioning,
         inv_steps=inv_steps,
         inv_eps=inv_eps,
         inv_scale=inv_scale,
@@ -233,6 +231,7 @@ def soda_prism(
         nesterov=nesterov,
         shape_nesterov=shape_nesterov,
         bias_correction=bias_correction,
+        momentum_accumulator=momentum_accumulator,
         grad_clip_max_amps=grad_clip_max_amps,
         raw_global_grad_clip=raw_global_grad_clip,
         permissive_spike_protection=permissive_spike_protection,
@@ -287,8 +286,9 @@ def soda_kron(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """PSGD Kron base optimizer wrapped with SODA."""
-    lr_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    lr_schedule, _ = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=None,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
@@ -336,38 +336,35 @@ def soda_muon(
     warmup_fraction: float = 0.1,
     decay_fraction: float = 0.1,
     state_dtype: jax.typing.DTypeLike | None = None,
-    ns_coeffs: Any = MUON_NS_COEFFS,
+    ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     ns_steps: jax.typing.ArrayLike = 5,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
     mu_dtype: jax.typing.DTypeLike | None = None,
     nesterov: bool = True,
     adaptive: bool = False,
+    preconditioning: MuonPreconditioning = "frobenius",
+    momentum_accumulator: MomentumAccumulator = "ema",
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
     adam_learning_rate: float | None = None,
-    muon_weight_dimension_numbers: Any | Callable[[base.Params], Any] | None = None,
+    muon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
+    key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
-    """Optax contrib Muon base optimizer wrapped with SODA."""
-    muon_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    """Rollfast Muon base optimizer wrapped with SODA."""
+    muon_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
     if adam_learning_rate is None:
         adam_schedule = None
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
-    base_optimizer = optax.contrib.muon(
+    base_optimizer = muon(
         learning_rate=muon_schedule,
         ns_coeffs=ns_coeffs,
         ns_steps=ns_steps,
@@ -378,6 +375,8 @@ def soda_muon(
         mu_dtype=mu_dtype,
         nesterov=nesterov,
         adaptive=adaptive,
+        preconditioning=preconditioning,
+        momentum_accumulator=momentum_accumulator,
         adam_b1=adam_b1,
         adam_b2=adam_b2,
         adam_eps_root=adam_eps_root,
@@ -385,6 +384,7 @@ def soda_muon(
         adam_learning_rate=adam_schedule,
         muon_weight_dimension_numbers=muon_weight_dimension_numbers,
         consistent_rms=consistent_rms,
+        key=key,
     )
     return soda(base_optimizer, state_dtype=state_dtype)
 
@@ -400,6 +400,7 @@ def soda_rmnp(
     mu_dtype: jax.typing.DTypeLike | None = None,
     nesterov: bool = True,
     adaptive: bool = False,
+    momentum_accumulator: MomentumAccumulator = "ema",
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
@@ -409,21 +410,13 @@ def soda_rmnp(
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
     """RMNP base optimizer wrapped with SODA."""
-    rmnp_schedule = wsd_schedule(
-        peak_lr=learning_rate,
+    rmnp_schedule, adam_schedule = _make_wsd_schedule_pair(
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
         total_steps=total_steps,
         warmup_fraction=warmup_fraction,
         decay_fraction=decay_fraction,
     )
-    if adam_learning_rate is None:
-        adam_schedule = rmnp_schedule
-    else:
-        adam_schedule = wsd_schedule(
-            peak_lr=adam_learning_rate,
-            total_steps=total_steps,
-            warmup_fraction=warmup_fraction,
-            decay_fraction=decay_fraction,
-        )
 
     base_optimizer = rmnp(
         learning_rate=rmnp_schedule,
@@ -434,6 +427,7 @@ def soda_rmnp(
         mu_dtype=mu_dtype,
         nesterov=nesterov,
         adaptive=adaptive,
+        momentum_accumulator=momentum_accumulator,
         adam_b1=adam_b1,
         adam_b2=adam_b2,
         adam_eps_root=adam_eps_root,
@@ -444,3 +438,14 @@ def soda_rmnp(
         key=key,
     )
     return soda(base_optimizer, state_dtype=state_dtype)
+
+
+__all__ = [
+    "SodaState",
+    "soda",
+    "soda_adam",
+    "soda_kron",
+    "soda_muon",
+    "soda_prism",
+    "soda_rmnp",
+]
