@@ -15,23 +15,26 @@ from rollfast.utils import _safe_bias_correction, zeros_like_preserving_sharding
 
 
 SYMMETRIC_INT8_CODEBOOK_ID = "rollfast.symmetric_int8.neg127_pos127.v1"
+DYNAMIC_SIGNED_CODEBOOK_ID = "bitsandbytes.dynamic.signed.8bit.v1"
+DYNAMIC_UNSIGNED_CODEBOOK_ID = "bitsandbytes.dynamic.unsigned.8bit.v1"
 BlockLayout = Literal["shard_local", "logical_global"]
+CodebookQuantizer = Literal["dynamic_signed", "dynamic_unsigned", "symmetric_int8"]
 
 
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class QuantizedBlocks:
-    """Blockwise symmetric int8 representation for one optimizer-state leaf."""
+    """Blockwise fixed-codebook 8-bit representation for one state leaf."""
 
     values: jax.Array
     scales: jax.Array
     shape: tuple[int, ...]
     size: int
     block_size: int
-    quantizer: str = "blockwise_symmetric_int8"
-    codebook_id: str = SYMMETRIC_INT8_CODEBOOK_ID
-    qmin: int = -127
-    qmax: int = 127
+    quantizer: str = "blockwise_dynamic_signed_8bit"
+    codebook_id: str = DYNAMIC_SIGNED_CODEBOOK_ID
+    qmin: int = 0
+    qmax: int = 255
     zero_point: int = 0
     block_layout: BlockLayout = "shard_local"
 
@@ -108,16 +111,22 @@ def quantize_blocks(
     *,
     block_size: int = 2048,
     scale_dtype: jax.typing.DTypeLike = jnp.float32,
-    stochastic_rounding: bool = True,
+    stochastic_rounding: bool = False,
     key: jax.Array | None = None,
     block_layout: BlockLayout = "shard_local",
+    quantizer: CodebookQuantizer = "dynamic_signed",
 ) -> QuantizedBlocks:
-    """Quantize one array with symmetric blockwise dynamic int8 scales."""
+    """Quantize one array with fixed-codebook blockwise dynamic scales."""
 
     if block_size <= 0:
         raise ValueError("block_size must be positive.")
     if block_layout not in {"shard_local", "logical_global"}:
         raise ValueError("block_layout must be 'shard_local' or 'logical_global'.")
+    if quantizer not in {"dynamic_signed", "dynamic_unsigned", "symmetric_int8"}:
+        raise ValueError(
+            "quantizer must be 'dynamic_signed', 'dynamic_unsigned', or "
+            "'symmetric_int8'."
+        )
     x_f32 = jnp.asarray(x, dtype=jnp.float32)
     shape = tuple(x_f32.shape)
     size = int(x_f32.size)
@@ -127,16 +136,49 @@ def quantize_blocks(
     padded = jnp.pad(flat, (0, padded_size - size))
     blocks = jnp.reshape(padded, (blocks_count, block_size))
     max_abs = jnp.max(jnp.abs(blocks), axis=1)
-    qmin, qmax = -127.0, 127.0
-    scales = jnp.where(max_abs > 0.0, max_abs / qmax, 1.0)
-    scaled = jnp.clip(blocks / scales[:, None], qmin, qmax)
-    rounded = _round_scaled(scaled, stochastic_rounding=stochastic_rounding, key=key)
+    if quantizer == "symmetric_int8":
+        qmin, qmax = -127.0, 127.0
+        scales = jnp.where(max_abs > 0.0, max_abs / qmax, 1.0)
+        scaled = jnp.clip(blocks / scales[:, None], qmin, qmax)
+        rounded = _round_scaled(
+            scaled,
+            stochastic_rounding=stochastic_rounding,
+            key=key,
+        )
+        return QuantizedBlocks(
+            values=rounded.astype(jnp.int8),
+            scales=scales.astype(scale_dtype),
+            shape=shape,
+            size=size,
+            block_size=block_size,
+            quantizer="blockwise_symmetric_int8",
+            codebook_id=SYMMETRIC_INT8_CODEBOOK_ID,
+            qmin=-127,
+            qmax=127,
+            zero_point=0,
+            block_layout=block_layout,
+        )
+
+    codebook = _codebook_for_quantizer(quantizer)
+    scales = jnp.where(max_abs > 0.0, max_abs, 1.0)
+    normalized = jnp.clip(blocks / scales[:, None], codebook[0], codebook[-1])
+    codes = _quantize_to_codebook(
+        normalized,
+        codebook,
+        stochastic_rounding=stochastic_rounding,
+        key=key,
+    )
     return QuantizedBlocks(
-        values=rounded.astype(jnp.int8),
+        values=codes.astype(jnp.uint8),
         scales=scales.astype(scale_dtype),
         shape=shape,
         size=size,
         block_size=block_size,
+        quantizer=f"blockwise_{quantizer}_8bit",
+        codebook_id=_codebook_id_for_quantizer(quantizer),
+        qmin=0,
+        qmax=255,
+        zero_point=_zero_code_for_quantizer(quantizer),
         block_layout=block_layout,
     )
 
@@ -148,7 +190,11 @@ def dequantize_blocks(
 ) -> jax.Array:
     """Dequantize a ``QuantizedBlocks`` leaf and remove deterministic padding."""
 
-    values = blocks.values.astype(jnp.float32)
+    if blocks.codebook_id == SYMMETRIC_INT8_CODEBOOK_ID:
+        values = blocks.values.astype(jnp.float32)
+    else:
+        codebook = _codebook_for_id(blocks.codebook_id)
+        values = codebook[blocks.values.astype(jnp.uint8).astype(jnp.int32)]
     scales = blocks.scales.astype(jnp.float32)
     flat = jnp.reshape(values * scales[:, None], (-1,))[: blocks.size]
     return jnp.reshape(flat, blocks.shape).astype(dtype)
@@ -200,13 +246,13 @@ def scale_by_adam8(
     min_size: int = 4096,
     scale_dtype: jax.typing.DTypeLike = jnp.float32,
     fallback_dtype: jax.typing.DTypeLike = jnp.float32,
-    stochastic_rounding: bool = True,
+    stochastic_rounding: bool = False,
     block_layout: BlockLayout = "shard_local",
     quantize: bool = True,
     nesterov: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformation:
-    """Rescale gradients by Adam while storing eligible moments as int8 blocks."""
+    """Rescale gradients by Adam while storing eligible moments as 8-bit blocks."""
 
     scale_dtype = utils.canonicalize_dtype(scale_dtype)
     fallback_dtype = utils.canonicalize_dtype(fallback_dtype)
@@ -227,6 +273,7 @@ def scale_by_adam8(
             fallback_dtype=fallback_dtype,
             block_layout=block_layout,
             quantize=quantize,
+            quantizer="dynamic_signed",
             key=key_mu,
         )
         nu = _init_moment_tree(
@@ -237,6 +284,7 @@ def scale_by_adam8(
             fallback_dtype=fallback_dtype,
             block_layout=block_layout,
             quantize=quantize,
+            quantizer="dynamic_unsigned",
             key=key_nu,
         )
         return ScaleByAdam8State(
@@ -357,14 +405,14 @@ def adamw8(
     min_size: int = 4096,
     scale_dtype: jax.typing.DTypeLike = jnp.float32,
     fallback_dtype: jax.typing.DTypeLike = jnp.float32,
-    stochastic_rounding: bool = True,
+    stochastic_rounding: bool = False,
     block_layout: BlockLayout = "shard_local",
     quantize: bool = True,
     nesterov: bool = False,
     use_magma: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
 ) -> base.GradientTransformationExtraArgs:
-    """AdamW whose eligible moment leaves are stored as blockwise int8 state."""
+    """AdamW whose eligible moment leaves use blockwise 8-bit codebook state."""
 
     if use_magma:
         raise NotImplementedError("Magma is not supported by adamw8 yet.")
@@ -411,6 +459,117 @@ def _round_scaled(
     return lower + jax.random.bernoulli(key, probability, scaled.shape)
 
 
+def _dynamic_codebook(*, signed: bool) -> jax.Array:
+    return jnp.asarray(_dynamic_codebook_values(signed=signed), dtype=jnp.float32)
+
+
+def _dynamic_codebook_values(*, signed: bool) -> tuple[float, ...]:
+    data: list[float] = []
+    total_bits = 8
+    max_exponent_bits = 7
+    non_sign_bits = total_bits - 1
+    additional_items = 2 ** (non_sign_bits - max_exponent_bits) - 1
+    for index in range(max_exponent_bits):
+        exponent_scale = 10 ** (-(max_exponent_bits - 1) + index)
+        fraction_items = (
+            2 ** (index + non_sign_bits - max_exponent_bits) + 1
+            if signed
+            else 2 ** (index + non_sign_bits - max_exponent_bits + 1) + 1
+        )
+        means = _linspace_bin_means(0.1, 1.0, fraction_items)
+        data.extend((exponent_scale * value for value in means))
+        if signed:
+            data.extend((-exponent_scale * value for value in means))
+    if additional_items > 0:
+        exponent_scale = 10 ** (-(max_exponent_bits - 1) + max_exponent_bits - 1)
+        means = _linspace_bin_means(0.1, 1.0, additional_items + 1)
+        data.extend((exponent_scale * value for value in means))
+        if signed:
+            data.extend((-exponent_scale * value for value in means))
+    data.append(0.0)
+    data.append(1.0)
+    if len(data) != 2**total_bits:
+        raise AssertionError("dynamic codebook must contain 256 values.")
+    return tuple(sorted(data))
+
+
+def _linspace_bin_means(start: float, stop: float, points: int) -> list[float]:
+    if points <= 1:
+        return []
+    step = (stop - start) / (points - 1)
+    boundaries = [start + step * index for index in range(points)]
+    return [
+        (left + right) / 2.0
+        for left, right in zip(boundaries[:-1], boundaries[1:], strict=True)
+    ]
+
+
+def _codebook_for_quantizer(quantizer: CodebookQuantizer) -> jax.Array:
+    if quantizer == "dynamic_signed":
+        return _dynamic_codebook(signed=True)
+    if quantizer == "dynamic_unsigned":
+        return _dynamic_codebook(signed=False)
+    raise ValueError("symmetric_int8 does not use a lookup codebook.")
+
+
+def _codebook_id_for_quantizer(quantizer: CodebookQuantizer) -> str:
+    if quantizer == "dynamic_signed":
+        return DYNAMIC_SIGNED_CODEBOOK_ID
+    if quantizer == "dynamic_unsigned":
+        return DYNAMIC_UNSIGNED_CODEBOOK_ID
+    if quantizer == "symmetric_int8":
+        return SYMMETRIC_INT8_CODEBOOK_ID
+    raise ValueError(f"Unknown quantizer: {quantizer!r}.")
+
+
+def _codebook_for_id(codebook_id: str) -> jax.Array:
+    if codebook_id == DYNAMIC_SIGNED_CODEBOOK_ID:
+        return _dynamic_codebook(signed=True)
+    if codebook_id == DYNAMIC_UNSIGNED_CODEBOOK_ID:
+        return _dynamic_codebook(signed=False)
+    raise ValueError(f"Unknown codebook_id: {codebook_id!r}.")
+
+
+def _zero_code_for_quantizer(quantizer: CodebookQuantizer) -> int:
+    if quantizer == "dynamic_signed":
+        codebook = _dynamic_codebook_values(signed=True)
+    elif quantizer == "dynamic_unsigned":
+        codebook = _dynamic_codebook_values(signed=False)
+    else:
+        return 0
+    return min(range(len(codebook)), key=lambda index: abs(codebook[index]))
+
+
+def _quantize_to_codebook(
+    normalized: jax.Array,
+    codebook: jax.Array,
+    *,
+    stochastic_rounding: bool,
+    key: jax.Array | None,
+) -> jax.Array:
+    upper_index = jnp.searchsorted(codebook, normalized, side="left")
+    upper_index = jnp.clip(upper_index, 0, codebook.shape[0] - 1)
+    lower_index = jnp.clip(upper_index - 1, 0, codebook.shape[0] - 1)
+    lower_value = codebook[lower_index]
+    upper_value = codebook[upper_index]
+    if stochastic_rounding:
+        if key is None:
+            raise ValueError("stochastic rounding requires a PRNG key.")
+        denominator = upper_value - lower_value
+        probability = jnp.where(
+            denominator > 0,
+            (normalized - lower_value) / denominator,
+            0.0,
+        )
+        probability = jnp.clip(probability, 0.0, 1.0)
+        choose_upper = jax.random.bernoulli(key, probability, normalized.shape)
+    else:
+        choose_upper = jnp.abs(upper_value - normalized) < jnp.abs(
+            normalized - lower_value
+        )
+    return jnp.where(choose_upper, upper_index, lower_index).astype(jnp.uint8)
+
+
 def _init_moment_tree(
     params: Any,
     *,
@@ -420,6 +579,7 @@ def _init_moment_tree(
     fallback_dtype: jax.typing.DTypeLike,
     block_layout: BlockLayout,
     quantize: bool,
+    quantizer: CodebookQuantizer,
     key: jax.Array,
 ) -> Any:
     leaves, treedef = jax.tree.flatten(params, is_leaf=_is_passthrough_leaf)
@@ -434,6 +594,7 @@ def _init_moment_tree(
             fallback_dtype=fallback_dtype,
             block_layout=block_layout,
             quantize=quantize,
+            quantizer=quantizer,
             key=k,
         ),
         params,
@@ -451,6 +612,7 @@ def _init_moment_leaf(
     fallback_dtype: jax.typing.DTypeLike,
     block_layout: BlockLayout,
     quantize: bool,
+    quantizer: CodebookQuantizer,
     key: jax.Array,
 ) -> Any:
     if _is_passthrough_leaf(param):
@@ -464,6 +626,7 @@ def _init_moment_leaf(
             stochastic_rounding=False,
             key=key,
             block_layout=block_layout,
+            quantizer=quantizer,
         )
     return zeros
 
@@ -519,6 +682,7 @@ def _store_moment_leaf(
             stochastic_rounding=stochastic_rounding,
             key=key,
             block_layout=block_layout,
+            quantizer=_quantizer_from_state_leaf(template),
         )
     if _is_passthrough_leaf(template):
         return template
@@ -547,10 +711,23 @@ def _is_state_leaf(x: Any) -> bool:
     return isinstance(x, QuantizedBlocks) or _is_passthrough_leaf(x)
 
 
+def _quantizer_from_state_leaf(leaf: QuantizedBlocks) -> CodebookQuantizer:
+    if leaf.codebook_id == DYNAMIC_SIGNED_CODEBOOK_ID:
+        return "dynamic_signed"
+    if leaf.codebook_id == DYNAMIC_UNSIGNED_CODEBOOK_ID:
+        return "dynamic_unsigned"
+    if leaf.codebook_id == SYMMETRIC_INT8_CODEBOOK_ID:
+        return "symmetric_int8"
+    raise ValueError(f"Unknown codebook_id: {leaf.codebook_id!r}.")
+
+
 __all__ = (
     "QuantizedBlocks",
     "BlockLayout",
+    "CodebookQuantizer",
     "ScaleByAdam8State",
+    "DYNAMIC_SIGNED_CODEBOOK_ID",
+    "DYNAMIC_UNSIGNED_CODEBOOK_ID",
     "SYMMETRIC_INT8_CODEBOOK_ID",
     "adamw8",
     "dequantize_blocks",

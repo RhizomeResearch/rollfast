@@ -66,7 +66,10 @@ def scale_by_adam(
             numerical stability when backpropagating gradients through the rescaling.
         mu_dtype: Optional `dtype` to be used for the first order accumulator; if
             `None` then the `dtype` is inferred from `params` and `updates`.
-        weight_decay: Strength of the weight decay regularization (only used if use_magma=True).
+        weight_decay: Strength of the decoupled weight decay added to the
+            adaptive direction before any later learning-rate scaling. ``adamw``
+            uses this path only when ``use_magma=True`` so Magma can project the
+            complete AdamW direction.
         weight_decay_mask: A tree with same structure as (or a prefix of) the params PyTree,
             or a Callable that returns such a pytree given the params/updates.
             The leaves should be booleans, `True` for leaves/subtrees you want to

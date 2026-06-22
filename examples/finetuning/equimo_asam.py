@@ -23,9 +23,8 @@ base = rfft.adamw_from_plan(
     clip_global_norm=None,
 )
 
-asam = rfft.SAMConfig(
+asam = rfft.ASAMConfig(
     rho=0.5,
-    adaptive=True,
     eta=0.01,
 )
 

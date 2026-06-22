@@ -3,7 +3,12 @@ import jax.numpy as jnp
 import optax
 
 import rollfast.finetune as rfft
-from rollfast.optim.adam8 import QuantizedBlocks, tree_state_nbytes
+from rollfast.optim.adam8 import (
+    DYNAMIC_SIGNED_CODEBOOK_ID,
+    DYNAMIC_UNSIGNED_CODEBOOK_ID,
+    QuantizedBlocks,
+    tree_state_nbytes,
+)
 
 from .helpers import TinyGroup, TinyPlan
 
@@ -98,6 +103,14 @@ def test_adamw8_from_plan_quantizes_eligible_group_state_and_reports_bytes():
     assert bundle.manifest()["state_quantization"]["enabled"] is True
     assert bundle.manifest()["state_quantization"]["block_layout"] == "shard_local"
     assert (
+        bundle.manifest()["state_quantization"]["first_moment_codebook_id"]
+        == DYNAMIC_SIGNED_CODEBOOK_ID
+    )
+    assert (
+        bundle.manifest()["state_quantization"]["second_moment_codebook_id"]
+        == DYNAMIC_UNSIGNED_CODEBOOK_ID
+    )
+    assert (
         rfft.StateQuantizationConfig.from_dict(bundle.manifest()["state_quantization"])
         == quantization
     )
@@ -110,7 +123,12 @@ def test_adamw8_from_plan_quantizes_eligible_group_state_and_reports_bytes():
     assert group_rows["large_decay"]["state_policy"] == "blockwise_int8_moments"
     assert group_rows["embed_decay"]["state_policy"] == "float32_fallback_moments"
     assert group_rows["bias_no_decay"]["state_policy"] == "float32_fallback_moments"
-    assert _quantized_leaves(state)
+    quantized_leaves = _quantized_leaves(state)
+    assert quantized_leaves
+    assert {leaf.codebook_id for leaf in quantized_leaves} == {
+        DYNAMIC_SIGNED_CODEBOOK_ID,
+        DYNAMIC_UNSIGNED_CODEBOOK_ID,
+    }
     assert bundle.report.estimated_state_bytes < fp32_bundle.report.estimated_state_bytes
     assert tree_state_nbytes(state) < tree_state_nbytes(fp32_state)
 

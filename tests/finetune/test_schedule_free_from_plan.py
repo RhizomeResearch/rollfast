@@ -40,6 +40,12 @@ def test_schedule_free_adam_from_plan_reports_grouped_lrs():
     assert groups["block_00_decay"].effective_lr == pytest.approx(5e-4)
     assert groups["head_decay"].effective_lr == pytest.approx(2e-3)
     assert groups["block_00_no_decay"].weight_decay_value == 0.0
+    method_config = bundle.manifest()["method_config"]
+    assert method_config["method"] == "schedule_free_adam"
+    assert method_config["profile_fidelity"] == "safe_default"
+    assert method_config["paper_profile"] is False
+    assert method_config["known_deviations"] == ("uses_external_wsd_schedule",)
+    assert method_config["config"]["external_schedule"] == "wsd"
 
 
 def test_schedule_free_adam_updates_and_returns_eval_params():

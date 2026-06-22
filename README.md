@@ -270,21 +270,21 @@ step = rfft.make_sam_step(
 trainable, opt_state, info = step(trainable, opt_state, batch)
 ```
 
-For ASAM, use `SAMConfig(rho=0.5, adaptive=True, eta=0.01)` as a starting
+For ASAM, use `ASAMConfig(rho=0.5, eta=0.01)` as a starting
 preset and sweep it for the task. Set `microbatch_axis` when `batch` carries a
 leading microbatch dimension; Rollfast accumulates both SAM gradient passes
 before applying one base optimizer update.
 
 AdaLoRA rank scheduling is optimizer-side metadata. Rollfast provides a
-fixed-shape controller that tracks importance EMAs and emits static rank masks;
-Equimo applies those masks to rank-masked adapter modules:
+fixed-shape controller that tracks importance EMAs and emits rank support masks;
+Equimo applies those masks to SVD-triplet AdaLoRA modules:
 
 ```python
 rank_groups = eqft.lora_rank_groups(lora_model)
 controller = rfft.make_adalora_controller(
     rank_groups,
     total_steps=20_000,
-    config=rfft.AdaLoRAControllerConfig(init_rank=12, target_rank=8),
+    config=rfft.AdaLoRAControllerConfig(initial_budget=12, target_budget=8),
 )
 state = controller.init()
 state = controller.update(state, importance_scores, applied=True)

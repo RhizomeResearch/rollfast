@@ -33,6 +33,7 @@ from .averaging import (
 from .config import (
     AccumulationConfig,
     APOLLOConfig,
+    AveragingSourceView,
     CompiledGroup,
     EMAConfig,
     GaLoreConfig,
@@ -46,7 +47,6 @@ from .config import (
     SWAConfig,
     ScheduleConfig,
     ShardingPolicy,
-    SOAPConfig,
     StateQuantizationConfig,
 )
 from .groups import compile_groups
@@ -103,6 +103,11 @@ def compile_optimizer(
     gradient_policy = _with_sharding_norm_axes(gradient_policy, sharding)
     ema = EMAConfig() if ema is None else ema
     swa = SWAConfig() if swa is None else swa
+    ema, swa = _resolve_averaging_sources(
+        ema,
+        swa,
+        default_source_view="optimizer",
+    )
     state_quantization = (
         StateQuantizationConfig() if state_quantization is None else state_quantization
     )
@@ -298,6 +303,11 @@ def galore_adamw_from_plan(
     gradient_policy = _with_sharding_norm_axes(gradient_policy, sharding)
     ema = EMAConfig() if ema is None else ema
     swa = SWAConfig() if swa is None else swa
+    ema, swa = _resolve_averaging_sources(
+        ema,
+        swa,
+        default_source_view="optimizer",
+    )
 
     normalized = validate_plan(plan)
     compiled_groups = compile_groups(normalized.groups, optimizer, tuple(group_rules))
@@ -430,6 +440,11 @@ def apollo_adamw_from_plan(
     gradient_policy = _with_sharding_norm_axes(gradient_policy, sharding)
     ema = EMAConfig() if ema is None else ema
     swa = SWAConfig() if swa is None else swa
+    ema, swa = _resolve_averaging_sources(
+        ema,
+        swa,
+        default_source_view="optimizer",
+    )
 
     normalized = validate_plan(plan)
     compiled_groups = compile_groups(normalized.groups, optimizer, tuple(group_rules))
@@ -538,6 +553,11 @@ def schedule_free_adam_from_plan(
     group_rules = tuple(group_rules)
     ema = EMAConfig() if ema is None else ema
     swa = SWAConfig() if swa is None else swa
+    ema, swa = _resolve_averaging_sources(
+        ema,
+        swa,
+        default_source_view="schedule_free_eval",
+    )
     optimizer = OptimizerConfig(
         name="schedule_free_adam",
         base_lr=base_lr,
@@ -600,6 +620,7 @@ def schedule_free_adam_from_plan(
         total_steps=schedule_config.total_steps,
         labels=normalized.labels,
         groups=compiled_groups,
+        source_eval_fn=_schedule_free_eval_params,
     )
     eval_fn = make_averaging_eval_fn(
         ema=ema,
@@ -633,6 +654,11 @@ def schedule_free_adam_from_plan(
         quantization_config=StateQuantizationConfig(),
         ema_config=ema,
         swa_config=swa,
+        method_config=_schedule_free_method_config(
+            schedule_config,
+            weighting_mode=weighting_mode,
+            schedule_free_plus=schedule_free_plus,
+        ),
         eval_fn=eval_fn,
         eval_params_kind="averaging_schedule_free"
         if ema.enabled or swa.enabled
@@ -898,59 +924,6 @@ def muon_adam_from_plan(
     )
 
 
-def soap_adam_from_plan(
-    plan: FineTunePlanProtocol,
-    *,
-    soap: SOAPConfig | None = None,
-    total_steps: int | None = None,
-    base_lr: float = 5e-4,
-    schedule: str | ScheduleConfig = "warmup_cosine",
-    weight_decay: float = 0.05,
-    clip_global_norm: float | None = 1.0,
-    accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
-    axis_name: str | tuple[str, ...] | None = None,
-    group_rules: Iterable[GroupRule] = (),
-    ema: EMAConfig | None = None,
-    swa: SWAConfig | None = None,
-    b1: float = 0.9,
-    adam_b1: float = 0.9,
-    adam_b2: float = 0.999,
-    adam_eps: float = 1e-8,
-    key: jax.Array = jax.random.PRNGKey(42),
-) -> OptimizerBundle:
-    """Build experimental SOAP-style matrix preconditioning with AdamW fallback."""
-
-    soap = SOAPConfig() if soap is None else soap
-    return _hybrid_optimizer_from_plan(
-        plan,
-        optimizer_name="soap_adam",
-        family="soap",
-        total_steps=total_steps,
-        base_lr=base_lr,
-        schedule=schedule,
-        weight_decay=weight_decay,
-        clip_global_norm=clip_global_norm,
-        accumulation_steps=accumulation_steps,
-        moment_dtype=moment_dtype,
-        axis_name=axis_name,
-        group_rules=group_rules,
-        ema=ema,
-        swa=swa,
-        b1=b1,
-        adam_b1=adam_b1,
-        adam_b2=adam_b2,
-        adam_eps=adam_eps,
-        key=key,
-        family_kwargs={
-            "config": soap.to_dict(),
-            "preconditioner_update_interval": soap.preconditioner_update_interval,
-            "inv_steps": soap.inv_steps,
-            "eps_gram": soap.eps_gram,
-        },
-    )
-
-
 def _hybrid_optimizer_from_plan(
     plan: FineTunePlanProtocol,
     *,
@@ -977,6 +950,11 @@ def _hybrid_optimizer_from_plan(
     group_rules = tuple(group_rules)
     ema = EMAConfig() if ema is None else ema
     swa = SWAConfig() if swa is None else swa
+    ema, swa = _resolve_averaging_sources(
+        ema,
+        swa,
+        default_source_view="optimizer",
+    )
     optimizer = OptimizerConfig(
         name=optimizer_name,
         base_lr=base_lr,
@@ -1225,25 +1203,6 @@ def _hybrid_group_transform(
             adam_weight_decay=weight_decay,
             adam_learning_rate=learning_rate,
             consistent_rms=clean_kwargs.pop("consistent_rms", None),
-        )
-    if family == "soap":
-        config = clean_kwargs.pop("config", {})
-        del config
-        clean_kwargs.pop("preconditioner_update_interval", None)
-        return prism(
-            learning_rate=learning_rate,
-            b1=b1,
-            weight_decay=weight_decay,
-            mu_dtype=moment_dtype,
-            axis_name=axis_name,
-            adam_b1=adam_b1,
-            adam_b2=adam_b2,
-            adam_eps=adam_eps,
-            key=key,
-            mode="bidirectional",
-            inv_steps=clean_kwargs.pop("inv_steps", 6),
-            eps_gram=clean_kwargs.pop("eps_gram", 1e-6),
-            **clean_kwargs,
         )
     raise ValueError(f"unknown hybrid optimizer family: {family!r}.")
 
@@ -1722,6 +1681,19 @@ def _schedule_free_eval_params(
     return schedule_free_eval_params(schedule_free_state, params)
 
 
+def _resolve_averaging_sources(
+    ema: EMAConfig,
+    swa: SWAConfig,
+    *,
+    default_source_view: AveragingSourceView,
+) -> tuple[EMAConfig, SWAConfig]:
+    if ema.source_view is None:
+        ema = replace(ema, source_view=default_source_view)
+    if swa.source_view is None:
+        swa = replace(swa, source_view=default_source_view)
+    return ema, swa
+
+
 def _unwrap_schedule_free_state(state: Any) -> Any:
     current = state
     for _ in range(8):
@@ -1813,16 +1785,27 @@ def _report_warnings(
 
 
 def _hybrid_profile_warnings(family: str) -> tuple[str, ...]:
-    if family == "soap":
+    if family == "aurora":
         return (
-            "SOAP-style builder is experimental and uses Rollfast's "
-            "bidirectional matrix-preconditioning path; it is not labeled "
-            "paper-exact SOAP.",
+            "Aurora builder is experimental until validated against the "
+            "Tilde Research reference implementation.",
+        )
+    if family == "prism":
+        return (
+            "PRISM builder is experimental until validated against the "
+            "public PRISM reference profile.",
         )
     if family == "muon":
         return (
             "Muon builder is experimental for pretrained fine-tuning until "
             "benchmarked on target workloads.",
+        )
+    if family == "kron":
+        return (
+            "Kron/PSGD builder is experimental until validated against public "
+            "PSGD/Kron references.",
+            "kron_adam uses Rollfast's PSGD Kron transform for each routed "
+            "group; the transform does not include an internal Adam fallback.",
         )
     return ()
 
@@ -1833,34 +1816,104 @@ def _hybrid_method_config(family: str, family_kwargs: Mapping[str, Any]) -> dict
         return {
             "method": "muon",
             **config,
+            "implemented_profile": "optax_contrib_muon",
+            "reference_algorithm": "muon_newton_schulz_matrix_momentum",
             "matrix_optimizer": "optax.contrib.muon",
             "fallback_optimizer": "adamw",
             "matrix_eligibility": "rank_2_parameters",
             "orthogonalization": "newton_schulz",
-            "profile_fidelity": "experimental",
-            "reference_validated": False,
-        }
-    if family == "soap":
-        return {
-            "method": "soap",
-            **config,
-            "matrix_optimizer": "prism_bidirectional_surrogate",
-            "fallback_optimizer": "adamw",
-            "matrix_eligibility": "rank_2_parameters",
-            "preconditioner_update_interval": family_kwargs.get(
-                "preconditioner_update_interval"
+            "paper_profile": False,
+            "pretrained_finetuning_recommendation": "benchmark_required",
+            "known_deviations": (
+                "uses_optax_library_profile_not_moonlight_distributed_reference",
+                "pretrained_finetuning_benchmark_gate_not_satisfied",
             ),
             "profile_fidelity": "experimental",
             "reference_validated": False,
-            "reference_validation": "pending_soap_equation_level_fixture",
         }
-    if family in {"aurora", "prism", "kron"}:
+    if family == "aurora":
         return {
             "method": family,
             **{key: value for key, value in family_kwargs.items() if key != "config"},
+            "implemented_profile": "rollfast_aurora_balanced_polar",
+            "reference_algorithm": "tilde_aurora_balanced_polar",
+            "matrix_optimizer": "rollfast.optim.aurora",
+            "fallback_optimizer": "adamw",
+            "matrix_eligibility": "rank_2_parameters",
+            "paper_profile": False,
+            "known_deviations": (
+                "reference_parity_fixture_pending",
+                "pretrained_finetuning_benchmark_gate_not_satisfied",
+            ),
             "profile_fidelity": "experimental",
+            "reference_validated": False,
+        }
+    if family == "prism":
+        return {
+            "method": family,
+            **{key: value for key, value in family_kwargs.items() if key != "config"},
+            "implemented_profile": "rollfast_prism_original",
+            "reference_algorithm": "prism_innovation_augmented_spectral_shaping",
+            "matrix_optimizer": "rollfast.optim.prism",
+            "fallback_optimizer": "adamw",
+            "matrix_eligibility": "rank_2_parameters",
+            "paper_profile": False,
+            "known_deviations": (
+                "reference_parity_fixture_pending",
+                "pretrained_finetuning_benchmark_gate_not_satisfied",
+            ),
+            "profile_fidelity": "experimental",
+            "reference_validated": False,
+        }
+    if family == "kron":
+        return {
+            "method": family,
+            **{key: value for key, value in family_kwargs.items() if key != "config"},
+            "implemented_profile": "rollfast_psgd_kron",
+            "reference_algorithm": "psgd_kronecker_factored_preconditioner",
+            "matrix_optimizer": "rollfast.optim.psgd.kron",
+            "fallback_optimizer": None,
+            "matrix_eligibility": "caller_routed_group_leaves",
+            "paper_profile": False,
+            "known_deviations": (
+                "reference_parity_fixture_pending",
+                "no_internal_adam_fallback_in_kron_transform",
+            ),
+            "profile_fidelity": "experimental",
+            "reference_validated": False,
         }
     return {"method": family}
+
+
+def _schedule_free_method_config(
+    schedule: ScheduleConfig,
+    *,
+    weighting_mode: str | WeightingMode,
+    schedule_free_plus: bool,
+) -> dict[str, Any]:
+    mode = (
+        weighting_mode.value
+        if isinstance(weighting_mode, WeightingMode)
+        else str(weighting_mode)
+    )
+    known_deviations = (
+        (f"uses_external_{schedule.kind}_schedule",)
+        if schedule.kind != "constant"
+        else ()
+    )
+    return {
+        "id": "schedule_free_adam_library",
+        "method": "schedule_free_adam",
+        "profile_fidelity": "safe_default",
+        "reference_ids": ("defazio_2024_schedule_free",),
+        "config": {
+            "external_schedule": schedule.kind,
+            "weighting_mode": mode,
+            "schedule_free_plus": schedule_free_plus,
+        },
+        "known_deviations": known_deviations,
+        "paper_profile": False,
+    }
 
 
 def _precision_warnings(trainable: Any, precision: PrecisionConfig) -> tuple[str, ...]:
@@ -2015,12 +2068,18 @@ def _galore_sharding_warnings(
 
 
 def _galore_profile_warnings(galore: GaLoreConfig) -> tuple[str, ...]:
-    if galore.state_on_basis_refresh != "transport":
-        return ()
-    return (
-        "GaLore basis-aware projected-state transport is experimental and not "
-        "reference-validated.",
-    )
+    warnings = []
+    if galore.projection == "auto":
+        warnings.append(
+            "GaLore projection='auto' uses Rollfast's memory-minimizing "
+            "orientation policy, not the public GaLore std projection profile."
+        )
+    if galore.state_on_basis_refresh == "transport":
+        warnings.append(
+            "GaLore basis-aware projected-state transport is experimental and not "
+            "reference-validated."
+        )
+    return tuple(warnings)
 
 
 def _galore_method_config(
@@ -2030,12 +2089,15 @@ def _galore_method_config(
     refresh_communication_bytes: int,
 ) -> dict[str, Any]:
     rank = dict(galore.rank) if isinstance(galore.rank, Mapping) else int(galore.rank)
+    known_deviations = _galore_known_deviations(galore)
     return {
         "method": "galore",
         "rank": rank,
         "update_interval": galore.update_interval,
         "scale": galore.scale,
         "projection": galore.projection,
+        "projection_profile": _galore_projection_profile(galore.projection),
+        "reference_projection": "galore_std",
         "basis_method": galore.basis_method,
         "basis_dtype": jnp.dtype(galore.basis_dtype).name,
         "state_on_basis_refresh": galore.state_on_basis_refresh,
@@ -2044,7 +2106,11 @@ def _galore_method_config(
             if galore.state_on_basis_refresh == "transport"
             else galore.state_on_basis_refresh
         ),
-        "reference_validated": galore.state_on_basis_refresh != "transport",
+        "known_deviations": known_deviations,
+        "profile_fidelity": "safe_default"
+        if known_deviations
+        else "reference_implementation",
+        "reference_validated": not known_deviations,
         "min_matrix_size": galore.min_matrix_size,
         "basis_refresh_communication_bytes": refresh_communication_bytes,
         "basis_refresh_collective": (
@@ -2054,6 +2120,25 @@ def _galore_method_config(
         ),
         "allow_host_materialization": sharding.allow_host_materialization,
     }
+
+
+def _galore_projection_profile(projection: str) -> str:
+    if projection == "auto":
+        return "rollfast_memory_min_auto"
+    if projection == "two_sided":
+        return "galore_full"
+    return f"galore_explicit_{projection}"
+
+
+def _galore_known_deviations(galore: GaLoreConfig) -> tuple[str, ...]:
+    deviations = []
+    if galore.projection == "auto":
+        deviations.append(
+            "projection_auto_uses_memory_min_orientation_not_galore_std"
+        )
+    if galore.state_on_basis_refresh == "transport":
+        deviations.append("basis_transport_experimental_not_reference_validated")
+    return tuple(deviations)
 
 
 def _estimate_apollo_state_bytes(
@@ -2095,6 +2180,8 @@ def _apollo_method_config(apollo: APOLLOConfig) -> dict[str, Any]:
         "projection_type": "std",
         "projection_orientation": "std_right_when_rows_gte_cols",
         "projection_matrix_variance": "normal/sqrt(rank)",
+        "adam_update_profile": "author_step_size_uncorrected_second_moment",
+        "scaling_denominator_eps": 1e-8,
         "normalization_axes": "projected_l2_per_channel_or_tensor",
         "projection_refresh_policy": refresh_policy,
         "profile_fidelity": "experimental",
@@ -2127,5 +2214,4 @@ __all__ = (
     "muon_adam_from_plan",
     "optimizer_from_plan",
     "schedule_free_adam_from_plan",
-    "soap_adam_from_plan",
 )

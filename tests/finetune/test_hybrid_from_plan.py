@@ -102,17 +102,95 @@ def test_hybrid_supports_ema_eval_view_and_manifest():
 
 
 @pytest.mark.parametrize(
+    ("builder", "kwargs", "method", "implemented_profile", "reference_algorithm"),
+    (
+        (
+            rfft.hybrid_aurora_adam_from_plan,
+            {"polar_ns_iters": 2},
+            "aurora",
+            "rollfast_aurora_balanced_polar",
+            "tilde_aurora_balanced_polar",
+        ),
+        (
+            rfft.hybrid_prism_adam_from_plan,
+            {"ns_iters": 2},
+            "prism",
+            "rollfast_prism_original",
+            "prism_innovation_augmented_spectral_shaping",
+        ),
+    ),
+)
+def test_aurora_prism_manifests_mark_experimental_profiles(
+    builder,
+    kwargs,
+    method,
+    implemented_profile,
+    reference_algorithm,
+):
+    plan = tiny_plan()
+    bundle = builder(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        **kwargs,
+    )
+    method_config = bundle.manifest()["method_config"]
+
+    assert method_config["method"] == method
+    assert method_config["implemented_profile"] == implemented_profile
+    assert method_config["reference_algorithm"] == reference_algorithm
+    assert method_config["matrix_optimizer"] == f"rollfast.optim.{method}"
+    assert method_config["fallback_optimizer"] == "adamw"
+    assert method_config["paper_profile"] is False
+    assert method_config["known_deviations"] == (
+        "reference_parity_fixture_pending",
+        "pretrained_finetuning_benchmark_gate_not_satisfied",
+    )
+    assert method_config["reference_validated"] is False
+    assert any("experimental" in warning.lower() for warning in bundle.report.warnings)
+
+
+def test_kron_manifest_marks_psgd_profile_and_no_internal_adam_fallback():
+    plan = tiny_plan()
+    bundle = rfft.hybrid_kron_adam_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        preconditioner_update_probability=1.0,
+    )
+    method_config = bundle.manifest()["method_config"]
+
+    assert method_config["method"] == "kron"
+    assert method_config["implemented_profile"] == "rollfast_psgd_kron"
+    assert (
+        method_config["reference_algorithm"]
+        == "psgd_kronecker_factored_preconditioner"
+    )
+    assert method_config["matrix_optimizer"] == "rollfast.optim.psgd.kron"
+    assert method_config["fallback_optimizer"] is None
+    assert method_config["matrix_eligibility"] == "caller_routed_group_leaves"
+    assert method_config["paper_profile"] is False
+    assert method_config["known_deviations"] == (
+        "reference_parity_fixture_pending",
+        "no_internal_adam_fallback_in_kron_transform",
+    )
+    assert method_config["reference_validated"] is False
+    assert any("psgd" in warning.lower() for warning in bundle.report.warnings)
+    assert any(
+        "internal adam fallback" in warning.lower()
+        for warning in bundle.report.warnings
+    )
+
+
+@pytest.mark.parametrize(
     ("builder", "optimizer_name", "kwargs"),
     (
         (
             rfft.muon_adam_from_plan,
             "muon_adam",
             {"muon": rfft.MuonConfig(ns_steps=2)},
-        ),
-        (
-            rfft.soap_adam_from_plan,
-            "soap_adam",
-            {"soap": rfft.SOAPConfig(inv_steps=1, preconditioner_update_interval=3)},
         ),
     ),
 )
@@ -142,14 +220,36 @@ def test_p2_matrix_builders_update_and_manifest(builder, optimizer_name, kwargs)
     assert any("experimental" in warning.lower() for warning in bundle.report.warnings)
 
 
-def test_muon_and_soap_configs_round_trip():
+def test_muon_config_round_trip():
     muon = rfft.MuonConfig(
         ns_steps=3,
         beta=0.9,
         preconditioning="spectral",
         consistent_rms=0.2,
     )
-    soap = rfft.SOAPConfig(preconditioner_update_interval=5, inv_steps=2)
 
     assert rfft.MuonConfig.from_dict(muon.to_dict()) == muon
-    assert rfft.SOAPConfig.from_dict(soap.to_dict()) == soap
+
+
+def test_muon_manifest_marks_optax_profile_and_benchmark_gate():
+    plan = tiny_plan()
+    bundle = rfft.muon_adam_from_plan(
+        plan,
+        muon=rfft.MuonConfig(ns_steps=3, consistent_rms=0.2),
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    method_config = bundle.manifest()["method_config"]
+
+    assert method_config["method"] == "muon"
+    assert method_config["implemented_profile"] == "optax_contrib_muon"
+    assert method_config["reference_algorithm"] == "muon_newton_schulz_matrix_momentum"
+    assert method_config["matrix_optimizer"] == "optax.contrib.muon"
+    assert method_config["paper_profile"] is False
+    assert method_config["pretrained_finetuning_recommendation"] == "benchmark_required"
+    assert method_config["known_deviations"] == (
+        "uses_optax_library_profile_not_moonlight_distributed_reference",
+        "pretrained_finetuning_benchmark_gate_not_satisfied",
+    )
+    assert method_config["consistent_rms"] == 0.2

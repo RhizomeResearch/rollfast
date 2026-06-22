@@ -584,7 +584,13 @@ def schedule_free_prism(
     polyak_f_star: float = 0.0,
     polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
 ) -> base.GradientTransformationExtraArgs:
-    """Schedule-Free PRISM Optimizer with Partitioning, optionally using SF+."""
+    """Local WSD-backed Schedule-Free wrapper for PRISM/Adam partitioning.
+
+    Matrix leaves use PRISM and non-matrix leaves use AdamW according to
+    ``prism_weight_dimension_numbers``.  This is a Rollfast composition of the
+    generic Schedule-Free wrapper with PRISM, not a separately reference-
+    validated paper profile.
+    """
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
@@ -779,7 +785,13 @@ def schedule_free_kron(
     polyak_f_star: float = 0.0,
     polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
 ) -> base.GradientTransformationExtraArgs:
-    """Schedule-Free PSGD Kron optimizer, optionally using SF+."""
+    """Local WSD-backed Schedule-Free wrapper for PSGD Kron.
+
+    All routed leaves use the Kron transform; this wrapper does not add an
+    internal Adam fallback.  It is a Rollfast composition of generic
+    Schedule-Free with PSGD Kron, not a separately reference-validated paper
+    profile.
+    """
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_plus_bool(schedule_free_plus, sf_use_lr_max)
@@ -1013,7 +1025,13 @@ def schedule_free_aurora(
     polyak_f_star: float = 0.0,
     polyak_axis_name: Optional[Union[str, Tuple[str, ...]]] = None,
 ) -> base.GradientTransformationExtraArgs:
-    """Schedule-Free Aurora with Adam fallback for non-matrix leaves, optionally using SF+."""
+    """Local WSD-backed Schedule-Free wrapper for Aurora/Adam partitioning.
+
+    Matrix leaves use Aurora and non-matrix leaves use AdamW according to
+    ``aurora_weight_dimension_numbers``.  This is a Rollfast composition of the
+    generic Schedule-Free wrapper with Aurora, not a separately reference-
+    validated paper profile.
+    """
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 

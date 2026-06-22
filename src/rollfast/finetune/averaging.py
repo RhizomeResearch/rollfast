@@ -10,7 +10,7 @@ import optax
 
 from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
 
-from .config import EMAConfig, SWAConfig
+from .config import AveragingSourceView, EMAConfig, SWAConfig
 
 
 class AveragingState(NamedTuple):
@@ -40,11 +40,19 @@ def wrap_with_averaging(
     total_steps: int | None,
     labels: Any | None = None,
     groups: tuple[Any, ...] = (),
+    source_eval_fn: EvalFn | None = None,
 ) -> optax.GradientTransformationExtraArgs:
     """Wrap an optimizer and maintain EMA/SWA params after applied updates."""
 
     if not averaging_enabled(ema, swa):
         return optax.GradientTransformationExtraArgs(tx.init, tx.update)
+    if (
+        ema.source_view == "schedule_free_eval"
+        or swa.source_view == "schedule_free_eval"
+    ) and source_eval_fn is None:
+        raise ValueError(
+            "schedule_free_eval averaging requires a schedule-free source eval fn."
+        )
     ema_mask = _ema_mask_from_labels(labels, groups, ema)
 
     swa_start_step = swa.resolved_start_step(total_steps)
@@ -78,11 +86,23 @@ def wrap_with_averaging(
         next_params = optax.apply_updates(params, base_updates)
         applied = _update_applied(state.inner_state, inner_state)
         next_step = state.step + applied.astype(jnp.int32)
+        ema_source_params = _averaging_source_params(
+            ema.source_view,
+            next_params,
+            inner_state,
+            source_eval_fn,
+        )
+        swa_source_params = _averaging_source_params(
+            swa.source_view,
+            next_params,
+            inner_state,
+            source_eval_fn,
+        )
 
         ema_params, ema_count = _update_ema(
             state.ema_params,
             state.ema_count,
-            next_params,
+            ema_source_params,
             ema,
             next_step,
             applied,
@@ -91,7 +111,7 @@ def wrap_with_averaging(
         swa_params, swa_count = _update_swa(
             state.swa_params,
             state.swa_count,
-            next_params,
+            swa_source_params,
             swa,
             next_step,
             applied,
@@ -108,6 +128,23 @@ def wrap_with_averaging(
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def _averaging_source_params(
+    source_view: AveragingSourceView | None,
+    params: Any,
+    inner_state: optax.OptState,
+    source_eval_fn: EvalFn | None,
+) -> Any:
+    if source_view in {None, "optimizer"}:
+        return params
+    if source_view == "schedule_free_eval":
+        if source_eval_fn is None:
+            raise ValueError(
+                "schedule_free_eval averaging requires a schedule-free source eval fn."
+            )
+        return source_eval_fn(params, inner_state, "schedule_free")
+    raise ValueError(f"unknown averaging source_view: {source_view!r}.")
 
 
 def make_averaging_eval_fn(

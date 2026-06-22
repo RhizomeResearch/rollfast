@@ -62,8 +62,12 @@ def test_config_validation_rejects_invalid_values():
         rfft.GroupRule(label="head", lr_multiplier=0.0)
     with pytest.raises(ValueError, match="EMA decay"):
         rfft.EMAConfig(decay=1.0)
+    with pytest.raises(ValueError, match="EMA source_view"):
+        rfft.EMAConfig(source_view="swa")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="SWA frequency"):
         rfft.SWAConfig(frequency=0)
+    with pytest.raises(ValueError, match="SWA source_view"):
+        rfft.SWAConfig(source_view="ema")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="SAM rho"):
         rfft.SAMConfig(rho=0.0)
     with pytest.raises(ValueError, match="block_layout"):

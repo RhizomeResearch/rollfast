@@ -103,14 +103,25 @@ def test_apollo_manifest_records_projection_contract():
     assert method_config["effective_scale"] == 4.0
     assert method_config["scale_front"] is True
     assert method_config["disable_norm_growth_limiter"] is True
+    assert method_config["eps"] == 1e-6
     assert method_config["projection_type"] == "std"
     assert method_config["projection_orientation"] == "std_right_when_rows_gte_cols"
     assert method_config["projection_matrix_variance"] == "normal/sqrt(rank)"
+    assert (
+        method_config["adam_update_profile"]
+        == "author_step_size_uncorrected_second_moment"
+    )
+    assert method_config["scaling_denominator_eps"] == 1e-8
     assert method_config["normalization_axes"] == "projected_l2_per_channel_or_tensor"
     assert method_config["profile_fidelity"] == "experimental"
     assert method_config["reference_validated"] is False
     assert method_config["reference_validation"] == "pending_author_implementation_compatibility_test"
     assert any("reference implementation" in warning for warning in bundle.report.warnings)
+
+
+def test_apollo_default_eps_matches_author_profile():
+    assert rfft.APOLLOConfig().eps == 1e-6
+    assert rfft.APOLLOConfig.from_dict({}).eps == 1e-6
 
 
 def test_apollo_mini_uses_rank_one_tensor_scaling():
@@ -215,3 +226,54 @@ def test_apollo_direct_scale_controls_first_update_norm():
 
     ratio = jnp.linalg.norm(scaled_updates["w"]) / jnp.linalg.norm(unit_updates["w"])
     assert jnp.allclose(ratio, 3.0, rtol=1e-5)
+
+
+def test_apollo_first_update_matches_author_step_equation():
+    params = {
+        "w": jnp.array(
+            [[1.0, -2.0], [0.5, 3.0], [-1.5, 2.5]],
+            dtype=jnp.float32,
+        )
+    }
+    grads = {
+        "w": jnp.array(
+            [[0.25, -0.5], [1.5, -0.75], [-1.0, 0.125]],
+            dtype=jnp.float32,
+        )
+    }
+    learning_rate = 0.25
+    weight_decay = 0.2
+    b1 = 0.9
+    b2 = 0.999
+    eps = 1e-6
+    scale = 4.0
+    tx = apollo_adamw(
+        learning_rate=learning_rate,
+        rank=2,
+        projection_seed=17,
+        scale=scale,
+        disable_norm_growth_limiter=True,
+        b1=b1,
+        b2=b2,
+        eps=eps,
+        weight_decay=weight_decay,
+    )
+
+    state = tx.init(params)
+    updates, _ = tx.update(grads, state, params)
+    leaf = _apollo_leaf_states(state)[0]
+    projected_grad = (grads["w"] @ leaf.projection.T).T
+    exp_avg = (1.0 - b1) * projected_grad
+    exp_avg_sq = (1.0 - b2) * jnp.square(projected_grad)
+    projected_update = exp_avg / (jnp.sqrt(exp_avg_sq) + eps)
+    factors = jnp.linalg.norm(projected_update, axis=0) / (
+        jnp.linalg.norm(projected_grad, axis=0) + 1e-8
+    )
+    scaled_grad = grads["w"] * factors[:, None] * jnp.sqrt(scale)
+    step_size = learning_rate * jnp.sqrt(1.0 - b2) / (1.0 - b1)
+    expected = (
+        -step_size * scaled_grad
+        - learning_rate * weight_decay * params["w"]
+    )
+
+    assert jnp.allclose(updates["w"], expected, rtol=1e-5, atol=1e-6)

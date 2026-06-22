@@ -31,6 +31,8 @@ def build_schedule(
             total_steps=config.total_steps,
             warmup_fraction=config.warmup_fraction,
             decay_fraction=config.decay_fraction,
+            warmup_steps=config.warmup_steps,
+            decay_steps=config.decay_steps,
         )
     if config.kind == "linear":
         return _linear_schedule(config, peak_lr)

@@ -136,12 +136,71 @@ def test_schedule_free_keeps_named_eval_views_with_ema():
 
     assert bundle.default_eval_view == "ema"
     assert {"optimizer", "schedule_free", "ema"} <= set(bundle.eval_views)
+    assert bundle.manifest()["ema"]["source_view"] == "schedule_free_eval"
     assert bundle.eval_params(params, state, view="schedule_free")["head"][
         "w"
     ].shape == params["head"]["w"].shape
     assert bundle.eval_params(params, state, view="ema")["head"]["w"].shape == params[
         "head"
     ]["w"].shape
+
+
+def test_schedule_free_ema_defaults_to_schedule_free_eval_source():
+    plan = tiny_plan()
+    bundle = rfft.schedule_free_adam_from_plan(
+        plan,
+        total_steps=10,
+        schedule="wsd",
+        clip_global_norm=None,
+        ema=rfft.EMAConfig(enabled=True, decay=0.0),
+    )
+    state = bundle.init(plan.trainable)
+    updates, state = bundle.update(
+        _ones_like_trainable(plan.trainable),
+        state,
+        plan.trainable,
+    )
+    params = optax.apply_updates(plan.trainable, updates)
+    schedule_free_params = bundle.eval_params(params, state, view="schedule_free")
+    ema_params = bundle.eval_params(params, state, view="ema")
+
+    assert jnp.allclose(ema_params["head"]["w"], schedule_free_params["head"]["w"])
+    assert float(jnp.max(jnp.abs(ema_params["head"]["w"] - params["head"]["w"]))) > 0.0
+
+
+def test_schedule_free_ema_can_use_optimizer_source_explicitly():
+    plan = tiny_plan()
+    bundle = rfft.schedule_free_adam_from_plan(
+        plan,
+        total_steps=10,
+        schedule="wsd",
+        clip_global_norm=None,
+        ema=rfft.EMAConfig(enabled=True, decay=0.0, source_view="optimizer"),
+    )
+    state = bundle.init(plan.trainable)
+    updates, state = bundle.update(
+        _ones_like_trainable(plan.trainable),
+        state,
+        plan.trainable,
+    )
+    params = optax.apply_updates(plan.trainable, updates)
+    ema_params = bundle.eval_params(params, state, view="ema")
+
+    assert bundle.manifest()["ema"]["source_view"] == "optimizer"
+    assert jnp.allclose(ema_params["head"]["w"], params["head"]["w"])
+
+
+def test_adamw_rejects_schedule_free_averaging_source():
+    plan = tiny_plan()
+
+    with pytest.raises(ValueError, match="schedule_free_eval averaging requires"):
+        rfft.adamw_from_plan(
+            plan,
+            total_steps=10,
+            schedule="constant",
+            clip_global_norm=None,
+            ema=rfft.EMAConfig(enabled=True, source_view="schedule_free_eval"),
+        )
 
 
 def test_ema_tag_filters_average_included_groups_only():

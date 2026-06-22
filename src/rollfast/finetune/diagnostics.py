@@ -362,7 +362,7 @@ def _estimate_adamw8_group_moment_leaves(
                     scale_dtype=quantization.scale_dtype,
                 )
                 dtype = (
-                    f"{jnp.dtype(jnp.int8).name}"
+                    f"{jnp.dtype(jnp.uint8).name}"
                     f"+scale:{jnp.dtype(quantization.scale_dtype).name}"
                 )
                 storage = "blockwise_int8"

@@ -24,6 +24,23 @@ def test_constant_schedule_does_not_require_total_steps():
     assert float(schedule(10_000)) == pytest.approx(0.2)
 
 
+def test_wsd_schedule_config_explicit_steps_override_fractions():
+    config = rfft.ScheduleConfig(
+        kind="wsd",
+        total_steps=10,
+        warmup_steps=2,
+        warmup_fraction=0.8,
+        decay_steps=3,
+        decay_fraction=0.0,
+    )
+    schedule = rfft.build_schedule(config, peak_lr=1.0)
+
+    assert float(schedule(0)) == pytest.approx(0.5)
+    assert float(schedule(1)) == pytest.approx(1.0)
+    assert float(schedule(7)) == pytest.approx(2.0 / 3.0)
+    assert float(schedule(9)) == pytest.approx(0.0)
+
+
 def test_preview_uses_schedule_factory():
     preview = rfft.preview_schedule(
         rfft.ScheduleConfig(kind="linear", total_steps=5, warmup_steps=0),

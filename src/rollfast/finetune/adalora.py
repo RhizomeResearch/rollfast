@@ -45,8 +45,8 @@ class AdaLoRAController:
 
     ``group_names`` are static Python metadata. The mutable state is a PyTree of
     fixed-shape JAX arrays so it can be carried through JIT-compiled training
-    loops. The controller emits masks; Equimo or user code owns applying them to
-    rank-masked adapter modules.
+    loops. The controller emits support masks; Equimo or user code owns applying
+    them to SVD-triplet AdaLoRA modules.
     """
 
     group_names: tuple[str, ...]

@@ -13,6 +13,8 @@ from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
 
 SCHEMA_VERSION = 1
+ADAM8_FIRST_MOMENT_CODEBOOK_ID = "bitsandbytes.dynamic.signed.8bit.v1"
+ADAM8_SECOND_MOMENT_CODEBOOK_ID = "bitsandbytes.dynamic.unsigned.8bit.v1"
 
 ScheduleKind = Literal[
     "constant",
@@ -26,6 +28,7 @@ StepCounter = Literal["optimizer", "micro"]
 NonFinitePolicy = Literal["skip", "none", "raise"]
 Normalization = Literal["examples", "tokens", "pairs", "pixels", "custom", "none"]
 SAMNorm = Literal["global_l2"]
+AveragingSourceView = Literal["optimizer", "schedule_free_eval"]
 OptimizerName = Literal[
     "adamw",
     "adamw8",
@@ -36,7 +39,6 @@ OptimizerName = Literal[
     "prism_adam",
     "kron_adam",
     "muon_adam",
-    "soap_adam",
 ]
 ProfileFidelity = Literal[
     "safe_default",
@@ -369,7 +371,7 @@ class StateQuantizationConfig:
     min_size: int = 4096
     scale_dtype: Any = jnp.float32
     fallback_dtype: Any = jnp.float32
-    stochastic_rounding: bool = True
+    stochastic_rounding: bool = False
     keep_fp32_tags: tuple[str, ...] = (
         "bias",
         "norm",
@@ -403,6 +405,10 @@ class StateQuantizationConfig:
             "scale_dtype": _dtype_name(self.scale_dtype),
             "fallback_dtype": _dtype_name(self.fallback_dtype),
             "stochastic_rounding": self.stochastic_rounding,
+            "first_moment_quantizer": "dynamic_signed",
+            "second_moment_quantizer": "dynamic_unsigned",
+            "first_moment_codebook_id": ADAM8_FIRST_MOMENT_CODEBOOK_ID,
+            "second_moment_codebook_id": ADAM8_SECOND_MOMENT_CODEBOOK_ID,
             "keep_fp32_tags": self.keep_fp32_tags,
         }
 
@@ -416,7 +422,7 @@ class StateQuantizationConfig:
             min_size=data.get("min_size", 4096),
             scale_dtype=_dtype_from_name(data.get("scale_dtype", "float32")),
             fallback_dtype=_dtype_from_name(data.get("fallback_dtype", "float32")),
-            stochastic_rounding=data.get("stochastic_rounding", True),
+            stochastic_rounding=data.get("stochastic_rounding", False),
             keep_fp32_tags=tuple(
                 data.get(
                     "keep_fp32_tags",
@@ -464,6 +470,7 @@ class EMAConfig:
     decay: float = 0.9999
     update_every: int = 1
     start_step: int = 0
+    source_view: AveragingSourceView | None = None
     debias: bool = False
     state_dtype: Any = jnp.float32
     include_tags: tuple[str, ...] = ()
@@ -476,6 +483,10 @@ class EMAConfig:
             raise ValueError("EMA update_every must be positive.")
         if self.start_step < 0:
             raise ValueError("EMA start_step must be non-negative.")
+        if self.source_view not in {None, "optimizer", "schedule_free_eval"}:
+            raise ValueError(
+                "EMA source_view must be 'optimizer' or 'schedule_free_eval'."
+            )
         _canonical_dtype(self.state_dtype)
 
     def to_dict(self) -> dict[str, Any]:
@@ -485,6 +496,7 @@ class EMAConfig:
             "decay": self.decay,
             "update_every": self.update_every,
             "start_step": self.start_step,
+            "source_view": self.source_view,
             "debias": self.debias,
             "state_dtype": _dtype_name(self.state_dtype),
             "include_tags": self.include_tags,
@@ -499,6 +511,7 @@ class SWAConfig:
     start_fraction: float = 0.75
     frequency: int = 1
     averaging: Literal["uniform"] = "uniform"
+    source_view: AveragingSourceView | None = None
     state_dtype: Any = jnp.float32
 
     def __post_init__(self) -> None:
@@ -509,6 +522,10 @@ class SWAConfig:
             raise ValueError("SWA frequency must be positive.")
         if self.averaging != "uniform":
             raise ValueError("SWA averaging currently supports only 'uniform'.")
+        if self.source_view not in {None, "optimizer", "schedule_free_eval"}:
+            raise ValueError(
+                "SWA source_view must be 'optimizer' or 'schedule_free_eval'."
+            )
         _canonical_dtype(self.state_dtype)
 
     def resolved_start_step(self, total_steps: int | None) -> int:
@@ -526,6 +543,7 @@ class SWAConfig:
             "start_fraction": self.start_fraction,
             "frequency": self.frequency,
             "averaging": self.averaging,
+            "source_view": self.source_view,
             "state_dtype": _dtype_name(self.state_dtype),
         }
 
@@ -980,7 +998,7 @@ class APOLLOConfig:
     scale: float | None = None
     scale_front: bool = False
     disable_norm_growth_limiter: bool = False
-    eps: float = 1e-8
+    eps: float = 1e-6
     weight_decay: float = 0.0
     fallback_optimizer: OptimizerName = "adamw"
     norm_growth_limiter: float = 1.01
@@ -1034,7 +1052,7 @@ class APOLLOConfig:
             scale=data.get("scale"),
             scale_front=data.get("scale_front", False),
             disable_norm_growth_limiter=data.get("disable_norm_growth_limiter", False),
-            eps=data.get("eps", 1e-8),
+            eps=data.get("eps", 1e-6),
             weight_decay=data.get("weight_decay", 0.0),
             fallback_optimizer=data.get("fallback_optimizer", "adamw"),
             norm_growth_limiter=data.get("norm_growth_limiter", 1.01),
@@ -1089,44 +1107,6 @@ class MuonConfig:
             nesterov=data.get("nesterov", True),
             adaptive=data.get("adaptive", False),
             consistent_rms=data.get("consistent_rms"),
-            fallback_optimizer=data.get("fallback_optimizer", "adamw"),
-        )
-
-
-@dataclass(frozen=True)
-class SOAPConfig:
-    """Experimental SOAP-style matrix preconditioner configuration."""
-
-    preconditioner_update_interval: int = 10
-    inv_steps: int = 6
-    eps_gram: float = 1e-6
-    fallback_optimizer: OptimizerName = "adamw"
-
-    def __post_init__(self) -> None:
-        if self.preconditioner_update_interval < 1:
-            raise ValueError("SOAP preconditioner_update_interval must be >= 1.")
-        if self.inv_steps < 1:
-            raise ValueError("SOAP inv_steps must be >= 1.")
-        if self.eps_gram <= 0.0:
-            raise ValueError("SOAP eps_gram must be positive.")
-        if self.fallback_optimizer != "adamw":
-            raise NotImplementedError("SOAP currently supports fallback_optimizer='adamw'.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "preconditioner_update_interval": self.preconditioner_update_interval,
-            "inv_steps": self.inv_steps,
-            "eps_gram": self.eps_gram,
-            "fallback_optimizer": self.fallback_optimizer,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SOAPConfig":
-        return cls(
-            preconditioner_update_interval=data.get("preconditioner_update_interval", 10),
-            inv_steps=data.get("inv_steps", 6),
-            eps_gram=data.get("eps_gram", 1e-6),
             fallback_optimizer=data.get("fallback_optimizer", "adamw"),
         )
 
@@ -1348,6 +1328,7 @@ __all__ = (
     "AlgorithmSemantics",
     "APOLLOConfig",
     "ASAMConfig",
+    "AveragingSourceView",
     "AuxLossRule",
     "CompiledGroup",
     "CompiledPolicyTrees",
@@ -1373,7 +1354,6 @@ __all__ = (
     "ScheduleConfig",
     "SchedulePoint",
     "ShardingPolicy",
-    "SOAPConfig",
     "StepCounters",
     "StateOffloadPolicy",
     "StateQuantizationConfig",

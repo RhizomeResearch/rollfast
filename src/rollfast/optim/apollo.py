@@ -11,11 +11,11 @@ import jax.numpy as jnp
 from optax._src import base, numerics, utils
 from optax.transforms import _masking
 
-from rollfast.utils import _safe_bias_correction
-
 
 Scaling = Literal["channel", "tensor"]
 Orientation = Literal["left", "right", "full"]
+REFERENCE_EPS = 1e-6
+SCALING_FACTOR_EPS = 1e-8
 
 
 @jax.tree_util.register_pytree_node_class
@@ -83,7 +83,7 @@ def apollo_adamw(
     norm_growth_limiter: float = 1.01,
     b1: jax.typing.ArrayLike = 0.9,
     b2: jax.typing.ArrayLike = 0.999,
-    eps: jax.typing.ArrayLike = 1e-8,
+    eps: jax.typing.ArrayLike = REFERENCE_EPS,
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike = jnp.float32,
     weight_decay: base.ScalarOrSchedule = 0.0,
@@ -296,14 +296,15 @@ def _update_leaf(
     projected_grad = _project(grad, projection, state.orientation)
     mu = (b1 * state.mu + (1.0 - b1) * projected_grad).astype(mu_dtype)
     nu = (b2 * state.nu + (1.0 - b2) * jnp.square(projected_grad)).astype(mu_dtype)
-    mu_hat = _safe_bias_correction(mu.astype(jnp.float32), 1.0 - b1**count_inc)
-    nu_hat = _safe_bias_correction(nu.astype(jnp.float32), 1.0 - b2**count_inc)
-    projected_update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
+    step_size = _reference_step_size(learning_rate, count_inc, b1, b2)
+    projected_update = mu.astype(jnp.float32) / (
+        jnp.sqrt(nu.astype(jnp.float32) + eps_root) + eps
+    )
     factors = _scaling_factors(
         projected_grad,
         projected_update,
         scaling=scaling,
-        eps=eps,
+        eps=SCALING_FACTOR_EPS,
     )
     update = _apply_scaling(grad.astype(jnp.float32), factors, state.orientation)
     update, update_norm = _apply_reference_scale_and_limiter(
@@ -314,9 +315,10 @@ def _update_leaf(
         disable_norm_growth_limiter=disable_norm_growth_limiter,
         norm_growth_limiter=norm_growth_limiter,
     )
+    update = -step_size * update
     if param is not None and weight_decay != 0.0:
-        update = update + weight_decay * param.astype(jnp.float32)
-    update = (-learning_rate * update).astype(grad.dtype)
+        update = update - learning_rate * weight_decay * param.astype(jnp.float32)
+    update = update.astype(grad.dtype)
     return _LeafUpdateResult(
         update,
         APOLLOLeafState(
@@ -352,9 +354,10 @@ def _full_adam_leaf(
 ) -> _LeafUpdateResult:
     mu = (b1 * state.mu + (1.0 - b1) * grad).astype(mu_dtype)
     nu = (b2 * state.nu + (1.0 - b2) * jnp.square(grad)).astype(mu_dtype)
-    mu_hat = _safe_bias_correction(mu.astype(jnp.float32), 1.0 - b1**count_inc)
-    nu_hat = _safe_bias_correction(nu.astype(jnp.float32), 1.0 - b2**count_inc)
-    update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
+    step_size = _reference_step_size(learning_rate, count_inc, b1, b2)
+    update = mu.astype(jnp.float32) / (
+        jnp.sqrt(nu.astype(jnp.float32) + eps_root) + eps
+    )
     update, update_norm = _apply_reference_scale_and_limiter(
         update,
         previous_norm=state.prev_update_norm,
@@ -363,9 +366,10 @@ def _full_adam_leaf(
         disable_norm_growth_limiter=disable_norm_growth_limiter,
         norm_growth_limiter=norm_growth_limiter,
     )
+    update = -step_size * update
     if param is not None and weight_decay != 0.0:
-        update = update + weight_decay * param.astype(jnp.float32)
-    update = (-learning_rate * update).astype(grad.dtype)
+        update = update - learning_rate * weight_decay * param.astype(jnp.float32)
+    update = update.astype(grad.dtype)
     return _LeafUpdateResult(
         update,
         APOLLOLeafState(
@@ -379,6 +383,12 @@ def _full_adam_leaf(
             state.leaf_index,
         ),
     )
+
+
+def _reference_step_size(learning_rate, count_inc, b1, b2):
+    bias_correction1 = 1.0 - b1**count_inc
+    bias_correction2 = 1.0 - b2**count_inc
+    return learning_rate * jnp.sqrt(bias_correction2) / bias_correction1
 
 
 def _refresh_projection(

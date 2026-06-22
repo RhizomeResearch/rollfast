@@ -57,6 +57,44 @@ def test_galore_from_plan_updates_and_reports_projected_state():
     assert all(min(leaf.mu.shape) == 1 for leaf in projected_states)
 
 
+def test_galore_auto_projection_manifest_marks_rollfast_profile():
+    plan = tiny_plan()
+    bundle = rfft.galore_adamw_from_plan(
+        plan,
+        galore=rfft.GaLoreConfig(rank=1, min_matrix_size=1, projection="auto"),
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    method_config = bundle.manifest()["method_config"]
+
+    assert method_config["projection_profile"] == "rollfast_memory_min_auto"
+    assert method_config["reference_projection"] == "galore_std"
+    assert method_config["profile_fidelity"] == "safe_default"
+    assert method_config["reference_validated"] is False
+    assert method_config["known_deviations"] == (
+        "projection_auto_uses_memory_min_orientation_not_galore_std",
+    )
+    assert any("projection='auto'" in warning for warning in bundle.report.warnings)
+
+
+def test_galore_explicit_projection_manifest_can_be_reference_validated():
+    plan = tiny_plan()
+    bundle = rfft.galore_adamw_from_plan(
+        plan,
+        galore=rfft.GaLoreConfig(rank=1, min_matrix_size=1, projection="right"),
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    method_config = bundle.manifest()["method_config"]
+
+    assert method_config["projection_profile"] == "galore_explicit_right"
+    assert method_config["known_deviations"] == ()
+    assert method_config["profile_fidelity"] == "reference_implementation"
+    assert method_config["reference_validated"] is True
+
+
 def test_galore_min_matrix_size_falls_back_to_full_moments():
     plan = tiny_plan()
     bundle = rfft.galore_adamw_from_plan(
@@ -130,6 +168,9 @@ def test_galore_transport_refresh_is_experimental_and_preserves_shapes():
     assert manifest["method_config"]["state_on_basis_refresh"] == "transport"
     assert manifest["method_config"]["state_transport_profile"] == "experimental_basis_overlap"
     assert manifest["method_config"]["reference_validated"] is False
+    assert "basis_transport_experimental_not_reference_validated" in manifest[
+        "method_config"
+    ]["known_deviations"]
     assert any("experimental" in warning for warning in bundle.report.warnings)
 
 

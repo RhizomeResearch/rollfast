@@ -91,6 +91,34 @@ def test_lora_plus_ratio_is_visible_in_report():
     assert groups["lora_B_decay"].effective_lr == pytest.approx(3.2e-3)
 
 
+def test_lora_plus_ratio_controls_update_magnitude():
+    plan = tiny_lora_plan()
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=20,
+        base_lr=2e-4,
+        weight_decay=0.0,
+        schedule="constant",
+        clip_global_norm=None,
+        lora_b_lr_ratio=16.0,
+        b1=0.0,
+        b2=0.0,
+        eps=0.0,
+    )
+    state = bundle.init(plan.trainable)
+    grads = jax.tree.map(
+        lambda x: jnp.ones_like(x) if x is not None else None,
+        plan.trainable,
+        is_leaf=lambda x: x is None,
+    )
+
+    updates, _ = bundle.update(grads, state, plan.trainable)
+
+    a_update = jnp.mean(jnp.abs(updates["lora_A"]))
+    b_update = jnp.mean(jnp.abs(updates["lora_B"]))
+    assert b_update / a_update == pytest.approx(16.0)
+
+
 def test_moment_dtype_controls_adam_state_precision():
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(
