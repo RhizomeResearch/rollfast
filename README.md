@@ -159,6 +159,239 @@ ______________________________________________________________________
 pip install rollfast
 ```
 
+## Fine-Tuning Plans
+
+`rollfast.finetune` compiles model-library fine-tuning plans into grouped Optax
+optimizers. It is designed for Equimo's `equimo.finetune.FineTunePlan`, but the
+core only requires a structural plan with `trainable`, `labels`, and
+`group_specs` fields.
+
+```python
+import rollfast.finetune as rfft
+
+optim = rfft.adamw_from_plan(
+    plan,
+    total_steps=20_000,
+    base_lr=5e-4,
+    schedule="warmup_cosine",
+    weight_decay=0.05,
+    clip_global_norm=1.0,
+)
+
+print(optim.report)
+opt_state = optim.init(plan.trainable)
+```
+
+The compiler validates exact PyTree alignment between trainable leaves and
+labels, rejects labels for frozen leaves, applies layer-wise multipliers exactly
+once, and keeps no-decay groups out of weight decay. Frozen Equimo leaves remain
+`None` in `plan.trainable`, so Adam moments are not allocated for them.
+
+PEFT policies are optimizer-side rules. For example, LoRA+ can give `lora_B`
+groups a higher learning rate without changing Equimo's LoRA modules:
+
+```python
+optim = rfft.adamw_from_plan(
+    lora_plan,
+    total_steps=10_000,
+    base_lr=2e-4,
+    weight_decay=0.0,
+    lora_b_lr_ratio=16.0,
+)
+```
+
+Large effective batches and mixed precision are configured in the optimizer
+bundle, not in the model plan:
+
+```python
+import jax.numpy as jnp
+
+optim = rfft.adamw_from_plan(
+    plan,
+    total_steps=20_000,
+    accumulation_steps=8,
+    moment_dtype=jnp.float32,   # use jnp.bfloat16 for lower-memory moments
+    axis_name="data",           # distributed global-norm clipping under pmap
+)
+```
+
+Schedule-Free Adam is also plan-aware. Use `eval_params` for validation or
+checkpointing of the averaged sequence:
+
+```python
+import optax
+
+optim = rfft.schedule_free_adam_from_plan(
+    plan,
+    total_steps=20_000,
+    base_lr=5e-4,
+    weight_decay=0.0,
+    accumulation_steps=4,
+)
+
+updates, opt_state = optim.update(grads, opt_state, plan.trainable)
+trainable = optax.apply_updates(plan.trainable, updates)
+eval_trainable = optim.eval_params(trainable, opt_state)
+```
+
+EMA/SWA averaging is explicit and exposes named evaluation views:
+
+```python
+optim = rfft.adamw_from_plan(
+    plan,
+    total_steps=20_000,
+    ema=rfft.EMAConfig(enabled=True, decay=0.9999),
+    swa=rfft.SWAConfig(enabled=True, start_fraction=0.75),
+)
+
+eval_ema = optim.eval_params(trainable, opt_state, view="ema")
+eval_swa = optim.eval_params(trainable, opt_state, view="swa")
+```
+
+SAM and ASAM are exposed as dedicated two-pass steps, not as ordinary one-pass
+Optax transforms. The base optimizer still owns LLRD, weight decay, clipping,
+precision, and schedules:
+
+```python
+base = rfft.adamw_from_plan(
+    plan,
+    total_steps=20_000,
+    accumulation_steps=1,
+)
+
+step = rfft.make_sam_step(
+    plan=plan,
+    base_optimizer=base,
+    config=rfft.SAMConfig(rho=0.05),
+    loss_fn=loss_fn,
+    microbatch_axis=0,
+)
+
+trainable, opt_state, info = step(trainable, opt_state, batch)
+```
+
+For ASAM, use `SAMConfig(rho=0.5, adaptive=True, eta=0.01)` as a starting
+preset and sweep it for the task. Set `microbatch_axis` when `batch` carries a
+leading microbatch dimension; Rollfast accumulates both SAM gradient passes
+before applying one base optimizer update.
+
+AdaLoRA rank scheduling is optimizer-side metadata. Rollfast provides a
+fixed-shape controller that tracks importance EMAs and emits static rank masks;
+Equimo applies those masks to rank-masked adapter modules:
+
+```python
+rank_groups = eqft.lora_rank_groups(lora_model)
+controller = rfft.make_adalora_controller(
+    rank_groups,
+    total_steps=20_000,
+    config=rfft.AdaLoRAControllerConfig(init_rank=12, target_rank=8),
+)
+state = controller.init()
+state = controller.update(state, importance_scores, applied=True)
+rank_pattern = controller.rank_pattern(state)
+lora_model = eqft.apply_lora_rank_pattern(lora_model, rank_pattern)
+```
+
+Staged fine-tuning can preserve compatible optimizer state while changing the
+plan. The conservative default initializes new leaves, preserves shared moment
+state by path and shape, and restarts stage-local schedule counters:
+
+```python
+stage2_bundle, stage2_state, migration = rfft.reconfigure_optimizer(
+    old_plan=linear_probe_plan,
+    old_bundle=stage1_bundle,
+    old_state=stage1_state,
+    new_plan=full_ft_plan,
+    new_bundle=stage2_bundle,
+    state_policy="preserve_shared",
+    counter_policy="restart_schedule",
+)
+```
+
+The migration report lists preserved, initialized, dropped, incompatible, and
+group-changed leaves plus state-byte changes. With
+`state_policy="preserve_by_path_and_shape"`, compatible Kron/PSGD
+preconditioner and Lipschitz leaves are preserved by parameter path and factor
+shape; incompatible factors are initialized from the new optimizer.
+
+Static state-memory diagnostics are available before optimizer initialization.
+They estimate optimizer-family moment state plus Kron/PSGD preconditioner factors
+and Lipschitz auxiliaries without materializing the Optax state:
+
+```python
+estimate = rfft.estimate_optimizer_state_memory(
+    plan,
+    optim,
+    preconditioner_dtype=jnp.bfloat16,
+)
+print(estimate.preconditioner_bytes)
+print(estimate.warnings)
+```
+
+Measured state-memory diagnostics are available after optimizer initialization:
+
+```python
+summary = rfft.optimizer_state_memory_summary(optim, opt_state)
+print(summary.total_bytes)
+print(summary.by_category)
+print([factor.to_dict() for factor in summary.preconditioner_factors])
+```
+
+For Kron/PSGD, preconditioner factors report actual initialized shapes, dtypes,
+bytes, and storage class such as `matrix_factor` or `diagonal_factor`. This is
+measured from the real optimizer state, so it reflects memory-saving diagonal
+modes and low-precision preconditioner dtypes after initialization.
+
+Optimizer state manifests include the plan fingerprint, resolved group table,
+schedule metadata, precision policy, accumulation policy, and eval views:
+
+```python
+checkpoint = rfft.make_state_checkpoint(
+    optim,
+    opt_state,
+    metadata={"step": 10_000},
+)
+opt_state = rfft.restore_state_checkpoint(optim, checkpoint)
+```
+
+Blockwise 8-bit AdamW state is opt-in. It quantizes eligible first and second
+moment leaves only; model parameters and gradients are not quantized, and small
+or sensitive groups such as bias, norm, embedding, prompt, IA3, and scale-shift
+groups stay in fp32 state by default:
+
+```python
+optim = rfft.adamw8_from_plan(
+    plan,
+    total_steps=20_000,
+    base_lr=5e-4,
+    state_quantization=rfft.StateQuantizationConfig(
+        enabled=True,
+        block_size=2048,
+        min_size=4096,
+    ),
+)
+```
+
+Structured hybrid optimizers are plan-aware too. They preserve the same labels,
+per-group LR multipliers, decay policy, clipping, accumulation, and EMA/SWA
+views:
+
+```python
+optim = rfft.hybrid_aurora_adam_from_plan(
+    plan,
+    total_steps=20_000,
+    base_lr=5e-4,
+    schedule="warmup_cosine",
+    weight_decay=0.05,
+)
+```
+
+Use `hybrid_prism_adam_from_plan` for PRISM/Adam groups or
+`hybrid_kron_adam_from_plan` for PSGD/Kron groups. Aurora and PRISM keep their
+primitive matrix/Adam partitioning inside each fine-tuning group. Lightweight
+JSON smoke harnesses live under `benchmarks/finetuning/`; rerun them on target
+hardware and real Equimo models before making task-quality performance claims.
+
 ## Usage
 
 ### 1. PRISM (Standard)

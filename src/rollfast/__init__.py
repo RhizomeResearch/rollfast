@@ -1,4 +1,5 @@
 from .optim.adam import adamw as adamw
+from .optim.adam8 import adamw8 as adamw8
 from .optim.aurora import (
     aurora as aurora,
     get_equinox_aurora_spec as get_equinox_aurora_spec,
@@ -26,6 +27,8 @@ from .optim.psgd import kron as kron
 from .optim.rmnp import rmnp as rmnp
 from .optim.rmnp import scale_by_rmnp as scale_by_rmnp
 from .optim.rmnp import scale_by_rmnp_shape as scale_by_rmnp_shape
+from .optim.sam import global_l2_norm as global_l2_norm
+from .optim.sam import sam_perturbation as sam_perturbation
 from .schedules.schedulefree import (
     schedule_free_adam as schedule_free_adam,
     schedule_free_aurora as schedule_free_aurora,

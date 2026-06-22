@@ -1139,7 +1139,12 @@ def scale_by_kron(
                     else g
                     for k, g in zip(Vs_keys, precond_updates_in)
                 ]
-                eps = jnp.finfo(precond_updates_in[0].dtype).eps
+                first_update = next(
+                    (g for g in precond_updates_in if not _is_psgd_leaf(g)), None
+                )
+                if first_update is None:
+                    return Qs, Ls
+                eps = jnp.finfo(first_update.dtype).eps
                 precond_updates_in = [
                     (g + (damping + eps * jnp.abs(g)) * v)
                     if not _is_psgd_leaf(g)
