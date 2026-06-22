@@ -67,6 +67,83 @@ class OptimizerMigrationReport:
             "schedule_counter_behavior": self.schedule_counter_behavior,
         }
 
+    def to_state_transfer_report(self) -> "StateTransferReport":
+        """Return the 2026 state-transfer report view for this migration."""
+
+        reset_ids = (
+            self.preserved_param_leaves
+            if self.state_policy == "reset_all"
+            else ()
+        )
+        preserved_ids = (
+            ()
+            if self.state_policy == "reset_all"
+            else self.preserved_param_leaves
+        )
+        converted_ids = (
+            ()
+            if self.state_policy == "reset_all"
+            else self.changed_group_leaves
+        )
+        warnings = _transfer_warnings(self, reset_ids, converted_ids)
+        exact = (
+            self.old_fingerprint == self.new_fingerprint
+            and not self.initialized_param_leaves
+            and not self.dropped_param_leaves
+            and not self.changed_group_leaves
+            and not self.incompatible_state_leaves
+            and not reset_ids
+            and self.old_state_bytes == self.new_state_bytes
+        )
+        return StateTransferReport(
+            schema_version=self.schema_version,
+            exact=exact,
+            preserved_ids=preserved_ids,
+            converted_ids=converted_ids,
+            reset_ids=reset_ids,
+            dropped_ids=self.dropped_param_leaves,
+            new_ids=self.initialized_param_leaves,
+            counter_policy={
+                "optimizer": self.counter_policy,
+                "schedule": self.schedule_counter_behavior,
+            },
+            source_state_bytes=self.old_state_bytes,
+            target_state_bytes=self.new_state_bytes,
+            warnings=warnings,
+        )
+
+
+@dataclass(frozen=True)
+class StateTransferReport:
+    """2026 staged optimizer-state transfer report."""
+
+    schema_version: int
+    exact: bool
+    preserved_ids: tuple[str, ...]
+    converted_ids: tuple[str, ...]
+    reset_ids: tuple[str, ...]
+    dropped_ids: tuple[str, ...]
+    new_ids: tuple[str, ...]
+    counter_policy: Mapping[str, str]
+    source_state_bytes: int
+    target_state_bytes: int
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "exact": self.exact,
+            "preserved_ids": self.preserved_ids,
+            "converted_ids": self.converted_ids,
+            "reset_ids": self.reset_ids,
+            "dropped_ids": self.dropped_ids,
+            "new_ids": self.new_ids,
+            "counter_policy": dict(self.counter_policy),
+            "source_state_bytes": self.source_state_bytes,
+            "target_state_bytes": self.target_state_bytes,
+            "warnings": self.warnings,
+        }
+
 
 def reconfigure_optimizer(
     *,
@@ -139,6 +216,36 @@ def reconfigure_optimizer(
         schedule_counter_behavior=_counter_behavior(counter_policy),
     )
     return new_bundle, migrated_state, report
+
+
+def transfer_optimizer_state(
+    *,
+    old_plan: FineTunePlanProtocol,
+    old_bundle: OptimizerBundle,
+    old_state: Any,
+    new_plan: FineTunePlanProtocol,
+    new_recipe: Any | None = None,
+    new_bundle: OptimizerBundle | None = None,
+    state_policy: StatePolicy = "preserve_shared",
+    counter_policy: CounterPolicy = "restart_schedule",
+    strict: bool = True,
+    **compile_kwargs: Any,
+) -> tuple[OptimizerBundle, Any, StateTransferReport]:
+    """Explicit 2026 staged optimizer-state transfer utility."""
+
+    new_bundle, migrated_state, migration = reconfigure_optimizer(
+        old_plan=old_plan,
+        old_bundle=old_bundle,
+        old_state=old_state,
+        new_plan=new_plan,
+        new_recipe=new_recipe,
+        new_bundle=new_bundle,
+        state_policy=state_policy,
+        counter_policy=counter_policy,
+        strict=strict,
+        **compile_kwargs,
+    )
+    return new_bundle, migrated_state, migration.to_state_transfer_report()
 
 
 def _migrate_state_tree(
@@ -377,6 +484,11 @@ def _compatible_leaf(old: Any, new: Any) -> bool:
             and isinstance(new, QuantizedBlocks)
             and old.shape == new.shape
             and old.block_size == new.block_size
+            and old.block_layout == new.block_layout
+            and old.codebook_id == new.codebook_id
+            and old.qmin == new.qmin
+            and old.qmax == new.qmax
+            and old.zero_point == new.zero_point
             and old.values.dtype == new.values.dtype
             and old.scales.dtype == new.scales.dtype
         )
@@ -404,6 +516,30 @@ def _counter_behavior(counter_policy: CounterPolicy) -> str:
     return "preserved moment state; schedule count leaves remain stage-local"
 
 
+def _transfer_warnings(
+    report: OptimizerMigrationReport,
+    reset_ids: tuple[str, ...],
+    converted_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if converted_ids:
+        warnings.append(
+            "optimizer state was deliberately transferred across group or "
+            "optimizer-state path changes."
+        )
+    if reset_ids:
+        warnings.append("shared parameter optimizer state was reset by policy.")
+    if report.initialized_param_leaves:
+        warnings.append("new trainable parameters received freshly initialized state.")
+    if report.dropped_param_leaves:
+        warnings.append("optimizer state for removed trainable parameters was dropped.")
+    if report.incompatible_state_leaves:
+        warnings.append("incompatible optimizer-state leaves could not be preserved.")
+    if report.counter_policy != "continue_global_step":
+        warnings.append(report.schedule_counter_behavior)
+    return tuple(dict.fromkeys(warnings))
+
+
 def _validate_policy(state_policy: str, counter_policy: str) -> None:
     if state_policy not in {
         "reset_all",
@@ -424,5 +560,7 @@ __all__ = (
     "CounterPolicy",
     "OptimizerMigrationReport",
     "StatePolicy",
+    "StateTransferReport",
     "reconfigure_optimizer",
+    "transfer_optimizer_state",
 )

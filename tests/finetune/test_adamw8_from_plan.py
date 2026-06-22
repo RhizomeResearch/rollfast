@@ -96,6 +96,11 @@ def test_adamw8_from_plan_quantizes_eligible_group_state_and_reports_bytes():
 
     assert bundle.optimizer_config.name == "adamw8"
     assert bundle.manifest()["state_quantization"]["enabled"] is True
+    assert bundle.manifest()["state_quantization"]["block_layout"] == "shard_local"
+    assert (
+        rfft.StateQuantizationConfig.from_dict(bundle.manifest()["state_quantization"])
+        == quantization
+    )
     group_rows = {
         row["label"]: row
         for row in bundle.report.group_table()

@@ -17,8 +17,38 @@ def test_config_round_trips_are_deterministic():
     )
     assert rfft.PrecisionConfig.from_dict(precision.to_dict()) == precision
 
-    asam = rfft.ASAMConfig(rho=0.5, eta=0.01, axis_name="data")
+    gradient_policy = rfft.GradientPolicy(
+        axis_name=("data", "model"),
+        partition_axis_names=("model",),
+        replicated_axis_names=("data",),
+    )
+    assert rfft.GradientPolicy.from_dict(gradient_policy.to_dict()) == gradient_policy
+
+    asam = rfft.ASAMConfig(
+        rho=0.5,
+        eta=0.01,
+        axis_name=("data", "model"),
+        partition_axis_names=("model",),
+        replicated_axis_names=("data",),
+    )
     assert rfft.ASAMConfig.from_dict(asam.to_dict()) == asam
+
+    apollo = rfft.APOLLOConfig(
+        rank=8,
+        mini=True,
+        scale=128.0,
+        scale_front=True,
+        disable_norm_growth_limiter=True,
+    )
+    assert rfft.APOLLOConfig.from_dict(apollo.to_dict()) == apollo
+
+    sharding = rfft.ShardingPolicy(
+        mesh_axes=("data", "model"),
+        parameter_axes=("model",),
+        state_placement="replicate_small_follow_large",
+        small_state_threshold=128,
+    )
+    assert rfft.ShardingPolicy.from_dict(sharding.to_dict()) == sharding
 
 
 def test_config_validation_rejects_invalid_values():
@@ -36,6 +66,15 @@ def test_config_validation_rejects_invalid_values():
         rfft.SWAConfig(frequency=0)
     with pytest.raises(ValueError, match="SAM rho"):
         rfft.SAMConfig(rho=0.0)
+    with pytest.raises(ValueError, match="block_layout"):
+        rfft.StateQuantizationConfig(block_layout="per_device")
+    with pytest.raises(ValueError, match="APOLLO scale"):
+        rfft.APOLLOConfig(scale=0.0)
+    with pytest.raises(ValueError, match="disjoint"):
+        rfft.GradientPolicy(
+            partition_axis_names=("model",),
+            replicated_axis_names=("model",),
+        )
 
 
 def test_public_import_surface_contains_core_builders():

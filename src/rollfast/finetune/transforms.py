@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from rollfast.utils import dist_reduce
+from rollfast.utils import AxisName, dist_reduce, resolve_partition_norm_axis_name
 
 
 class GlobalNormClipState(NamedTuple):
@@ -18,9 +18,11 @@ class GlobalNormClipState(NamedTuple):
 def clip_by_global_norm(
     max_norm: float,
     *,
-    axis_name: str | tuple[str, ...] | None = None,
+    axis_name: AxisName | None = None,
+    partition_axis_names: AxisName | None = None,
+    replicated_axis_names: AxisName | None = None,
 ) -> optax.GradientTransformation:
-    """Clip by global norm, optionally reducing squared norm across devices."""
+    """Clip by global norm over local leaves and parameter-partition axes."""
 
     if max_norm <= 0.0:
         raise ValueError("max_norm must be positive.")
@@ -31,7 +33,12 @@ def clip_by_global_norm(
 
     def update_fn(updates, state, params=None):
         del params
-        norm = _global_norm(updates, axis_name=axis_name)
+        norm = _global_norm(
+            updates,
+            axis_name=axis_name,
+            partition_axis_names=partition_axis_names,
+            replicated_axis_names=replicated_axis_names,
+        )
         scale = jnp.minimum(1.0, jnp.asarray(max_norm, dtype=jnp.float32) / (norm + 1e-6))
         clipped = jax.tree.map(
             lambda leaf: _scale_leaf(leaf, scale),
@@ -43,14 +50,25 @@ def clip_by_global_norm(
     return optax.GradientTransformation(init_fn, update_fn)
 
 
-def _global_norm(tree, *, axis_name: str | tuple[str, ...] | None) -> jax.Array:
+def _global_norm(
+    tree,
+    *,
+    axis_name: AxisName | None,
+    partition_axis_names: AxisName | None,
+    replicated_axis_names: AxisName | None,
+) -> jax.Array:
     total = jnp.asarray(0.0, dtype=jnp.float32)
     for leaf in jax.tree.leaves(tree, is_leaf=lambda x: x is None):
         if leaf is None or not hasattr(leaf, "dtype"):
             continue
         arr = jnp.asarray(leaf, dtype=jnp.float32)
         total = total + jnp.sum(jnp.square(arr))
-    total = dist_reduce(total, axis_name, "sum")
+    norm_axis_name = resolve_partition_norm_axis_name(
+        axis_name=axis_name,
+        partition_axis_names=partition_axis_names,
+        replicated_axis_names=replicated_axis_names,
+    )
+    total = dist_reduce(total, norm_axis_name, "sum")
     return jnp.sqrt(total)
 
 

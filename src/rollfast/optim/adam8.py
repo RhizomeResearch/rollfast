@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Callable, NamedTuple, Optional, Union, cast
+from typing import Any, Callable, Literal, NamedTuple, Optional, Union, cast
 
 import jax
 import jax.numpy as jnp
 from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
-from rollfast.utils import _safe_bias_correction
+from rollfast.utils import _safe_bias_correction, zeros_like_preserving_sharding
+
+
+SYMMETRIC_INT8_CODEBOOK_ID = "rollfast.symmetric_int8.neg127_pos127.v1"
+BlockLayout = Literal["shard_local", "logical_global"]
 
 
 @jax.tree_util.register_pytree_node_class
@@ -24,7 +28,12 @@ class QuantizedBlocks:
     shape: tuple[int, ...]
     size: int
     block_size: int
-    quantizer: str = "dynamic_int8"
+    quantizer: str = "blockwise_symmetric_int8"
+    codebook_id: str = SYMMETRIC_INT8_CODEBOOK_ID
+    qmin: int = -127
+    qmax: int = 127
+    zero_point: int = 0
+    block_layout: BlockLayout = "shard_local"
 
     def tree_flatten(self):
         return (self.values, self.scales), (
@@ -32,11 +41,26 @@ class QuantizedBlocks:
             self.size,
             self.block_size,
             self.quantizer,
+            self.codebook_id,
+            self.qmin,
+            self.qmax,
+            self.zero_point,
+            self.block_layout,
         )
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        shape, size, block_size, quantizer = aux_data
+        (
+            shape,
+            size,
+            block_size,
+            quantizer,
+            codebook_id,
+            qmin,
+            qmax,
+            zero_point,
+            block_layout,
+        ) = aux_data
         values, scales = children
         return cls(
             values=values,
@@ -45,7 +69,29 @@ class QuantizedBlocks:
             size=size,
             block_size=block_size,
             quantizer=quantizer,
+            codebook_id=codebook_id,
+            qmin=qmin,
+            qmax=qmax,
+            zero_point=zero_point,
+            block_layout=block_layout,
         )
+
+    def metadata(self) -> dict[str, Any]:
+        """Return exact checkpoint metadata for this quantized state leaf."""
+
+        return {
+            "quantizer": self.quantizer,
+            "codebook_id": self.codebook_id,
+            "qmin": self.qmin,
+            "qmax": self.qmax,
+            "zero_point": self.zero_point,
+            "shape": self.shape,
+            "size": self.size,
+            "block_size": self.block_size,
+            "block_layout": self.block_layout,
+            "scale_dtype": self.scales.dtype.name,
+            "values_dtype": self.values.dtype.name,
+        }
 
 
 class ScaleByAdam8State(NamedTuple):
@@ -64,11 +110,14 @@ def quantize_blocks(
     scale_dtype: jax.typing.DTypeLike = jnp.float32,
     stochastic_rounding: bool = True,
     key: jax.Array | None = None,
+    block_layout: BlockLayout = "shard_local",
 ) -> QuantizedBlocks:
     """Quantize one array with symmetric blockwise dynamic int8 scales."""
 
     if block_size <= 0:
         raise ValueError("block_size must be positive.")
+    if block_layout not in {"shard_local", "logical_global"}:
+        raise ValueError("block_layout must be 'shard_local' or 'logical_global'.")
     x_f32 = jnp.asarray(x, dtype=jnp.float32)
     shape = tuple(x_f32.shape)
     size = int(x_f32.size)
@@ -78,8 +127,9 @@ def quantize_blocks(
     padded = jnp.pad(flat, (0, padded_size - size))
     blocks = jnp.reshape(padded, (blocks_count, block_size))
     max_abs = jnp.max(jnp.abs(blocks), axis=1)
-    scales = jnp.where(max_abs > 0.0, max_abs / 127.0, 1.0)
-    scaled = jnp.clip(blocks / scales[:, None], -127.0, 127.0)
+    qmin, qmax = -127.0, 127.0
+    scales = jnp.where(max_abs > 0.0, max_abs / qmax, 1.0)
+    scaled = jnp.clip(blocks / scales[:, None], qmin, qmax)
     rounded = _round_scaled(scaled, stochastic_rounding=stochastic_rounding, key=key)
     return QuantizedBlocks(
         values=rounded.astype(jnp.int8),
@@ -87,6 +137,7 @@ def quantize_blocks(
         shape=shape,
         size=size,
         block_size=block_size,
+        block_layout=block_layout,
     )
 
 
@@ -150,6 +201,7 @@ def scale_by_adam8(
     scale_dtype: jax.typing.DTypeLike = jnp.float32,
     fallback_dtype: jax.typing.DTypeLike = jnp.float32,
     stochastic_rounding: bool = True,
+    block_layout: BlockLayout = "shard_local",
     quantize: bool = True,
     nesterov: bool = False,
     key: jax.Array = jax.random.PRNGKey(42),
@@ -162,6 +214,8 @@ def scale_by_adam8(
         raise ValueError("block_size must be positive.")
     if min_size < 0:
         raise ValueError("min_size must be non-negative.")
+    if block_layout not in {"shard_local", "logical_global"}:
+        raise ValueError("block_layout must be 'shard_local' or 'logical_global'.")
 
     def init_fn(params):
         key_mu, key_nu, next_key = jax.random.split(key, 3)
@@ -171,6 +225,7 @@ def scale_by_adam8(
             min_size=min_size,
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
+            block_layout=block_layout,
             quantize=quantize,
             key=key_mu,
         )
@@ -180,6 +235,7 @@ def scale_by_adam8(
             min_size=min_size,
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
+            block_layout=block_layout,
             quantize=quantize,
             key=key_nu,
         )
@@ -263,6 +319,7 @@ def scale_by_adam8(
             block_size=block_size,
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
+            block_layout=block_layout,
             stochastic_rounding=stochastic_rounding,
             key=key_mu,
         )
@@ -272,6 +329,7 @@ def scale_by_adam8(
             block_size=block_size,
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
+            block_layout=block_layout,
             stochastic_rounding=stochastic_rounding,
             key=key_nu,
         )
@@ -300,6 +358,7 @@ def adamw8(
     scale_dtype: jax.typing.DTypeLike = jnp.float32,
     fallback_dtype: jax.typing.DTypeLike = jnp.float32,
     stochastic_rounding: bool = True,
+    block_layout: BlockLayout = "shard_local",
     quantize: bool = True,
     nesterov: bool = False,
     use_magma: bool = False,
@@ -320,6 +379,7 @@ def adamw8(
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
             stochastic_rounding=stochastic_rounding,
+            block_layout=block_layout,
             quantize=quantize,
             nesterov=nesterov,
             key=key,
@@ -358,6 +418,7 @@ def _init_moment_tree(
     min_size: int,
     scale_dtype: jax.typing.DTypeLike,
     fallback_dtype: jax.typing.DTypeLike,
+    block_layout: BlockLayout,
     quantize: bool,
     key: jax.Array,
 ) -> Any:
@@ -371,6 +432,7 @@ def _init_moment_tree(
             min_size=min_size,
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
+            block_layout=block_layout,
             quantize=quantize,
             key=k,
         ),
@@ -387,12 +449,13 @@ def _init_moment_leaf(
     min_size: int,
     scale_dtype: jax.typing.DTypeLike,
     fallback_dtype: jax.typing.DTypeLike,
+    block_layout: BlockLayout,
     quantize: bool,
     key: jax.Array,
 ) -> Any:
     if _is_passthrough_leaf(param):
         return param
-    zeros = jnp.zeros_like(param, dtype=fallback_dtype)
+    zeros = zeros_like_preserving_sharding(param, fallback_dtype)
     if quantize and param.size >= min_size and jnp.issubdtype(param.dtype, jnp.inexact):
         return quantize_blocks(
             zeros,
@@ -400,6 +463,7 @@ def _init_moment_leaf(
             scale_dtype=scale_dtype,
             stochastic_rounding=False,
             key=key,
+            block_layout=block_layout,
         )
     return zeros
 
@@ -411,6 +475,7 @@ def _store_moment_tree(
     block_size: int,
     scale_dtype: jax.typing.DTypeLike,
     fallback_dtype: jax.typing.DTypeLike,
+    block_layout: BlockLayout,
     stochastic_rounding: bool,
     key: jax.Array,
 ) -> Any:
@@ -424,6 +489,7 @@ def _store_moment_tree(
             block_size=block_size,
             scale_dtype=scale_dtype,
             fallback_dtype=fallback_dtype,
+            block_layout=block_layout,
             stochastic_rounding=stochastic_rounding,
             key=k,
         ),
@@ -441,6 +507,7 @@ def _store_moment_leaf(
     block_size: int,
     scale_dtype: jax.typing.DTypeLike,
     fallback_dtype: jax.typing.DTypeLike,
+    block_layout: BlockLayout,
     stochastic_rounding: bool,
     key: jax.Array,
 ) -> Any:
@@ -451,6 +518,7 @@ def _store_moment_leaf(
             scale_dtype=scale_dtype,
             stochastic_rounding=stochastic_rounding,
             key=key,
+            block_layout=block_layout,
         )
     if _is_passthrough_leaf(template):
         return template
@@ -481,7 +549,9 @@ def _is_state_leaf(x: Any) -> bool:
 
 __all__ = (
     "QuantizedBlocks",
+    "BlockLayout",
     "ScaleByAdam8State",
+    "SYMMETRIC_INT8_CODEBOOK_ID",
     "adamw8",
     "dequantize_blocks",
     "estimate_quantized_moment_bytes",

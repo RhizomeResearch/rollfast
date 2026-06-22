@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -7,6 +7,14 @@ import pytest
 import rollfast.finetune as rfft
 
 from .helpers import TinyGroup, TinyPlan, tiny_plan
+
+
+@dataclass(frozen=True)
+class _IdentityWithSharding:
+    logical_id: str
+    alias_group: str | None = None
+    layout: str | None = None
+    sharding_fingerprint: str | None = None
 
 
 def test_validate_tiny_plan_counts_groups_and_fingerprint():
@@ -125,3 +133,41 @@ def test_fingerprint_ignores_values_but_changes_labels():
         rfft.validate_plan(changed_labels, allow_empty_groups=True).fingerprint
         != normalized.fingerprint
     )
+
+
+def test_fingerprint_changes_when_identity_sharding_changes():
+    trainable = {"w": jnp.ones((2,), dtype=jnp.float32)}
+    labels = {"w": "w_decay"}
+    groups = {
+        "w_decay": TinyGroup(
+            "w_decay",
+            role="head",
+            depth=None,
+            lr_multiplier=1.0,
+            weight_decay=True,
+        )
+    }
+    plan_a = TinyPlan(
+        trainable,
+        labels,
+        groups,
+        identities={
+            "w": _IdentityWithSharding(
+                logical_id="w",
+                layout="dense",
+                sharding_fingerprint="mesh-a",
+            )
+        },
+    )
+    plan_b = replace(
+        plan_a,
+        identities={
+            "w": _IdentityWithSharding(
+                logical_id="w",
+                layout="dense",
+                sharding_fingerprint="mesh-b",
+            )
+        },
+    )
+
+    assert rfft.validate_plan(plan_a).fingerprint != rfft.validate_plan(plan_b).fingerprint

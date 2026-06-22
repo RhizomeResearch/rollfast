@@ -110,6 +110,38 @@ def test_moment_dtype_controls_adam_state_precision():
     assert jnp.dtype(jnp.bfloat16) in state_dtypes
 
 
+def test_precision_warnings_report_fp16_without_loss_scale_or_master_params():
+    plan = TinyPlan(
+        trainable={"w": jnp.ones((2,), dtype=jnp.float16)},
+        labels={"w": "w_decay"},
+        group_specs={
+            "w_decay": TinyGroup(
+                "w_decay",
+                role="head",
+                depth=None,
+                lr_multiplier=1.0,
+                weight_decay=True,
+            )
+        },
+    )
+    bundle = rfft.compile_optimizer(
+        plan,
+        optimizer=rfft.OptimizerConfig(weight_decay=0.0),
+        schedule=rfft.ScheduleConfig(kind="constant", total_steps=5),
+        gradient_policy=rfft.GradientPolicy(clip_global_norm=None),
+        precision=rfft.PrecisionConfig(
+            master_params="never",
+            loss_scale="none",
+        ),
+    )
+
+    assert "fp16 without loss scaling." in bundle.report.warnings
+    assert (
+        "low-precision stored parameters without master parameters."
+        in bundle.report.warnings
+    )
+
+
 def test_make_update_step_updates_trainable_tree():
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(

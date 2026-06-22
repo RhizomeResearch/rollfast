@@ -5,6 +5,7 @@ import optax
 from rollfast.optim.adam import adamw
 from rollfast.optim.adam8 import (
     QuantizedBlocks,
+    SYMMETRIC_INT8_CODEBOOK_ID,
     adamw8,
     dequantize_blocks,
     quantize_blocks,
@@ -26,6 +27,14 @@ def test_blockwise_quantize_dequantize_error_is_bounded_by_half_scale():
     assert blocks.scales.dtype == jnp.float32
     assert blocks.shape == x.shape
     assert blocks.size == x.size
+    assert blocks.quantizer == "blockwise_symmetric_int8"
+    assert blocks.codebook_id == SYMMETRIC_INT8_CODEBOOK_ID
+    assert blocks.qmin == -127
+    assert blocks.qmax == 127
+    assert blocks.zero_point == 0
+    assert blocks.block_layout == "shard_local"
+    assert blocks.metadata()["codebook_id"] == SYMMETRIC_INT8_CODEBOOK_ID
+    assert blocks.metadata()["block_layout"] == "shard_local"
     assert jnp.max(jnp.abs(restored - x)) <= jnp.max(blocks.scales) / 2 + 1e-6
 
 

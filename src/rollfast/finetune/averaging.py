@@ -8,6 +8,8 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
+
 from .config import EMAConfig, SWAConfig
 
 
@@ -173,7 +175,7 @@ def _init_ema_params(params: Any, ema: EMAConfig) -> Any:
         return None
     if ema.debias:
         return jax.tree.map(
-            lambda x: jnp.zeros_like(x, dtype=ema.state_dtype) if x is not None else None,
+            lambda x: zeros_like_preserving_sharding(x, ema.state_dtype),
             params,
             is_leaf=lambda x: x is None,
         )
@@ -268,7 +270,9 @@ def _eval_swa(params: Any, state: AveragingState) -> Any:
 
 def _cast_tree(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(
-        lambda x: x.astype(dtype) if x is not None and hasattr(x, "astype") else x,
+        lambda x: astype_preserving_sharding(x, dtype)
+        if x is not None and hasattr(x, "astype")
+        else x,
         tree,
         is_leaf=lambda x: x is None,
     )

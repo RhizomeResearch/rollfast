@@ -25,6 +25,8 @@ class NormalizedPlan:
     identities: Any
     groups: dict[str, PlanGroup]
     fingerprint: str
+    logical_id_table_hash: str
+    model_state_structure_hash: str | None
     warnings: tuple[str, ...] = ()
 
 
@@ -121,6 +123,7 @@ def validate_plan(
         identities=plan.identities,
         lineage=getattr(plan, "lineage", None),
     )
+    model_state = getattr(plan, "model_state", None)
     return NormalizedPlan(
         trainable=plan.trainable,
         frozen=plan.frozen,
@@ -128,6 +131,8 @@ def validate_plan(
         identities=plan.identities,
         groups=groups,
         fingerprint=fingerprint,
+        logical_id_table_hash=_logical_id_table_hash(plan.trainable, plan.identities),
+        model_state_structure_hash=_model_state_structure_hash(model_state),
         warnings=tuple(warnings),
     )
 
@@ -173,6 +178,11 @@ def plan_fingerprint(
                 "label": label,
                 "logical_id": _identity_field(identity, "logical_id"),
                 "alias_group": _identity_field(identity, "alias_group"),
+                "layout": _identity_metadata_field(identity, "layout"),
+                "sharding_fingerprint": _identity_metadata_field(
+                    identity,
+                    "sharding_fingerprint",
+                ),
             }
         )
 
@@ -216,6 +226,59 @@ def _check_treedef_alignment(left: Any, right: Any, left_name: str, right_name: 
         raise ValueError(
             f"{left_name} and {right_name} must have identical PyTree structure."
         )
+
+
+def _logical_id_table_hash(trainable: Any, identities: Any) -> str:
+    records = []
+    identity_leaves = _tree_leaves(identities)
+    for index, (path, leaf) in enumerate(_tree_leaves_with_path(trainable)):
+        if leaf is None:
+            continue
+        identity = identity_leaves[index]
+        records.append(
+            {
+                "path": _path_to_string(path),
+                "logical_id": _identity_field(identity, "logical_id"),
+                "alias_group": _identity_field(identity, "alias_group"),
+                "layout": _identity_metadata_field(identity, "layout"),
+            }
+        )
+    return _hash_json(records)
+
+
+def _model_state_structure_hash(model_state: Any | None) -> str | None:
+    if model_state is None:
+        return None
+    records = []
+    for path, leaf in jtu.tree_leaves_with_path(model_state):
+        if leaf is None:
+            shape = None
+            dtype = None
+        elif hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+            arr = jnp.asarray(leaf)
+            shape = tuple(int(dim) for dim in arr.shape)
+            dtype = arr.dtype.name
+        else:
+            shape = ()
+            dtype = type(leaf).__name__
+        records.append(
+            {
+                "path": _path_to_string(path),
+                "shape": shape,
+                "dtype": dtype,
+            }
+        )
+    return _hash_json(
+        {
+            "treedef": str(jtu.tree_structure(model_state)),
+            "leaves": records,
+        }
+    )
+
+
+def _hash_json(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_none_leaf(value: Any) -> bool:
@@ -299,6 +362,18 @@ def _identity_field(identity: Any, name: str) -> Any:
     if identity is None:
         return None
     return getattr(identity, name, None)
+
+
+def _identity_metadata_field(identity: Any, name: str) -> Any:
+    value = _identity_field(identity, name)
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, tuple | list):
+        return tuple(
+            item if isinstance(item, str | int | float | bool | None) else str(item)
+            for item in value
+        )
+    return str(value)
 
 
 def _lineage_record(lineage: Any | None) -> dict[str, Any]:

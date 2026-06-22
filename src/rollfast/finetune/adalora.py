@@ -154,16 +154,32 @@ class AdaLoRAController:
         ) * jnp.abs(importance)
         uncertainty = self.config.beta_uncertainty * state.uncertainty_ema + (
             1.0 - self.config.beta_uncertainty
-        ) * jnp.abs(jnp.abs(importance) - state.sensitivity_ema)
+        ) * jnp.abs(jnp.abs(importance) - sensitivity)
         next_step = state.last_allocation_step + applied.astype(jnp.int32)
         budget = self.budget_at(next_step)
-        should_allocate = jnp.logical_and(
-            applied,
-            jnp.logical_and(
-                next_step >= self.t_init,
-                (next_step - self.t_init) % self.allocation_interval == 0,
-            ),
+        periodic_allocate = jnp.logical_and(
+            next_step >= self.t_init,
+            (next_step - self.t_init) % self.allocation_interval == 0,
         )
+        if self.config.final_support_frozen:
+            final_start = jnp.asarray(
+                max(0, self.total_steps - self.t_final),
+                dtype=jnp.int32,
+            )
+            already_final = state.last_allocation_step >= final_start
+            entering_final = jnp.logical_and(
+                state.last_allocation_step < final_start,
+                next_step >= final_start,
+            )
+            should_allocate = jnp.logical_and(
+                applied,
+                jnp.logical_or(
+                    jnp.logical_and(periodic_allocate, jnp.logical_not(already_final)),
+                    entering_final,
+                ),
+            )
+        else:
+            should_allocate = jnp.logical_and(applied, periodic_allocate)
         scores = sensitivity * (uncertainty + self.config.score_eps)
         new_mask = allocate_rank_mask(
             scores,
@@ -243,6 +259,27 @@ def make_adalora_controller(
     )
 
 
+def adalora_triplet_importance(
+    p: jax.Array,
+    lambda_: jax.Array,
+    q: jax.Array,
+    grad_p: jax.Array,
+    grad_lambda: jax.Array,
+    grad_q: jax.Array,
+) -> jax.Array:
+    """Return AdaLoRA per-rank instantaneous importance for one SVD triplet."""
+
+    p_signal = jnp.mean(jnp.abs(p * grad_p), axis=0)
+    lambda_signal = jnp.abs(lambda_ * grad_lambda)
+    q_signal = jnp.mean(jnp.abs(q * grad_q), axis=-1)
+    if p_signal.shape != lambda_signal.shape or q_signal.shape != lambda_signal.shape:
+        raise ValueError(
+            "AdaLoRA triplet factors must agree on rank dimension; got "
+            f"P {p_signal.shape}, lambda {lambda_signal.shape}, Q {q_signal.shape}."
+        )
+    return p_signal + lambda_signal + q_signal
+
+
 def allocate_rank_mask(
     scores: jax.Array,
     *,
@@ -298,6 +335,7 @@ def _clipped_budget(
 __all__ = (
     "AdaLoRAController",
     "AdaLoRAState",
+    "adalora_triplet_importance",
     "allocate_rank_mask",
     "make_adalora_controller",
 )

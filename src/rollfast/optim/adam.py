@@ -5,8 +5,6 @@ from typing import Any, Callable, NamedTuple, Optional, Union, cast
 
 import jax
 import jax.numpy as jnp
-import optax
-import optax.tree
 from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
@@ -16,6 +14,7 @@ from rollfast.utils import (
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
+    zeros_like_preserving_sharding,
 )
 
 
@@ -27,6 +26,16 @@ class ScaleByAdamState(NamedTuple):
     nu: base.Updates
     magma_s: Any
     key: Optional[jax.Array]
+
+
+def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+    return jax.tree.map(
+        lambda x: x
+        if isinstance(x, _masking.MaskedNode) or x is None
+        else zeros_like_preserving_sharding(x, dtype),
+        params,
+        is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+    )
 
 
 def scale_by_adam(
@@ -89,8 +98,8 @@ def scale_by_adam(
         mu_dtype = utils.canonicalize_dtype(mu_dtype)
 
     def init_fn(params):
-        mu = optax.tree.zeros_like(params, dtype=mu_dtype)  # First moment
-        nu = optax.tree.zeros_like(params, dtype=mu_dtype)  # Second moment
+        mu = _zeros_like_tree(params, mu_dtype)  # First moment
+        nu = _zeros_like_tree(params, mu_dtype)  # Second moment
 
         if use_magma:
 

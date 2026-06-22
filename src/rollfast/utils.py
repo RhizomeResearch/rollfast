@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,45 @@ def add_tiny(x):
     return x + jnp.finfo(x.dtype).tiny
 
 
-def dist_reduce(x: jax.Array, axis_name: Optional[str], op: str = "mean") -> jax.Array:
+AxisName = str | tuple[str, ...]
+
+
+def with_reference_sharding(value: Any, reference: Any) -> Any:
+    """Constrain ``value`` to the same JAX sharding as ``reference`` when possible."""
+
+    if value is None or reference is None:
+        return value
+    sharding = getattr(reference, "sharding", None)
+    if sharding is None or not hasattr(value, "shape"):
+        return value
+    if getattr(value, "sharding", None) == sharding:
+        return value
+    return jax.lax.with_sharding_constraint(value, sharding)
+
+
+def astype_preserving_sharding(value: Any, dtype: Any, reference: Any | None = None) -> Any:
+    """Cast an array and keep its reference sharding explicit."""
+
+    if value is None:
+        return None
+    cast = value.astype(dtype)
+    return with_reference_sharding(cast, value if reference is None else reference)
+
+
+def zeros_like_preserving_sharding(value: Any, dtype: Any | None = None) -> Any:
+    """Create zeros that explicitly follow the input leaf's sharding."""
+
+    if value is None:
+        return None
+    zeros = jnp.zeros_like(value) if dtype is None else jnp.zeros_like(value, dtype=dtype)
+    return with_reference_sharding(zeros, value)
+
+
+def dist_reduce(
+    x: jax.Array,
+    axis_name: AxisName | None,
+    op: str = "mean",
+) -> jax.Array:
     """Applies a distributed reduction (pmean, pmax, psum) if an axis name is provided.
 
     Args:
@@ -31,6 +69,56 @@ def dist_reduce(x: jax.Array, axis_name: Optional[str], op: str = "mean") -> jax
     elif op == "sum":
         return jax.lax.psum(x, axis_name=axis_name)
     return x
+
+
+def resolve_partition_norm_axis_name(
+    *,
+    axis_name: AxisName | None = None,
+    partition_axis_names: AxisName | None = None,
+    replicated_axis_names: AxisName | None = None,
+) -> AxisName | None:
+    """Resolve the collective axes that own parameter-value shards.
+
+    ``axis_name`` is the legacy distributed-axis argument. When
+    ``partition_axis_names`` is provided it wins, because replicated axes must
+    not contribute to the squared parameter norm. When only legacy
+    ``axis_name`` is present, explicit ``replicated_axis_names`` are filtered
+    out.
+    """
+
+    partition_axes = _axis_name_tuple(partition_axis_names)
+    replicated_axes = _axis_name_tuple(replicated_axis_names)
+    overlap = set(partition_axes) & set(replicated_axes)
+    if overlap:
+        raise ValueError(
+            "partition_axis_names and replicated_axis_names must be disjoint: "
+            f"{tuple(sorted(overlap))!r}."
+        )
+    if partition_axis_names is not None:
+        return _axis_name_or_none(partition_axes)
+
+    axes = _axis_name_tuple(axis_name)
+    if not axes:
+        return None
+    if replicated_axes:
+        axes = tuple(axis for axis in axes if axis not in replicated_axes)
+    return _axis_name_or_none(axes)
+
+
+def _axis_name_tuple(axis_name: AxisName | None) -> tuple[str, ...]:
+    if axis_name is None:
+        return ()
+    if isinstance(axis_name, str):
+        return (axis_name,)
+    return tuple(axis_name)
+
+
+def _axis_name_or_none(axis_names: tuple[str, ...]) -> AxisName | None:
+    if not axis_names:
+        return None
+    if len(axis_names) == 1:
+        return axis_names[0]
+    return axis_names
 
 
 def _safe_bias_correction(tree, factor):

@@ -22,6 +22,14 @@ def test_state_memory_summary_measures_adamw_state_categories():
     assert summary.by_category["first_moment"] == 14 * 4
     assert summary.by_category["second_moment"] == 14 * 4
     assert summary.preconditioner_bytes == 0
+    assert sum(summary.by_placement.values()) == summary.total_bytes
+    assert (
+        summary.replicated_bytes
+        + summary.globally_sharded_bytes
+        + summary.unsharded_bytes
+        == summary.total_bytes
+    )
+    assert all(leaf.placement for leaf in summary.leaves)
     assert summary.to_dict()["estimated_state_bytes"] == bundle.report.estimated_state_bytes
 
 
@@ -127,6 +135,41 @@ def test_state_memory_estimate_honors_kron_preconditioner_dtype():
 
     assert estimate.preconditioner_bytes == measured.preconditioner_bytes
     assert {factor.dtype for factor in estimate.preconditioner_factors} == {"bfloat16"}
+
+
+def test_state_memory_estimate_reports_replicated_and_sharded_policy_bytes():
+    plan = tiny_plan()
+    replicated_bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        sharding=rfft.ShardingPolicy(
+            mesh_axes=("data",),
+            state_placement="replicate_small_follow_large",
+            small_state_threshold=10_000,
+        ),
+    )
+    sharded_bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        sharding=rfft.ShardingPolicy(
+            mesh_axes=("data",),
+            state_placement="replicate_small_follow_large",
+            small_state_threshold=0,
+        ),
+    )
+
+    replicated = rfft.estimate_optimizer_state_memory(plan, replicated_bundle)
+    sharded = rfft.estimate_optimizer_state_memory(plan, sharded_bundle)
+
+    assert replicated.replicated_bytes == replicated.total_bytes
+    assert replicated.globally_sharded_bytes == 0
+    assert sharded.globally_sharded_bytes == sharded.total_bytes
+    assert sharded.replicated_bytes == 0
+    assert replicated.to_dict()["by_placement"]["replicated"] == replicated.total_bytes
 
 
 def test_state_memory_summary_reports_no_preconditioners_for_aurora_prism():

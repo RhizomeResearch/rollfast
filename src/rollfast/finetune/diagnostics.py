@@ -29,6 +29,7 @@ class StateLeafSummary:
     bytes: int
     group: str | None = None
     storage: str = "array"
+    placement: str = "unsharded"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +40,7 @@ class StateLeafSummary:
             "bytes": self.bytes,
             "group": self.group,
             "storage": self.storage,
+            "placement": self.placement,
         }
 
 
@@ -52,6 +54,10 @@ class OptimizerStateMemorySummary:
     estimated_state_bytes: int
     by_category: Mapping[str, int]
     by_group: Mapping[str, int]
+    by_placement: Mapping[str, int]
+    replicated_bytes: int
+    globally_sharded_bytes: int
+    unsharded_bytes: int
     preconditioner_bytes: int
     preconditioner_factors: tuple[StateLeafSummary, ...]
     leaves: tuple[StateLeafSummary, ...]
@@ -64,6 +70,10 @@ class OptimizerStateMemorySummary:
             "estimated_state_bytes": self.estimated_state_bytes,
             "by_category": dict(self.by_category),
             "by_group": dict(self.by_group),
+            "by_placement": dict(self.by_placement),
+            "replicated_bytes": self.replicated_bytes,
+            "globally_sharded_bytes": self.globally_sharded_bytes,
+            "unsharded_bytes": self.unsharded_bytes,
             "preconditioner_bytes": self.preconditioner_bytes,
             "preconditioner_factors": [
                 factor.to_dict() for factor in self.preconditioner_factors
@@ -84,6 +94,10 @@ class OptimizerStateMemoryEstimate:
     preconditioner_aux_bytes: int
     by_category: Mapping[str, int]
     by_group: Mapping[str, int]
+    by_placement: Mapping[str, int]
+    replicated_bytes: int
+    globally_sharded_bytes: int
+    unsharded_bytes: int
     preconditioner_factors: tuple[StateLeafSummary, ...]
     leaves: tuple[StateLeafSummary, ...]
     warnings: tuple[str, ...] = ()
@@ -98,6 +112,10 @@ class OptimizerStateMemoryEstimate:
             "preconditioner_aux_bytes": self.preconditioner_aux_bytes,
             "by_category": dict(self.by_category),
             "by_group": dict(self.by_group),
+            "by_placement": dict(self.by_placement),
+            "replicated_bytes": self.replicated_bytes,
+            "globally_sharded_bytes": self.globally_sharded_bytes,
+            "unsharded_bytes": self.unsharded_bytes,
             "preconditioner_factors": [
                 factor.to_dict() for factor in self.preconditioner_factors
             ],
@@ -119,8 +137,10 @@ def optimizer_state_memory_summary(
     )
     by_category: dict[str, int] = {}
     by_group: dict[str, int] = {}
+    by_placement: dict[str, int] = {}
     for leaf in leaves:
         by_category[leaf.category] = by_category.get(leaf.category, 0) + leaf.bytes
+        by_placement[leaf.placement] = by_placement.get(leaf.placement, 0) + leaf.bytes
         if leaf.group is not None:
             by_group[leaf.group] = by_group.get(leaf.group, 0) + leaf.bytes
     preconditioner_factors = tuple(
@@ -134,6 +154,10 @@ def optimizer_state_memory_summary(
         estimated_state_bytes=bundle.report.estimated_state_bytes,
         by_category=dict(sorted(by_category.items())),
         by_group=dict(sorted(by_group.items())),
+        by_placement=dict(sorted(by_placement.items())),
+        replicated_bytes=by_placement.get("replicated", 0),
+        globally_sharded_bytes=by_placement.get("globally_sharded", 0),
+        unsharded_bytes=by_placement.get("unsharded", 0),
         preconditioner_bytes=preconditioner_bytes,
         preconditioner_factors=preconditioner_factors,
         leaves=leaves,
@@ -182,8 +206,14 @@ def estimate_optimizer_state_memory(
 
     by_category: dict[str, int] = {}
     by_group: dict[str, int] = {}
+    by_placement: dict[str, int] = {}
+    leaves = [
+        _with_estimated_placement(leaf, bundle)
+        for leaf in leaves
+    ]
     for leaf in leaves:
         by_category[leaf.category] = by_category.get(leaf.category, 0) + leaf.bytes
+        by_placement[leaf.placement] = by_placement.get(leaf.placement, 0) + leaf.bytes
         if leaf.group is not None:
             by_group[leaf.group] = by_group.get(leaf.group, 0) + leaf.bytes
 
@@ -219,6 +249,10 @@ def estimate_optimizer_state_memory(
         preconditioner_aux_bytes=preconditioner_aux_bytes,
         by_category=dict(sorted(by_category.items())),
         by_group=dict(sorted(by_group.items())),
+        by_placement=dict(sorted(by_placement.items())),
+        replicated_bytes=by_placement.get("replicated", 0),
+        globally_sharded_bytes=by_placement.get("globally_sharded", 0),
+        unsharded_bytes=by_placement.get("unsharded", 0),
         preconditioner_factors=preconditioner_factors,
         leaves=tuple(leaves),
         warnings=tuple(warnings),
@@ -242,6 +276,7 @@ def _summarize_leaf(path: tuple[Any, ...], leaf: Any) -> StateLeafSummary | None
             bytes=quantized_nbytes(leaf),
             group=group,
             storage=storage,
+            placement=_placement_from_array(leaf.values),
         )
     if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
         return None
@@ -253,7 +288,45 @@ def _summarize_leaf(path: tuple[Any, ...], leaf: Any) -> StateLeafSummary | None
         bytes=int(leaf.size * leaf.dtype.itemsize),
         group=group,
         storage=storage,
+        placement=_placement_from_array(leaf),
     )
+
+
+def _with_estimated_placement(
+    leaf: StateLeafSummary,
+    bundle: OptimizerBundle,
+) -> StateLeafSummary:
+    return StateLeafSummary(
+        path=leaf.path,
+        category=leaf.category,
+        shape=leaf.shape,
+        dtype=leaf.dtype,
+        bytes=leaf.bytes,
+        group=leaf.group,
+        storage=leaf.storage,
+        placement=_estimated_placement(leaf.bytes, bundle),
+    )
+
+
+def _placement_from_array(value: Any) -> str:
+    sharding = getattr(value, "sharding", None)
+    if sharding is None:
+        return "unsharded"
+    if bool(getattr(sharding, "is_fully_replicated", False)):
+        return "replicated"
+    return "globally_sharded"
+
+
+def _estimated_placement(bytes_: int, bundle: OptimizerBundle) -> str:
+    sharding = bundle.sharding_policy
+    if not sharding.mesh_axes:
+        return "unsharded"
+    if (
+        sharding.state_placement == "replicate_small_follow_large"
+        and bytes_ <= sharding.small_state_threshold
+    ):
+        return "replicated"
+    return "globally_sharded"
 
 
 def _plan_trainable_leaves(

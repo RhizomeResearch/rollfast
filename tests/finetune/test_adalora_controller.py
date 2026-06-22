@@ -44,6 +44,39 @@ def test_adalora_allocation_prefers_high_scores_with_static_masks():
     assert jnp.array_equal(mask[1], jnp.array([True, True, False, False]))
 
 
+def test_adalora_triplet_importance_matches_reference_equation():
+    p = jnp.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32)
+    lambda_ = jnp.asarray([2.0, 4.0], dtype=jnp.float32)
+    q = jnp.asarray([[1.0, 3.0, 5.0], [2.0, 4.0, 6.0]], dtype=jnp.float32)
+    grad_p = jnp.full_like(p, 0.5)
+    grad_lambda = jnp.asarray([0.1, 0.2], dtype=jnp.float32)
+    grad_q = jnp.full_like(q, 0.1)
+
+    scores = rfft.adalora_triplet_importance(
+        p,
+        lambda_,
+        q,
+        grad_p,
+        grad_lambda,
+        grad_q,
+    )
+
+    assert scores[0] == pytest.approx(1.5)
+    assert scores[1] == pytest.approx(2.7)
+
+
+def test_adalora_triplet_importance_rejects_rank_mismatch():
+    with pytest.raises(ValueError, match="rank dimension"):
+        rfft.adalora_triplet_importance(
+            jnp.ones((2, 2)),
+            jnp.ones((3,)),
+            jnp.ones((2, 2)),
+            jnp.ones((2, 2)),
+            jnp.ones((3,)),
+            jnp.ones((2, 2)),
+        )
+
+
 def test_adalora_skipped_update_does_not_advance_controller():
     controller = rfft.make_adalora_controller(
         {"adapter": 4},
@@ -65,6 +98,55 @@ def test_adalora_skipped_update_does_not_advance_controller():
     assert int(skipped.current_budget) == int(state.current_budget)
     assert int(applied.step) == 1
     assert int(applied.current_budget) < int(state.current_budget)
+
+
+def test_adalora_uncertainty_uses_updated_sensitivity_ema():
+    controller = rfft.make_adalora_controller(
+        {"adapter": 1},
+        total_steps=4,
+        config=rfft.AdaLoRAControllerConfig(
+            initial_budget=1,
+            target_budget=1,
+            t_init=0,
+            t_final=0,
+            allocation_interval=1,
+            beta_sensitivity=0.5,
+            beta_uncertainty=0.5,
+        ),
+    )
+    state = controller.init()
+
+    state = controller.update(state, jnp.asarray([[2.0]], dtype=jnp.float32))
+
+    assert state.sensitivity_ema[0, 0] == pytest.approx(1.0)
+    assert state.uncertainty_ema[0, 0] == pytest.approx(0.5)
+
+
+def test_adalora_final_support_freezes_after_entering_final_phase():
+    controller = rfft.make_adalora_controller(
+        {"adapter": 2},
+        total_steps=4,
+        config=rfft.AdaLoRAControllerConfig(
+            initial_budget=2,
+            target_budget=1,
+            t_init=0,
+            t_final=2,
+            allocation_interval=1,
+            min_rank=0,
+            beta_sensitivity=0.0,
+            beta_uncertainty=0.0,
+            final_support_frozen=True,
+        ),
+    )
+    state = controller.init()
+    state = controller.update(state, jnp.asarray([[10.0, 1.0]], dtype=jnp.float32))
+    state = controller.update(state, jnp.asarray([[1.0, 10.0]], dtype=jnp.float32))
+    frozen_support = state.current_support
+    state = controller.update(state, jnp.asarray([[10.0, 1.0]], dtype=jnp.float32))
+
+    assert int(state.current_budget) == 1
+    assert jnp.array_equal(frozen_support, jnp.asarray([[False, True]]))
+    assert jnp.array_equal(state.current_support, frozen_support)
 
 
 def test_adalora_update_is_jittable_and_mask_shape_is_static():

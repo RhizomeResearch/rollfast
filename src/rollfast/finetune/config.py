@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Literal, Mapping
+from importlib import metadata as importlib_metadata
+from typing import Any, Callable, Literal, Mapping, NamedTuple
 
 import jax.numpy as jnp
 import optax
+
+from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
 
 SCHEMA_VERSION = 1
@@ -26,10 +29,14 @@ SAMNorm = Literal["global_l2"]
 OptimizerName = Literal[
     "adamw",
     "adamw8",
+    "apollo_adamw",
+    "galore_adamw",
     "schedule_free_adam",
     "aurora_adam",
     "prism_adam",
     "kron_adam",
+    "muon_adam",
+    "soap_adam",
 ]
 ProfileFidelity = Literal[
     "safe_default",
@@ -193,13 +200,20 @@ class GradientPolicy:
     clip_global_norm: float | None = 1.0
     nonfinite: NonFinitePolicy = "skip"
     max_consecutive_nonfinite: int = 1
-    axis_name: str | tuple[str, ...] | None = None
+    axis_name: AxisName | None = None
+    partition_axis_names: AxisName | None = None
+    replicated_axis_names: AxisName | None = None
 
     def __post_init__(self) -> None:
         if self.clip_global_norm is not None and self.clip_global_norm <= 0.0:
             raise ValueError("clip_global_norm must be positive when provided.")
         if self.max_consecutive_nonfinite <= 0:
             raise ValueError("max_consecutive_nonfinite must be positive.")
+        resolve_partition_norm_axis_name(
+            axis_name=self.axis_name,
+            partition_axis_names=self.partition_axis_names,
+            replicated_axis_names=self.replicated_axis_names,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -208,6 +222,8 @@ class GradientPolicy:
             "nonfinite": self.nonfinite,
             "max_consecutive_nonfinite": self.max_consecutive_nonfinite,
             "axis_name": self.axis_name,
+            "partition_axis_names": self.partition_axis_names,
+            "replicated_axis_names": self.replicated_axis_names,
         }
 
     @classmethod
@@ -217,6 +233,8 @@ class GradientPolicy:
             nonfinite=data.get("nonfinite", "skip"),
             max_consecutive_nonfinite=data.get("max_consecutive_nonfinite", 1),
             axis_name=data.get("axis_name"),
+            partition_axis_names=data.get("partition_axis_names"),
+            replicated_axis_names=data.get("replicated_axis_names"),
         )
 
 
@@ -347,6 +365,7 @@ class StateQuantizationConfig:
     enabled: bool = False
     bits: int = 8
     block_size: int = 2048
+    block_layout: Literal["shard_local", "logical_global"] = "shard_local"
     min_size: int = 4096
     scale_dtype: Any = jnp.float32
     fallback_dtype: Any = jnp.float32
@@ -366,6 +385,8 @@ class StateQuantizationConfig:
             raise ValueError("only 8-bit optimizer-state quantization is supported.")
         if self.block_size <= 0:
             raise ValueError("block_size must be positive.")
+        if self.block_layout not in {"shard_local", "logical_global"}:
+            raise ValueError("block_layout must be 'shard_local' or 'logical_global'.")
         if self.min_size < 0:
             raise ValueError("min_size must be non-negative.")
         _canonical_dtype(self.scale_dtype)
@@ -377,6 +398,7 @@ class StateQuantizationConfig:
             "enabled": self.enabled,
             "bits": self.bits,
             "block_size": self.block_size,
+            "block_layout": self.block_layout,
             "min_size": self.min_size,
             "scale_dtype": _dtype_name(self.scale_dtype),
             "fallback_dtype": _dtype_name(self.fallback_dtype),
@@ -390,6 +412,7 @@ class StateQuantizationConfig:
             enabled=data.get("enabled", False),
             bits=data.get("bits", 8),
             block_size=data.get("block_size", 2048),
+            block_layout=data.get("block_layout", "shard_local"),
             min_size=data.get("min_size", 4096),
             scale_dtype=_dtype_from_name(data.get("scale_dtype", "float32")),
             fallback_dtype=_dtype_from_name(data.get("fallback_dtype", "float32")),
@@ -515,7 +538,9 @@ class SAMConfig:
     eps: float = 1e-12
     perturb_bias: bool = True
     perturb_norm: bool = True
-    axis_name: str | tuple[str, ...] | None = None
+    axis_name: AxisName | None = None
+    partition_axis_names: AxisName | None = None
+    replicated_axis_names: AxisName | None = None
 
     def __post_init__(self) -> None:
         if self.rho <= 0.0:
@@ -524,6 +549,11 @@ class SAMConfig:
             raise ValueError("SAM currently supports only norm='global_l2'.")
         if self.eps <= 0.0:
             raise ValueError("SAM eps must be positive.")
+        resolve_partition_norm_axis_name(
+            axis_name=self.axis_name,
+            partition_axis_names=self.partition_axis_names,
+            replicated_axis_names=self.replicated_axis_names,
+        )
 
     @property
     def adaptive(self) -> Literal[False]:
@@ -547,6 +577,8 @@ class SAMConfig:
             "perturb_bias": self.perturb_bias,
             "perturb_norm": self.perturb_norm,
             "axis_name": self.axis_name,
+            "partition_axis_names": self.partition_axis_names,
+            "replicated_axis_names": self.replicated_axis_names,
         }
 
     @classmethod
@@ -559,6 +591,8 @@ class SAMConfig:
             perturb_bias=data.get("perturb_bias", True),
             perturb_norm=data.get("perturb_norm", True),
             axis_name=data.get("axis_name"),
+            partition_axis_names=data.get("partition_axis_names"),
+            replicated_axis_names=data.get("replicated_axis_names"),
         )
 
 
@@ -571,7 +605,9 @@ class ASAMConfig:
     eps: float = 1e-12
     perturb_bias: bool = False
     perturb_norm: bool = False
-    axis_name: str | tuple[str, ...] | None = None
+    axis_name: AxisName | None = None
+    partition_axis_names: AxisName | None = None
+    replicated_axis_names: AxisName | None = None
 
     def __post_init__(self) -> None:
         if self.rho <= 0.0:
@@ -582,6 +618,11 @@ class ASAMConfig:
             raise ValueError("ASAM currently supports only norm='global_l2'.")
         if self.eps <= 0.0:
             raise ValueError("ASAM eps must be positive.")
+        resolve_partition_norm_axis_name(
+            axis_name=self.axis_name,
+            partition_axis_names=self.partition_axis_names,
+            replicated_axis_names=self.replicated_axis_names,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -594,6 +635,8 @@ class ASAMConfig:
             "perturb_bias": self.perturb_bias,
             "perturb_norm": self.perturb_norm,
             "axis_name": self.axis_name,
+            "partition_axis_names": self.partition_axis_names,
+            "replicated_axis_names": self.replicated_axis_names,
         }
 
     @classmethod
@@ -607,6 +650,8 @@ class ASAMConfig:
             perturb_bias=data.get("perturb_bias", False),
             perturb_norm=data.get("perturb_norm", False),
             axis_name=data.get("axis_name"),
+            partition_axis_names=data.get("partition_axis_names"),
+            replicated_axis_names=data.get("replicated_axis_names"),
         )
 
 
@@ -774,6 +819,66 @@ class ShardingPolicy:
     small_state_threshold: int = 4096
     allow_host_materialization: bool = False
 
+    def __post_init__(self) -> None:
+        if self.small_state_threshold < 0:
+            raise ValueError("small_state_threshold must be non-negative.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "mesh_axes": self.mesh_axes,
+            "data_axes": self.data_axes,
+            "parameter_axes": self.parameter_axes,
+            "state_placement": self.state_placement,
+            "small_state_threshold": self.small_state_threshold,
+            "allow_host_materialization": self.allow_host_materialization,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ShardingPolicy":
+        return cls(
+            mesh_axes=tuple(data.get("mesh_axes", ())),
+            data_axes=tuple(data.get("data_axes", ("data",))),
+            parameter_axes=tuple(data.get("parameter_axes", ())),
+            state_placement=data.get("state_placement", "follow_param"),
+            small_state_threshold=data.get("small_state_threshold", 4096),
+            allow_host_materialization=data.get("allow_host_materialization", False),
+        )
+
+
+@dataclass(frozen=True)
+class StateOffloadPolicy:
+    """Explicit host/device optimizer-state offload policy."""
+
+    enabled: bool = False
+    target: Literal["host", "device"] = "host"
+    min_bytes: int = 0
+    preserve_sharding: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_bytes < 0:
+            raise ValueError("StateOffloadPolicy.min_bytes must be non-negative.")
+        if self.target not in {"host", "device"}:
+            raise ValueError("StateOffloadPolicy.target must be 'host' or 'device'.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "enabled": self.enabled,
+            "target": self.target,
+            "min_bytes": self.min_bytes,
+            "preserve_sharding": self.preserve_sharding,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "StateOffloadPolicy":
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            target=data.get("target", "host"),
+            min_bytes=int(data.get("min_bytes", 0)),
+            preserve_sharding=bool(data.get("preserve_sharding", True)),
+        )
+
 
 @dataclass(frozen=True)
 class AccumulationState:
@@ -784,6 +889,13 @@ class AccumulationState:
     microsteps_in_window: Any
     all_finite: Any
     pending_model_state: Any | None
+
+
+class LossScaleState(NamedTuple):
+    """Dynamic/static loss-scaling state."""
+
+    loss_scale: Any
+    growth_tracker: Any
 
 
 @dataclass(frozen=True)
@@ -826,12 +938,197 @@ class FineTuneStepState:
 class GaLoreConfig:
     """GaLore optimizer projection configuration."""
 
-    rank: int
+    rank: int | Mapping[str, int]
     update_interval: int = 200
-    scale: float = 0.25
-    projection_type: Literal["std", "reverse_std", "right", "left", "full"] = "std"
+    scale: float = 1.0
+    projection: Literal["auto", "left", "right", "two_sided"] = "auto"
+    basis_method: Literal["svd", "randomized_svd"] = "svd"
+    basis_dtype: Any = jnp.float32
+    state_on_basis_refresh: Literal["reuse_coordinates", "reset", "transport"] = "reuse_coordinates"
+    min_matrix_size: int = 4096
     target: Literal["matrix_only"] = "matrix_only"
     fallback_optimizer: OptimizerName = "adamw"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.rank, Mapping):
+            if not self.rank:
+                raise ValueError("GaLore rank mapping must not be empty.")
+            if any(int(value) < 1 for value in self.rank.values()):
+                raise ValueError("GaLore ranks must be >= 1.")
+        elif self.rank < 1:
+            raise ValueError("GaLore rank must be >= 1.")
+        if self.update_interval < 1:
+            raise ValueError("GaLore update_interval must be >= 1.")
+        if self.scale <= 0.0:
+            raise ValueError("GaLore scale must be positive.")
+        if self.min_matrix_size < 0:
+            raise ValueError("GaLore min_matrix_size must be non-negative.")
+        if self.basis_method != "svd":
+            raise NotImplementedError("GaLore currently supports basis_method='svd'.")
+        _canonical_dtype(self.basis_dtype)
+
+
+@dataclass(frozen=True)
+class APOLLOConfig:
+    """APOLLO projected gradient-scaling configuration."""
+
+    rank: int = 256
+    projection_seed: int = 0
+    projection_refresh_interval: int | None = None
+    scaling: Literal["channel", "tensor"] = "channel"
+    mini: bool = False
+    scale: float | None = None
+    scale_front: bool = False
+    disable_norm_growth_limiter: bool = False
+    eps: float = 1e-8
+    weight_decay: float = 0.0
+    fallback_optimizer: OptimizerName = "adamw"
+    norm_growth_limiter: float = 1.01
+
+    def __post_init__(self) -> None:
+        if self.rank < 1:
+            raise ValueError("APOLLO rank must be >= 1.")
+        if self.projection_refresh_interval is not None:
+            if self.projection_refresh_interval < 1:
+                raise ValueError(
+                    "APOLLO projection_refresh_interval must be >= 1 when provided."
+                )
+        if self.scaling not in {"channel", "tensor"}:
+            raise ValueError("APOLLO scaling must be 'channel' or 'tensor'.")
+        if self.scale is not None and self.scale <= 0.0:
+            raise ValueError("APOLLO scale must be positive when provided.")
+        if self.eps < 0.0:
+            raise ValueError("APOLLO eps must be non-negative.")
+        if self.weight_decay < 0.0:
+            raise ValueError("APOLLO weight_decay must be non-negative.")
+        if self.fallback_optimizer != "adamw":
+            raise NotImplementedError("APOLLO currently supports fallback_optimizer='adamw'.")
+        if self.norm_growth_limiter <= 1.0:
+            raise ValueError("APOLLO norm_growth_limiter must be greater than 1.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "rank": self.rank,
+            "projection_seed": self.projection_seed,
+            "projection_refresh_interval": self.projection_refresh_interval,
+            "scaling": self.scaling,
+            "mini": self.mini,
+            "scale": self.scale,
+            "scale_front": self.scale_front,
+            "disable_norm_growth_limiter": self.disable_norm_growth_limiter,
+            "eps": self.eps,
+            "weight_decay": self.weight_decay,
+            "fallback_optimizer": self.fallback_optimizer,
+            "norm_growth_limiter": self.norm_growth_limiter,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "APOLLOConfig":
+        return cls(
+            rank=data.get("rank", 256),
+            projection_seed=data.get("projection_seed", 0),
+            projection_refresh_interval=data.get("projection_refresh_interval"),
+            scaling=data.get("scaling", "channel"),
+            mini=data.get("mini", False),
+            scale=data.get("scale"),
+            scale_front=data.get("scale_front", False),
+            disable_norm_growth_limiter=data.get("disable_norm_growth_limiter", False),
+            eps=data.get("eps", 1e-8),
+            weight_decay=data.get("weight_decay", 0.0),
+            fallback_optimizer=data.get("fallback_optimizer", "adamw"),
+            norm_growth_limiter=data.get("norm_growth_limiter", 1.01),
+        )
+
+
+@dataclass(frozen=True)
+class MuonConfig:
+    """Muon/Adam matrix optimizer configuration."""
+
+    ns_steps: int = 5
+    beta: float = 0.95
+    eps: float = 1e-8
+    preconditioning: Literal["frobenius", "spectral", "aol", "schatten"] = "frobenius"
+    nesterov: bool = True
+    adaptive: bool = False
+    consistent_rms: float | None = None
+    fallback_optimizer: OptimizerName = "adamw"
+
+    def __post_init__(self) -> None:
+        if self.ns_steps < 1:
+            raise ValueError("Muon ns_steps must be >= 1.")
+        if not 0.0 <= self.beta < 1.0:
+            raise ValueError("Muon beta must satisfy 0 <= beta < 1.")
+        if self.eps <= 0.0:
+            raise ValueError("Muon eps must be positive.")
+        if self.consistent_rms is not None and self.consistent_rms <= 0.0:
+            raise ValueError("Muon consistent_rms must be positive when provided.")
+        if self.fallback_optimizer != "adamw":
+            raise NotImplementedError("Muon currently supports fallback_optimizer='adamw'.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ns_steps": self.ns_steps,
+            "beta": self.beta,
+            "eps": self.eps,
+            "preconditioning": self.preconditioning,
+            "nesterov": self.nesterov,
+            "adaptive": self.adaptive,
+            "consistent_rms": self.consistent_rms,
+            "fallback_optimizer": self.fallback_optimizer,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "MuonConfig":
+        return cls(
+            ns_steps=data.get("ns_steps", 5),
+            beta=data.get("beta", 0.95),
+            eps=data.get("eps", 1e-8),
+            preconditioning=data.get("preconditioning", "frobenius"),
+            nesterov=data.get("nesterov", True),
+            adaptive=data.get("adaptive", False),
+            consistent_rms=data.get("consistent_rms"),
+            fallback_optimizer=data.get("fallback_optimizer", "adamw"),
+        )
+
+
+@dataclass(frozen=True)
+class SOAPConfig:
+    """Experimental SOAP-style matrix preconditioner configuration."""
+
+    preconditioner_update_interval: int = 10
+    inv_steps: int = 6
+    eps_gram: float = 1e-6
+    fallback_optimizer: OptimizerName = "adamw"
+
+    def __post_init__(self) -> None:
+        if self.preconditioner_update_interval < 1:
+            raise ValueError("SOAP preconditioner_update_interval must be >= 1.")
+        if self.inv_steps < 1:
+            raise ValueError("SOAP inv_steps must be >= 1.")
+        if self.eps_gram <= 0.0:
+            raise ValueError("SOAP eps_gram must be positive.")
+        if self.fallback_optimizer != "adamw":
+            raise NotImplementedError("SOAP currently supports fallback_optimizer='adamw'.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "preconditioner_update_interval": self.preconditioner_update_interval,
+            "inv_steps": self.inv_steps,
+            "eps_gram": self.eps_gram,
+            "fallback_optimizer": self.fallback_optimizer,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SOAPConfig":
+        return cls(
+            preconditioner_update_interval=data.get("preconditioner_update_interval", 10),
+            inv_steps=data.get("inv_steps", 6),
+            eps_gram=data.get("eps_gram", 1e-6),
+            fallback_optimizer=data.get("fallback_optimizer", "adamw"),
+        )
 
 
 @dataclass(frozen=True)
@@ -886,6 +1183,8 @@ class OptimizerReport:
     trainable_bytes: int
     estimated_state_bytes: int
     total_steps: int | None
+    logical_id_table_hash: str = ""
+    model_state_structure_hash: str | None = None
     accumulation_steps: int = 1
     schedule_step_counter: StepCounter = "optimizer"
     state_policies: Mapping[str, str] = field(default_factory=dict)
@@ -937,8 +1236,11 @@ class OptimizerBundle:
     accumulation_config: AccumulationConfig
     precision_config: PrecisionConfig
     quantization_config: StateQuantizationConfig
+    sharding_policy: ShardingPolicy = field(default_factory=ShardingPolicy)
+    offload_policy: StateOffloadPolicy = field(default_factory=StateOffloadPolicy)
     ema_config: EMAConfig = field(default_factory=EMAConfig)
     swa_config: SWAConfig = field(default_factory=SWAConfig)
+    method_config: Mapping[str, Any] = field(default_factory=dict)
     eval_fn: Callable[[Any, optax.OptState | None, str], Any] | None = None
     eval_params_kind: str = "identity"
     eval_views: tuple[str, ...] = ("optimizer",)
@@ -971,26 +1273,54 @@ class OptimizerBundle:
         return params
 
     def manifest(self) -> dict[str, Any]:
+        optimizer_profiles = (self.optimizer_config.name,)
         return {
             "schema_version": SCHEMA_VERSION,
+            "rollfast_revision": _rollfast_revision(),
+            "plan_fingerprint": self.report.fingerprint,
             "fingerprint": self.report.fingerprint,
+            "model_checkpoint_id": None,
+            "base_model_value_hash": None,
+            "optimizer_profiles": optimizer_profiles,
             "optimizer": self.optimizer_config.to_dict(),
+            "optimizer_config": self.optimizer_config.to_dict(),
             "schedule": self.schedule_config.to_dict(),
+            "schedule_config": self.schedule_config.to_dict(),
             "gradient_policy": self.gradient_policy.to_dict(),
             "accumulation": self.accumulation_config.to_dict(),
+            "accumulation_config": self.accumulation_config.to_dict(),
             "precision": self.precision_config.to_dict(),
+            "precision_config": self.precision_config.to_dict(),
+            "sharding": self.sharding_policy.to_dict(),
+            "sharding_config": self.sharding_policy.to_dict(),
+            "state_offload": self.offload_policy.to_dict(),
+            "offload_policy": self.offload_policy.to_dict(),
             "state_quantization": self.quantization_config.to_dict(),
+            "quantization_metadata": self.quantization_config.to_dict(),
+            "method_config": dict(self.method_config),
             "ema": self.ema_config.to_dict(),
             "swa": self.swa_config.to_dict(),
             "eval_params_kind": self.eval_params_kind,
             "eval_views": self.eval_views,
             "default_eval_view": self.default_eval_view,
             "groups": self.report.group_table(),
+            "group_table": self.report.group_table(),
+            "logical_id_table_hash": self.report.logical_id_table_hash,
+            "model_state_structure_hash": self.report.model_state_structure_hash,
+            "counters": {},
+            "serializable": True,
             "schedule_preview": [
                 {"step": point.step, "value": point.value}
                 for point in self.report.schedule_preview
             ],
         }
+
+
+def _rollfast_revision() -> str:
+    try:
+        return importlib_metadata.version("rollfast")
+    except importlib_metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _check_fraction(name: str, value: float) -> None:
@@ -1016,6 +1346,7 @@ __all__ = (
     "AccumulationState",
     "AdaLoRAControllerConfig",
     "AlgorithmSemantics",
+    "APOLLOConfig",
     "ASAMConfig",
     "AuxLossRule",
     "CompiledGroup",
@@ -1026,7 +1357,9 @@ __all__ = (
     "GradientPolicy",
     "GroupRule",
     "LoRAPlusConfig",
+    "LossScaleState",
     "LossBundle",
+    "MuonConfig",
     "NormalizedLeaf",
     "OptimizerBundle",
     "OptimizerConfig",
@@ -1040,6 +1373,8 @@ __all__ = (
     "ScheduleConfig",
     "SchedulePoint",
     "ShardingPolicy",
+    "SOAPConfig",
     "StepCounters",
+    "StateOffloadPolicy",
     "StateQuantizationConfig",
 )

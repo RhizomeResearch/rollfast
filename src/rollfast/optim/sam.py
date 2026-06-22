@@ -7,13 +7,17 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from rollfast.utils import AxisName, resolve_partition_norm_axis_name
+
 
 def global_l2_norm(
     tree: Any,
     *,
-    axis_name: str | tuple[str, ...] | None = None,
+    axis_name: AxisName | None = None,
+    partition_axis_names: AxisName | None = None,
+    replicated_axis_names: AxisName | None = None,
 ) -> jax.Array:
-    """Return the global L2 norm of array leaves, optionally across devices."""
+    """Return the global L2 norm over local leaves and parameter-shard axes."""
 
     sq_sum = sum(
         jnp.sum(jnp.square(leaf.astype(jnp.float32)))
@@ -21,8 +25,13 @@ def global_l2_norm(
         if leaf is not None
     )
     sq_sum = jnp.asarray(sq_sum, dtype=jnp.float32)
-    if axis_name is not None:
-        sq_sum = jax.lax.psum(sq_sum, axis_name=axis_name)
+    norm_axis_name = resolve_partition_norm_axis_name(
+        axis_name=axis_name,
+        partition_axis_names=partition_axis_names,
+        replicated_axis_names=replicated_axis_names,
+    )
+    if norm_axis_name is not None:
+        sq_sum = jax.lax.psum(sq_sum, axis_name=norm_axis_name)
     return jnp.sqrt(sq_sum)
 
 
@@ -35,7 +44,9 @@ def sam_perturbation(
     eta: float = 0.0,
     eps: float = 1e-12,
     mask: Any | None = None,
-    axis_name: str | tuple[str, ...] | None = None,
+    axis_name: AxisName | None = None,
+    partition_axis_names: AxisName | None = None,
+    replicated_axis_names: AxisName | None = None,
 ) -> tuple[Any, jax.Array]:
     """Construct the SAM/ASAM ascent perturbation for a trainable PyTree.
 
@@ -77,7 +88,12 @@ def sam_perturbation(
         mask,
         is_leaf=lambda x: x is None,
     )
-    direction_norm = global_l2_norm(direction, axis_name=axis_name)
+    direction_norm = global_l2_norm(
+        direction,
+        axis_name=axis_name,
+        partition_axis_names=partition_axis_names,
+        replicated_axis_names=replicated_axis_names,
+    )
     scale = rho / (direction_norm + eps)
     perturbation = jax.tree.map(
         lambda d, p, m: _perturb_leaf(
@@ -93,7 +109,12 @@ def sam_perturbation(
         mask,
         is_leaf=lambda x: x is None,
     )
-    return perturbation, global_l2_norm(perturbation, axis_name=axis_name)
+    return perturbation, global_l2_norm(
+        perturbation,
+        axis_name=axis_name,
+        partition_axis_names=partition_axis_names,
+        replicated_axis_names=replicated_axis_names,
+    )
 
 
 def add_perturbation(params: Any, perturbation: Any) -> Any:
