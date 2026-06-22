@@ -14,12 +14,29 @@ from .config import AdaLoRAControllerConfig, SCHEMA_VERSION
 class AdaLoRAState(NamedTuple):
     """JAX PyTree state for fixed-shape AdaLoRA rank allocation."""
 
-    step: jax.Array
     sensitivity_ema: jax.Array
     uncertainty_ema: jax.Array
-    rank_mask: jax.Array
-    ranks: jax.Array
+    current_support: jax.Array
     current_budget: jax.Array
+    last_allocation_step: jax.Array
+
+    @property
+    def step(self) -> jax.Array:
+        """Backward-compatible alias for the applied optimizer-step count."""
+
+        return self.last_allocation_step
+
+    @property
+    def rank_mask(self) -> jax.Array:
+        """Backward-compatible alias for the active rank support mask."""
+
+        return self.current_support
+
+    @property
+    def ranks(self) -> jax.Array:
+        """Return active rank counts per AdaLoRA group."""
+
+        return jnp.sum(self.current_support, axis=1)
 
 
 @dataclass(frozen=True)
@@ -35,7 +52,7 @@ class AdaLoRAController:
     group_names: tuple[str, ...]
     max_ranks: tuple[int, ...]
     total_steps: int
-    config: AdaLoRAControllerConfig = AdaLoRAControllerConfig(enabled=True)
+    config: AdaLoRAControllerConfig = AdaLoRAControllerConfig()
 
     def __post_init__(self) -> None:
         if self.total_steps <= 0:
@@ -59,34 +76,38 @@ class AdaLoRAController:
 
     @property
     def t_init(self) -> int:
-        return int(round(self.config.initial_warmup_fraction * self.total_steps))
+        return self.config.t_init
 
     @property
     def t_final(self) -> int:
-        return int(round(self.config.final_tuning_fraction * self.total_steps))
+        return self.config.t_final
 
     @property
     def allocation_interval(self) -> int:
         return self.config.resolved_interval(self.total_steps)
 
     def init(self) -> AdaLoRAState:
-        ranks = jnp.asarray(
-            [
-                min(max_rank, self.config.init_rank)
-                for max_rank in self.max_ranks
-            ],
+        budget = jnp.asarray(
+            _clipped_budget(
+                self.config.initial_budget,
+                self.max_ranks,
+                self.config.min_rank,
+            ),
             dtype=jnp.int32,
         )
-        rank_mask = _mask_from_ranks(ranks, self.max_rank)
-        budget = jnp.asarray(int(jnp.sum(ranks)), dtype=jnp.int32)
         zeros = jnp.zeros((self.group_count, self.max_rank), dtype=jnp.float32)
+        support = allocate_rank_mask(
+            jnp.ones_like(zeros),
+            max_ranks=self.max_ranks,
+            budget=budget,
+            min_rank=self.config.min_rank,
+        )
         return AdaLoRAState(
-            step=jnp.zeros([], jnp.int32),
             sensitivity_ema=zeros,
             uncertainty_ema=zeros,
-            rank_mask=rank_mask,
-            ranks=ranks,
+            current_support=support,
             current_budget=budget,
+            last_allocation_step=jnp.zeros([], jnp.int32),
         )
 
     def budget_at(self, step: int | jax.Array) -> jax.Array:
@@ -94,12 +115,12 @@ class AdaLoRAController:
 
         step = jnp.asarray(step, dtype=jnp.int32)
         init_budget = _clipped_budget(
-            self.group_count * self.config.init_rank,
+            self.config.initial_budget,
             self.max_ranks,
             self.config.min_rank,
         )
         target_budget = _clipped_budget(
-            self.group_count * self.config.resolved_target_rank(),
+            self.config.target_budget,
             self.max_ranks,
             self.config.min_rank,
         )
@@ -109,10 +130,13 @@ class AdaLoRAController:
             dtype=jnp.int32,
         )
         span = jnp.maximum(decay_end - decay_start, 1)
-        progress = jnp.clip(step - decay_start, 0, span)
-        delta = init_budget - target_budget
-        decayed = init_budget - jnp.floor(delta * progress / span).astype(jnp.int32)
-        return jnp.clip(decayed, target_budget, init_budget).astype(jnp.int32)
+        progress = jnp.clip((step - decay_start) / span, 0.0, 1.0)
+        decayed = target_budget + (init_budget - target_budget) * (1.0 - progress) ** 3
+        before = jnp.asarray(step < decay_start)
+        after = jnp.asarray(step >= decay_end)
+        budget = jnp.where(before, init_budget, jnp.rint(decayed).astype(jnp.int32))
+        budget = jnp.where(after, target_budget, budget)
+        return jnp.clip(budget, target_budget, init_budget).astype(jnp.int32)
 
     def update(
         self,
@@ -125,13 +149,13 @@ class AdaLoRAController:
 
         applied = jnp.asarray(applied, dtype=jnp.bool_)
         importance = self._padded_scores(importance)
-        sensitivity = self.config.beta1 * state.sensitivity_ema + (
-            1.0 - self.config.beta1
+        sensitivity = self.config.beta_sensitivity * state.sensitivity_ema + (
+            1.0 - self.config.beta_sensitivity
         ) * jnp.abs(importance)
-        uncertainty = self.config.beta2 * state.uncertainty_ema + (
-            1.0 - self.config.beta2
+        uncertainty = self.config.beta_uncertainty * state.uncertainty_ema + (
+            1.0 - self.config.beta_uncertainty
         ) * jnp.abs(jnp.abs(importance) - state.sensitivity_ema)
-        next_step = state.step + applied.astype(jnp.int32)
+        next_step = state.last_allocation_step + applied.astype(jnp.int32)
         budget = self.budget_at(next_step)
         should_allocate = jnp.logical_and(
             applied,
@@ -147,23 +171,21 @@ class AdaLoRAController:
             budget=budget,
             min_rank=self.config.min_rank,
         )
-        rank_mask = jnp.where(should_allocate, new_mask, state.rank_mask)
-        ranks = jnp.sum(rank_mask.astype(jnp.int32), axis=1)
+        support = jnp.where(should_allocate, new_mask, state.current_support)
         current_budget = jnp.where(should_allocate, budget, state.current_budget)
         return AdaLoRAState(
-            step=next_step,
             sensitivity_ema=jnp.where(applied, sensitivity, state.sensitivity_ema),
             uncertainty_ema=jnp.where(applied, uncertainty, state.uncertainty_ema),
-            rank_mask=rank_mask,
-            ranks=ranks,
+            current_support=support,
             current_budget=current_budget,
+            last_allocation_step=next_step,
         )
 
     def rank_pattern(self, state: AdaLoRAState) -> dict[str, jax.Array]:
         """Return a mapping from static group name to fixed-shape rank mask."""
 
         return {
-            name: state.rank_mask[index, : self.max_ranks[index]]
+            name: state.current_support[index, : self.max_ranks[index]]
             for index, name in enumerate(self.group_names)
         }
 
@@ -171,7 +193,7 @@ class AdaLoRAController:
         return tuple(
             {
                 "group": name,
-                "rank": int(state.ranks[index]),
+                "rank": int(jnp.sum(state.current_support[index])),
                 "max_rank": self.max_ranks[index],
             }
             for index, name in enumerate(self.group_names)
@@ -217,7 +239,7 @@ def make_adalora_controller(
         group_names=group_names,
         max_ranks=max_ranks,
         total_steps=total_steps,
-        config=AdaLoRAControllerConfig(enabled=True) if config is None else config,
+        config=AdaLoRAControllerConfig() if config is None else config,
     )
 
 

@@ -27,7 +27,7 @@ def test_validation_rejects_missing_label():
     }
     bad = replace(plan, labels=bad_labels)
 
-    with pytest.raises(ValueError, match="identical PyTree structure"):
+    with pytest.raises(ValueError, match="non-None label"):
         rfft.validate_plan(bad)
 
 

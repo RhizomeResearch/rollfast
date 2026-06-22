@@ -12,13 +12,13 @@ def test_config_round_trips_are_deterministic():
     assert rfft.OptimizerConfig.from_dict(optimizer.to_dict()) == optimizer
 
     precision = rfft.PrecisionConfig(
-        compute_dtype=jnp.bfloat16,
+        expected_model_compute_dtype=jnp.bfloat16,
         moment_dtype=jnp.float32,
     )
     assert rfft.PrecisionConfig.from_dict(precision.to_dict()) == precision
 
-    sam = rfft.SAMConfig(rho=0.5, adaptive=True, eta=0.01, axis_name="data")
-    assert rfft.SAMConfig.from_dict(sam.to_dict()) == sam
+    asam = rfft.ASAMConfig(rho=0.5, eta=0.01, axis_name="data")
+    assert rfft.ASAMConfig.from_dict(asam.to_dict()) == asam
 
 
 def test_config_validation_rejects_invalid_values():
@@ -44,3 +44,4 @@ def test_public_import_surface_contains_core_builders():
     assert hasattr(rfft, "adamw_from_plan")
     assert hasattr(rfft, "make_update_step")
     assert hasattr(rfft, "make_sam_step")
+    assert hasattr(rfft, "ASAMConfig")

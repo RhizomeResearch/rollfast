@@ -741,8 +741,8 @@ def _build_grouped_hybrid_transform(
         tx = optax.MultiSteps(
             tx,
             every_k_schedule=accumulation.steps,
-            use_grad_mean=accumulation.reduction == "mean",
-            accumulator_dtype=accumulation.accumulator_dtype,
+            use_grad_mean=_multisteps_use_grad_mean(accumulation),
+            accumulator_dtype=accumulation.accumulate_dtype,
         )
     return tx
 
@@ -912,8 +912,8 @@ def _build_grouped_schedule_free_transform(
         tx = optax.MultiSteps(
             tx,
             every_k_schedule=accumulation.steps,
-            use_grad_mean=accumulation.reduction == "mean",
-            accumulator_dtype=accumulation.accumulator_dtype,
+            use_grad_mean=_multisteps_use_grad_mean(accumulation),
+            accumulator_dtype=accumulation.accumulate_dtype,
         )
     return tx
 
@@ -997,8 +997,8 @@ def _build_grouped_transform(
         tx = optax.MultiSteps(
             tx,
             every_k_schedule=accumulation.steps,
-            use_grad_mean=accumulation.reduction == "mean",
-            accumulator_dtype=accumulation.accumulator_dtype,
+            use_grad_mean=_multisteps_use_grad_mean(accumulation),
+            accumulator_dtype=accumulation.accumulate_dtype,
         )
     return tx
 
@@ -1124,6 +1124,10 @@ def _quantize_group_state(
         for keep_tag in keep_tags
         for term in group_terms
     )
+
+
+def _multisteps_use_grad_mean(accumulation: AccumulationConfig) -> bool:
+    return accumulation.normalization != "none"
 
 
 __all__ = (

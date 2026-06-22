@@ -17,10 +17,11 @@ ScheduleKind = Literal[
     "wsd",
     "linear",
     "polynomial",
+    "custom",
 ]
 StepCounter = Literal["optimizer", "micro"]
 NonFinitePolicy = Literal["skip", "none", "raise"]
-Reduction = Literal["mean", "sum"]
+Normalization = Literal["examples", "tokens", "pairs", "pixels", "custom", "none"]
 SAMNorm = Literal["global_l2"]
 OptimizerName = Literal[
     "adamw",
@@ -29,6 +30,12 @@ OptimizerName = Literal[
     "aurora_adam",
     "prism_adam",
     "kron_adam",
+]
+ProfileFidelity = Literal[
+    "safe_default",
+    "paper_exact",
+    "reference_implementation",
+    "experimental",
 ]
 
 
@@ -168,6 +175,18 @@ class OptimizerConfig:
 
 
 @dataclass(frozen=True)
+class OptimizerProfile:
+    """Declared exactness profile for an optimizer/controller method."""
+
+    id: str
+    method: str
+    fidelity: ProfileFidelity
+    reference_ids: tuple[str, ...]
+    config: Mapping[str, Any]
+    known_deviations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class GradientPolicy:
     """Gradient preprocessing and finite-value behavior."""
 
@@ -206,31 +225,37 @@ class AccumulationConfig:
     """Microbatch accumulation settings."""
 
     steps: int = 1
-    reduction: Reduction = "mean"
-    accumulator_dtype: Any = jnp.float32
-    step_counter: StepCounter = "optimizer"
+    normalization: Normalization = "examples"
+    remainder: Literal["error", "drop", "apply_with_true_normalizer"] = "error"
+    accumulate_dtype: Any = jnp.float32
+    reduce_after_accumulation: bool = True
+    finite_policy: Literal["discard_window", "error"] = "discard_window"
 
     def __post_init__(self) -> None:
         if self.steps <= 0:
             raise ValueError("steps must be positive.")
-        _canonical_dtype(self.accumulator_dtype)
+        _canonical_dtype(self.accumulate_dtype)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
             "steps": self.steps,
-            "reduction": self.reduction,
-            "accumulator_dtype": _dtype_name(self.accumulator_dtype),
-            "step_counter": self.step_counter,
+            "normalization": self.normalization,
+            "remainder": self.remainder,
+            "accumulate_dtype": _dtype_name(self.accumulate_dtype),
+            "reduce_after_accumulation": self.reduce_after_accumulation,
+            "finite_policy": self.finite_policy,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "AccumulationConfig":
         return cls(
             steps=data.get("steps", 1),
-            reduction=data.get("reduction", "mean"),
-            accumulator_dtype=_dtype_from_name(data.get("accumulator_dtype", "float32")),
-            step_counter=data.get("step_counter", "optimizer"),
+            normalization=data.get("normalization", "examples"),
+            remainder=data.get("remainder", "error"),
+            accumulate_dtype=_dtype_from_name(data.get("accumulate_dtype", "float32")),
+            reduce_after_accumulation=data.get("reduce_after_accumulation", True),
+            finite_policy=data.get("finite_policy", "discard_window"),
         )
 
 
@@ -238,36 +263,80 @@ class AccumulationConfig:
 class PrecisionConfig:
     """Mixed-precision optimizer-state policy."""
 
-    compute_dtype: Any = jnp.bfloat16
+    expected_model_compute_dtype: Any | None = None
+    gradient_dtype: Any = jnp.float32
+    accumulation_dtype: Any = jnp.float32
+    master_params: Literal["auto", "always", "never"] = "auto"
+    master_param_dtype: Any = jnp.float32
     moment_dtype: Any = jnp.float32
-    param_dtype: Any | None = None
-    loss_scale: float | None = None
+    preconditioner_dtype: Any = jnp.float32
+    update_compute_dtype: Any = jnp.float32
+    cast_back: Literal["nearest", "stochastic"] = "nearest"
+    loss_scale: Literal["none", "static", "dynamic"] = "none"
+    static_loss_scale: float = 2**15
+    growth_factor: float = 2.0
+    backoff_factor: float = 0.5
+    growth_interval: int = 2000
 
     def __post_init__(self) -> None:
-        _canonical_dtype(self.compute_dtype)
+        if self.expected_model_compute_dtype is not None:
+            _canonical_dtype(self.expected_model_compute_dtype)
+        _canonical_dtype(self.gradient_dtype)
+        _canonical_dtype(self.accumulation_dtype)
+        _canonical_dtype(self.master_param_dtype)
         _canonical_dtype(self.moment_dtype)
-        if self.param_dtype is not None:
-            _canonical_dtype(self.param_dtype)
-        if self.loss_scale is not None and self.loss_scale <= 0.0:
-            raise ValueError("loss_scale must be positive when provided.")
+        _canonical_dtype(self.preconditioner_dtype)
+        _canonical_dtype(self.update_compute_dtype)
+        if self.static_loss_scale <= 0.0:
+            raise ValueError("static_loss_scale must be positive.")
+        if self.growth_factor <= 1.0:
+            raise ValueError("growth_factor must be > 1.")
+        if not 0.0 < self.backoff_factor < 1.0:
+            raise ValueError("backoff_factor must satisfy 0 < value < 1.")
+        if self.growth_interval <= 0:
+            raise ValueError("growth_interval must be positive.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
-            "compute_dtype": _dtype_name(self.compute_dtype),
+            "expected_model_compute_dtype": None
+            if self.expected_model_compute_dtype is None
+            else _dtype_name(self.expected_model_compute_dtype),
+            "gradient_dtype": _dtype_name(self.gradient_dtype),
+            "accumulation_dtype": _dtype_name(self.accumulation_dtype),
+            "master_params": self.master_params,
+            "master_param_dtype": _dtype_name(self.master_param_dtype),
             "moment_dtype": _dtype_name(self.moment_dtype),
-            "param_dtype": None if self.param_dtype is None else _dtype_name(self.param_dtype),
+            "preconditioner_dtype": _dtype_name(self.preconditioner_dtype),
+            "update_compute_dtype": _dtype_name(self.update_compute_dtype),
+            "cast_back": self.cast_back,
             "loss_scale": self.loss_scale,
+            "static_loss_scale": self.static_loss_scale,
+            "growth_factor": self.growth_factor,
+            "backoff_factor": self.backoff_factor,
+            "growth_interval": self.growth_interval,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PrecisionConfig":
-        param_dtype = data.get("param_dtype")
+        expected = data.get("expected_model_compute_dtype")
         return cls(
-            compute_dtype=_dtype_from_name(data.get("compute_dtype", "bfloat16")),
+            expected_model_compute_dtype=None
+            if expected is None
+            else _dtype_from_name(expected),
+            gradient_dtype=_dtype_from_name(data.get("gradient_dtype", "float32")),
+            accumulation_dtype=_dtype_from_name(data.get("accumulation_dtype", "float32")),
+            master_params=data.get("master_params", "auto"),
+            master_param_dtype=_dtype_from_name(data.get("master_param_dtype", "float32")),
             moment_dtype=_dtype_from_name(data.get("moment_dtype", "float32")),
-            param_dtype=None if param_dtype is None else _dtype_from_name(param_dtype),
-            loss_scale=data.get("loss_scale"),
+            preconditioner_dtype=_dtype_from_name(data.get("preconditioner_dtype", "float32")),
+            update_compute_dtype=_dtype_from_name(data.get("update_compute_dtype", "float32")),
+            cast_back=data.get("cast_back", "nearest"),
+            loss_scale=data.get("loss_scale", "none"),
+            static_loss_scale=data.get("static_loss_scale", 2**15),
+            growth_factor=data.get("growth_factor", 2.0),
+            backoff_factor=data.get("backoff_factor", 0.5),
+            growth_interval=data.get("growth_interval", 2000),
         )
 
 
@@ -442,8 +511,6 @@ class SWAConfig:
 class SAMConfig:
     enabled: bool = False
     rho: float = 0.05
-    adaptive: bool = False
-    eta: float = 0.0
     norm: SAMNorm = "global_l2"
     eps: float = 1e-12
     perturb_bias: bool = True
@@ -453,20 +520,28 @@ class SAMConfig:
     def __post_init__(self) -> None:
         if self.rho <= 0.0:
             raise ValueError("SAM rho must be positive.")
-        if self.eta < 0.0:
-            raise ValueError("SAM eta must be non-negative.")
         if self.norm != "global_l2":
             raise ValueError("SAM currently supports only norm='global_l2'.")
         if self.eps <= 0.0:
             raise ValueError("SAM eps must be positive.")
+
+    @property
+    def adaptive(self) -> Literal[False]:
+        """Plain SAM is never adaptive; use ASAMConfig for adaptive SAM."""
+
+        return False
+
+    @property
+    def eta(self) -> float:
+        """Plain SAM has no ASAM eta term."""
+
+        return 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
             "enabled": self.enabled,
             "rho": self.rho,
-            "adaptive": self.adaptive,
-            "eta": self.eta,
             "norm": self.norm,
             "eps": self.eps,
             "perturb_bias": self.perturb_bias,
@@ -479,8 +554,6 @@ class SAMConfig:
         return cls(
             enabled=data.get("enabled", False),
             rho=data.get("rho", 0.05),
-            adaptive=data.get("adaptive", False),
-            eta=data.get("eta", 0.0),
             norm=data.get("norm", "global_l2"),
             eps=data.get("eps", 1e-12),
             perturb_bias=data.get("perturb_bias", True),
@@ -490,120 +563,275 @@ class SAMConfig:
 
 
 @dataclass(frozen=True)
-class AdaLoRAControllerConfig:
+class ASAMConfig:
     enabled: bool = False
-    init_rank: int = 12
-    target_rank: int | None = None
-    min_rank: int = 1
-    initial_warmup_fraction: float = 0.10
-    final_tuning_fraction: float = 0.10
-    allocation_interval: int | None = None
-    beta1: float = 0.85
-    beta2: float = 0.85
-    orthogonal_reg_weight: float = 0.5
-    score_eps: float = 1e-8
+    rho: float = 0.5
+    eta: float = 0.01
+    norm: SAMNorm = "global_l2"
+    eps: float = 1e-12
+    perturb_bias: bool = False
+    perturb_norm: bool = False
+    axis_name: str | tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        if self.init_rank < 1:
-            raise ValueError("AdaLoRA init_rank must be positive.")
-        if self.target_rank is not None and self.target_rank < 1:
-            raise ValueError("AdaLoRA target_rank must be positive when provided.")
-        if self.min_rank < 0:
-            raise ValueError("AdaLoRA min_rank must be non-negative.")
-        if self.target_rank is not None and self.target_rank < self.min_rank:
-            raise ValueError("AdaLoRA target_rank must be >= min_rank.")
-        if self.allocation_interval is not None and self.allocation_interval < 1:
-            raise ValueError("AdaLoRA allocation_interval must be positive.")
-        _check_fraction("initial_warmup_fraction", self.initial_warmup_fraction)
-        _check_fraction("final_tuning_fraction", self.final_tuning_fraction)
-        if self.initial_warmup_fraction + self.final_tuning_fraction > 1.0:
-            raise ValueError(
-                "AdaLoRA warmup and final tuning fractions must sum to at most 1."
-            )
-        if not 0.0 <= self.beta1 < 1.0:
-            raise ValueError("AdaLoRA beta1 must satisfy 0 <= beta1 < 1.")
-        if not 0.0 <= self.beta2 < 1.0:
-            raise ValueError("AdaLoRA beta2 must satisfy 0 <= beta2 < 1.")
-        if self.orthogonal_reg_weight < 0.0:
-            raise ValueError("AdaLoRA orthogonal_reg_weight must be non-negative.")
-        if self.score_eps <= 0.0:
-            raise ValueError("AdaLoRA score_eps must be positive.")
-
-    @classmethod
-    def compat(
-        cls,
-        *,
-        init_rank: int = 12,
-        target_rank: int = 8,
-        tinit: int = 0,
-        tfinal: int = 0,
-        delta_t: int = 1,
-        total_steps: int | None = None,
-        beta1: float = 0.85,
-        beta2: float = 0.85,
-        orthogonal_reg_weight: float = 0.5,
-    ) -> "AdaLoRAControllerConfig":
-        if total_steps is None:
-            initial_fraction = 0.0
-            final_fraction = 0.0
-        else:
-            if total_steps <= 0:
-                raise ValueError("total_steps must be positive when provided.")
-            initial_fraction = tinit / total_steps
-            final_fraction = tfinal / total_steps
-        return cls(
-            enabled=True,
-            init_rank=init_rank,
-            target_rank=target_rank,
-            initial_warmup_fraction=initial_fraction,
-            final_tuning_fraction=final_fraction,
-            allocation_interval=delta_t,
-            beta1=beta1,
-            beta2=beta2,
-            orthogonal_reg_weight=orthogonal_reg_weight,
-        )
-
-    def resolved_target_rank(self) -> int:
-        return self.init_rank if self.target_rank is None else self.target_rank
-
-    def resolved_interval(self, total_steps: int) -> int:
-        if total_steps <= 0:
-            raise ValueError("total_steps must be positive.")
-        if self.allocation_interval is not None:
-            return self.allocation_interval
-        return max(1, total_steps // 100)
+        if self.rho <= 0.0:
+            raise ValueError("ASAM rho must be positive.")
+        if self.eta < 0.0:
+            raise ValueError("ASAM eta must be non-negative.")
+        if self.norm != "global_l2":
+            raise ValueError("ASAM currently supports only norm='global_l2'.")
+        if self.eps <= 0.0:
+            raise ValueError("ASAM eps must be positive.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
             "enabled": self.enabled,
-            "init_rank": self.init_rank,
-            "target_rank": self.target_rank,
-            "min_rank": self.min_rank,
-            "initial_warmup_fraction": self.initial_warmup_fraction,
-            "final_tuning_fraction": self.final_tuning_fraction,
+            "rho": self.rho,
+            "eta": self.eta,
+            "norm": self.norm,
+            "eps": self.eps,
+            "perturb_bias": self.perturb_bias,
+            "perturb_norm": self.perturb_norm,
+            "axis_name": self.axis_name,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ASAMConfig":
+        return cls(
+            enabled=data.get("enabled", False),
+            rho=data.get("rho", 0.5),
+            eta=data.get("eta", 0.01),
+            norm=data.get("norm", "global_l2"),
+            eps=data.get("eps", 1e-12),
+            perturb_bias=data.get("perturb_bias", False),
+            perturb_norm=data.get("perturb_norm", False),
+            axis_name=data.get("axis_name"),
+        )
+
+
+@dataclass(frozen=True)
+class AdaLoRAControllerConfig:
+    initial_budget: int = 12
+    target_budget: int = 8
+    t_init: int = 0
+    t_final: int = 0
+    allocation_interval: int = 1
+    min_rank: int = 1
+    beta_sensitivity: float = 0.85
+    beta_uncertainty: float = 0.85
+    orthogonal_reg_weight: float = 0.5
+    score_eps: float = 1e-8
+    final_support_frozen: bool = True
+    tie_break: Literal["logical_id"] = "logical_id"
+
+    def __post_init__(self) -> None:
+        if self.initial_budget < 1:
+            raise ValueError("AdaLoRA initial_budget must be positive.")
+        if self.target_budget < 1:
+            raise ValueError("AdaLoRA target_budget must be positive.")
+        if self.t_init < 0 or self.t_final < 0:
+            raise ValueError("AdaLoRA t_init and t_final must be non-negative.")
+        if self.allocation_interval < 1:
+            raise ValueError("AdaLoRA allocation_interval must be positive.")
+        if self.min_rank < 0:
+            raise ValueError("AdaLoRA min_rank must be non-negative.")
+        if not 0.0 <= self.beta_sensitivity < 1.0:
+            raise ValueError("AdaLoRA beta_sensitivity must satisfy 0 <= beta < 1.")
+        if not 0.0 <= self.beta_uncertainty < 1.0:
+            raise ValueError("AdaLoRA beta_uncertainty must satisfy 0 <= beta < 1.")
+        if self.orthogonal_reg_weight < 0.0:
+            raise ValueError("AdaLoRA orthogonal_reg_weight must be non-negative.")
+        if self.score_eps <= 0.0:
+            raise ValueError("AdaLoRA score_eps must be positive.")
+
+    def resolved_interval(self, total_steps: int) -> int:
+        del total_steps
+        return self.allocation_interval
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "initial_budget": self.initial_budget,
+            "target_budget": self.target_budget,
+            "t_init": self.t_init,
+            "t_final": self.t_final,
             "allocation_interval": self.allocation_interval,
-            "beta1": self.beta1,
-            "beta2": self.beta2,
+            "min_rank": self.min_rank,
+            "beta_sensitivity": self.beta_sensitivity,
+            "beta_uncertainty": self.beta_uncertainty,
             "orthogonal_reg_weight": self.orthogonal_reg_weight,
             "score_eps": self.score_eps,
+            "final_support_frozen": self.final_support_frozen,
+            "tie_break": self.tie_break,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "AdaLoRAControllerConfig":
         return cls(
-            enabled=data.get("enabled", False),
-            init_rank=data.get("init_rank", 12),
-            target_rank=data.get("target_rank"),
+            initial_budget=data.get("initial_budget", 12),
+            target_budget=data.get("target_budget", 8),
+            t_init=data.get("t_init", 0),
+            t_final=data.get("t_final", 0),
+            allocation_interval=data.get("allocation_interval", 1),
             min_rank=data.get("min_rank", 1),
-            initial_warmup_fraction=data.get("initial_warmup_fraction", 0.10),
-            final_tuning_fraction=data.get("final_tuning_fraction", 0.10),
-            allocation_interval=data.get("allocation_interval"),
-            beta1=data.get("beta1", 0.85),
-            beta2=data.get("beta2", 0.85),
+            beta_sensitivity=data.get("beta_sensitivity", 0.85),
+            beta_uncertainty=data.get("beta_uncertainty", 0.85),
             orthogonal_reg_weight=data.get("orthogonal_reg_weight", 0.5),
             score_eps=data.get("score_eps", 1e-8),
+            final_support_frozen=data.get("final_support_frozen", True),
+            tie_break=data.get("tie_break", "logical_id"),
         )
+
+
+@dataclass(frozen=True)
+class LossBundle:
+    """Summed loss contract for exact accumulation."""
+
+    loss_sum: Any
+    normalizer: Any
+    metrics_sums: Mapping[str, Any]
+    metric_normalizers: Mapping[str, Any]
+    new_model_state: Any | None
+    aux_sums: Mapping[str, Any] = field(default_factory=dict)
+    aux_normalizers: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AuxLossRule:
+    """How Rollfast combines one Equimo-provided auxiliary loss."""
+
+    name: str
+    coefficient: float | ScheduleConfig
+    normalization: Literal["raw", "examples", "tokens", "parameters"]
+    counter: Literal["optimizer_step", "schedule_step"] = "optimizer_step"
+
+
+@dataclass(frozen=True)
+class NormalizedLeaf:
+    """Canonical Rollfast view of one trainable plan leaf."""
+
+    logical_id: str
+    physical_path: tuple[str | int, ...]
+    alias_group: str | None
+    role: str
+    depth: int | None
+    tags: frozenset[str]
+    shape: tuple[int, ...]
+    dtype: str
+    layout: str | None
+    sharding_fingerprint: str | None
+    source_label: str
+    lr_multiplier: float
+    weight_decay: bool
+
+
+@dataclass(frozen=True)
+class CompiledPolicyTrees:
+    """Factorized per-leaf optimization policies."""
+
+    optimizer_family: Any
+    lr_multiplier: Any
+    decay_coefficient: Any
+    state_precision: Any
+    clip_group: Any
+    logical_ids: Any
+
+
+@dataclass(frozen=True)
+class AlgorithmSemantics:
+    """Ownership declaration for optimizer LR and decay application."""
+
+    lr_application: Literal["inside", "post_transform", "tree_aware"]
+    weight_decay_owner: Literal["none", "algorithm", "external"]
+    supports_leaf_lr_multiplier: bool
+    supports_leaf_decay: bool
+
+
+@dataclass(frozen=True)
+class LoRAPlusConfig:
+    """LoRA+ learning-rate ratio policy."""
+
+    ratio_B_over_A: float = 16.0
+    anchor: Literal["A", "B", "geometric_mean"] = "B"
+    apply_same_schedule_shape: bool = True
+    weight_decay_A: float = 0.0
+    weight_decay_B: float = 0.0
+
+
+@dataclass(frozen=True)
+class ShardingPolicy:
+    """Optimizer-state sharding and placement contract."""
+
+    mesh_axes: tuple[str, ...] = ()
+    data_axes: tuple[str, ...] = ("data",)
+    parameter_axes: tuple[str, ...] = ()
+    state_placement: Literal[
+        "follow_param",
+        "replicate_small_follow_large",
+        "explicit",
+    ] = "follow_param"
+    small_state_threshold: int = 4096
+    allow_host_materialization: bool = False
+
+
+@dataclass(frozen=True)
+class AccumulationState:
+    grad_numerator: Any
+    normalizer: Any
+    metric_sums: Any
+    metric_normalizers: Any
+    microsteps_in_window: Any
+    all_finite: Any
+    pending_model_state: Any | None
+
+
+@dataclass(frozen=True)
+class StepCounters:
+    microstep: Any
+    attempted_update: Any
+    successful_update: Any
+    schedule_step: Any
+    rank_step: Any
+    average_step: Any
+    loss_scale_growth_step: Any
+
+
+@dataclass(frozen=True)
+class RNGStreams:
+    forward: Any
+    sam: Any
+    stochastic_rounding: Any
+    quantization: Any
+    controller: Any
+
+
+@dataclass(frozen=True)
+class FineTuneStepState:
+    optimizer_state: Any
+    model_state: Any | None
+    master_params: Any | None
+    accumulation: AccumulationState
+    loss_scale: Any | None
+    ema_state: Any | None
+    swa_state: Any | None
+    adalora_state: Any | None
+    projection_state: Any | None
+    schedule_free_state: Any | None
+    counters: StepCounters
+    rng: RNGStreams
+
+
+@dataclass(frozen=True)
+class GaLoreConfig:
+    """GaLore optimizer projection configuration."""
+
+    rank: int
+    update_interval: int = 200
+    scale: float = 0.25
+    projection_type: Literal["std", "reverse_std", "right", "left", "full"] = "std"
+    target: Literal["matrix_only"] = "matrix_only"
+    fallback_optimizer: OptimizerName = "adamw"
 
 
 @dataclass(frozen=True)
@@ -785,19 +1013,33 @@ def _dtype_from_name(name: str) -> jnp.dtype:
 __all__ = (
     "SCHEMA_VERSION",
     "AccumulationConfig",
+    "AccumulationState",
     "AdaLoRAControllerConfig",
+    "AlgorithmSemantics",
+    "ASAMConfig",
+    "AuxLossRule",
     "CompiledGroup",
+    "CompiledPolicyTrees",
     "EMAConfig",
+    "FineTuneStepState",
+    "GaLoreConfig",
     "GradientPolicy",
     "GroupRule",
+    "LoRAPlusConfig",
+    "LossBundle",
+    "NormalizedLeaf",
     "OptimizerBundle",
     "OptimizerConfig",
+    "OptimizerProfile",
     "OptimizerReport",
     "PlanGroup",
     "PrecisionConfig",
+    "RNGStreams",
     "SAMConfig",
     "SWAConfig",
     "ScheduleConfig",
     "SchedulePoint",
+    "ShardingPolicy",
+    "StepCounters",
     "StateQuantizationConfig",
 )

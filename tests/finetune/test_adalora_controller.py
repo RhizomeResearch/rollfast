@@ -10,11 +10,10 @@ def test_adalora_budget_is_monotonic_and_reaches_target():
         {"adapter_a": 4, "adapter_b": 4},
         total_steps=10,
         config=rfft.AdaLoRAControllerConfig(
-            enabled=True,
-            init_rank=4,
-            target_rank=2,
-            initial_warmup_fraction=0.2,
-            final_tuning_fraction=0.2,
+            initial_budget=8,
+            target_budget=4,
+            t_init=2,
+            t_final=2,
             allocation_interval=1,
         ),
     )
@@ -50,11 +49,10 @@ def test_adalora_skipped_update_does_not_advance_controller():
         {"adapter": 4},
         total_steps=2,
         config=rfft.AdaLoRAControllerConfig(
-            enabled=True,
-            init_rank=4,
-            target_rank=2,
-            initial_warmup_fraction=0.0,
-            final_tuning_fraction=0.0,
+            initial_budget=4,
+            target_budget=2,
+            t_init=0,
+            t_final=0,
             allocation_interval=1,
         ),
     )
@@ -74,11 +72,10 @@ def test_adalora_update_is_jittable_and_mask_shape_is_static():
         {"adapter_a": 4, "adapter_b": 3},
         total_steps=10,
         config=rfft.AdaLoRAControllerConfig(
-            enabled=True,
-            init_rank=4,
-            target_rank=2,
-            initial_warmup_fraction=0.0,
-            final_tuning_fraction=0.0,
+            initial_budget=7,
+            target_budget=4,
+            t_init=0,
+            t_final=0,
             allocation_interval=1,
         ),
     )
@@ -95,18 +92,17 @@ def test_adalora_update_is_jittable_and_mask_shape_is_static():
 
 
 def test_adalora_controller_config_round_trip_and_validation():
-    config = rfft.AdaLoRAControllerConfig.compat(
-        init_rank=12,
-        target_rank=8,
-        tinit=2,
-        tfinal=3,
-        delta_t=4,
-        total_steps=100,
+    config = rfft.AdaLoRAControllerConfig(
+        initial_budget=12,
+        target_budget=8,
+        t_init=2,
+        t_final=3,
+        allocation_interval=4,
     )
 
     assert rfft.AdaLoRAControllerConfig.from_dict(config.to_dict()) == config
-    assert config.initial_warmup_fraction == pytest.approx(0.02)
-    assert config.final_tuning_fraction == pytest.approx(0.03)
+    assert config.t_init == 2
+    assert config.t_final == 3
     assert config.allocation_interval == 4
-    with pytest.raises(ValueError, match="target_rank"):
-        rfft.AdaLoRAControllerConfig(target_rank=0)
+    with pytest.raises(ValueError, match="target_budget"):
+        rfft.AdaLoRAControllerConfig(target_budget=0)

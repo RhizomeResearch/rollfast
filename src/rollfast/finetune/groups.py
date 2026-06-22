@@ -130,7 +130,7 @@ def _resolve_optimizer(
 def _is_lora_b_group(group: PlanGroup) -> bool:
     return (
         group.label.startswith("lora_B")
-        or "lora.B" in group.tags
+        or "lora.factor_B" in group.tags
         or "lora_b" in group.tags
     )
 

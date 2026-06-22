@@ -144,8 +144,8 @@ def test_reconfigure_preserves_shared_head_moments_and_initializes_backbone():
     )
     assert any("key:head/key:w" in path for path in migration.preserved_state_leaves)
     assert any("key:blocks/idx:0/key:w" in path for path in migration.initialized_state_leaves)
-    assert "key:head/key:w" in migration.preserved_param_leaves
-    assert "key:blocks/idx:0/key:w" in migration.initialized_param_leaves
+    assert "logical/head.w" in migration.preserved_param_leaves
+    assert "logical/blocks.0.w" in migration.initialized_param_leaves
     assert migration.schedule_counter_behavior.startswith("initialized count")
     assert migration.new_state_bytes >= migration.old_state_bytes
 
@@ -287,7 +287,7 @@ def test_reconfigure_preserves_kron_preconditioners_across_group_relabel():
         "attr:Qs_preconditioners" in path
         for path in migration.preserved_state_leaves
     )
-    assert "key:blocks/idx:0/key:w" in migration.changed_group_leaves
+    assert "logical/blocks.0.w" in migration.changed_group_leaves
 
 
 def test_reconfigure_rejects_incompatible_shared_parameter_shape():

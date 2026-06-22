@@ -12,7 +12,7 @@ import optax
 from rollfast.optim.sam import add_perturbation, global_l2_norm, sam_perturbation
 
 from ._protocols import FineTunePlanProtocol
-from .config import OptimizerBundle, SAMConfig
+from .config import ASAMConfig, OptimizerBundle, SAMConfig
 
 
 class SAMStepInfo(NamedTuple):
@@ -64,7 +64,7 @@ def make_sam_step(
     *,
     plan: FineTunePlanProtocol,
     base_optimizer: OptimizerBundle,
-    config: SAMConfig | None = None,
+    config: SAMConfig | ASAMConfig | None = None,
     loss_fn: Callable[..., Any],
     has_aux: bool = False,
     microbatch_axis: int | None = None,
@@ -78,6 +78,8 @@ def make_sam_step(
     """
 
     config = SAMConfig(enabled=True) if config is None else config
+    adaptive = isinstance(config, ASAMConfig)
+    eta = config.eta if adaptive else 0.0
     if base_optimizer.accumulation_config.steps != 1:
         raise ValueError(
             "SAM/ASAM steps require a base optimizer with accumulation_steps=1; "
@@ -114,8 +116,8 @@ def make_sam_step(
             grads,
             params=trainable,
             rho=config.rho,
-            adaptive=config.adaptive,
-            eta=config.eta,
+            adaptive=adaptive,
+            eta=eta,
             eps=config.eps,
             mask=mask,
             axis_name=config.axis_name,
@@ -277,11 +279,12 @@ def _tree_scale(tree: Any, scale: float) -> Any:
 
 def sam_cost_report(
     plan: FineTunePlanProtocol,
-    config: SAMConfig | None = None,
+    config: SAMConfig | ASAMConfig | None = None,
 ) -> dict[str, Any]:
     """Return static cost metadata for a SAM/ASAM fine-tuning step."""
 
     config = SAMConfig(enabled=True) if config is None else config
+    adaptive = isinstance(config, ASAMConfig)
     mask = _sam_perturb_mask(plan, config)
     perturbation_bytes = 0
     for param, include in zip(
@@ -292,12 +295,12 @@ def sam_cost_report(
         if param is not None and include:
             perturbation_bytes += int(param.size * param.dtype.itemsize)
     return {
-        "method": "ASAM" if config.adaptive else "SAM",
+        "method": "ASAM" if adaptive else "SAM",
         "forward_backward_evaluations": 2,
         "perturbation_bytes": perturbation_bytes,
         "rho": config.rho,
-        "adaptive": config.adaptive,
-        "eta": config.eta,
+        "adaptive": adaptive,
+        "eta": config.eta if adaptive else 0.0,
         "norm": config.norm,
     }
 
@@ -311,7 +314,7 @@ def _split_value_aux(value: Any, *, has_aux: bool) -> tuple[Any, Any | None]:
 
 def _sam_perturb_mask(
     plan: FineTunePlanProtocol,
-    config: SAMConfig,
+    config: SAMConfig | ASAMConfig,
 ) -> Any:
     group_specs = getattr(plan, "group_specs", {})
     return jax.tree.map(
@@ -325,7 +328,7 @@ def _sam_perturb_mask(
     )
 
 
-def _perturb_label(label: str, group: Any, config: SAMConfig) -> bool:
+def _perturb_label(label: str, group: Any, config: SAMConfig | ASAMConfig) -> bool:
     terms = {label.lower()}
     if group is not None:
         terms.add(str(getattr(group, "role", "")).lower())

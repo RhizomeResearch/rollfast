@@ -29,12 +29,19 @@ class FineTunePlanProtocol(Protocol):
     """
 
     trainable: PyTree
+    frozen: PyTree
     labels: PyTree
     group_specs: Mapping[str, GroupSpecProtocol]
     trainable_mask: PyTree
+    param_info: PyTree
+    identities: PyTree
+    model_state: Any | None
+    state_policy: Any
+    aux_losses: tuple[Any, ...]
+    lineage: Any
     report: Any
 
-    def combine(self, trainable: PyTree | None = None) -> Any: ...
+    def combine(self, trainable: PyTree) -> Any: ...
 
 
 __all__ = ("FineTunePlanProtocol", "GroupSpecProtocol", "PyTree")

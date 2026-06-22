@@ -260,29 +260,39 @@ def _structured_key(tokens: tuple[str, ...]) -> tuple[str, tuple[str, ...]] | No
 
 
 def _param_records(plan: FineTunePlanProtocol) -> dict[tuple[str, ...], dict[str, Any]]:
-    trainable = {
-        _path_tokens(path): leaf
-        for path, leaf in jax.tree_util.tree_flatten_with_path(
-            plan.trainable,
-            is_leaf=lambda x: x is None,
-        )[0]
-        if leaf is not None
-    }
-    labels = {
+    trainable_paths = jax.tree_util.tree_flatten_with_path(
+        plan.trainable,
+        is_leaf=lambda x: x is None,
+    )[0]
+    labels_by_path = {
         _path_tokens(path): label
         for path, label in jax.tree_util.tree_flatten_with_path(
             plan.labels,
             is_leaf=lambda x: x is None,
         )[0]
     }
-    return {
-        path: {
+    identities_by_path = {
+        _path_tokens(path): identity
+        for path, identity in jax.tree_util.tree_flatten_with_path(
+            plan.identities,
+            is_leaf=lambda x: x is None,
+        )[0]
+    }
+    records: dict[tuple[str, ...], dict[str, Any]] = {}
+    for path, leaf in trainable_paths:
+        if leaf is None:
+            continue
+        physical = _path_tokens(path)
+        identity = identities_by_path.get(physical)
+        logical_id = getattr(identity, "logical_id", None)
+        key = ("logical", str(logical_id)) if logical_id else physical
+        records[key] = {
             "shape": tuple(leaf.shape),
             "dtype": leaf.dtype,
-            "label": labels.get(path),
+            "label": labels_by_path.get(physical),
+            "physical_path": physical,
         }
-        for path, leaf in trainable.items()
-    }
+    return records
 
 
 def _param_report(
