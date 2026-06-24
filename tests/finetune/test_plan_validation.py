@@ -170,4 +170,6 @@ def test_fingerprint_changes_when_identity_sharding_changes():
         },
     )
 
-    assert rfft.validate_plan(plan_a).fingerprint != rfft.validate_plan(plan_b).fingerprint
+    assert (
+        rfft.validate_plan(plan_a).fingerprint != rfft.validate_plan(plan_b).fingerprint
+    )

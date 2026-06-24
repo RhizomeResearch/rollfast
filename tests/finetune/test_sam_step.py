@@ -53,7 +53,9 @@ def test_make_sam_step_matches_manual_two_pass_update():
     )
     config = rfft.SAMConfig(rho=0.05)
     state = bundle.init(plan.trainable)
-    value_and_grad = jax.value_and_grad(lambda trainable: _loss(plan.combine(trainable)))
+    value_and_grad = jax.value_and_grad(
+        lambda trainable: _loss(plan.combine(trainable))
+    )
     first_loss, grads = value_and_grad(plan.trainable)
     perturbation, perturbation_norm = sam_perturbation(
         grads,

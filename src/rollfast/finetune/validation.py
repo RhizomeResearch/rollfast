@@ -38,8 +38,12 @@ def validate_plan(
     """Validate a structural fine-tuning plan and normalize its groups."""
 
     _require_attrs(plan, ("trainable", "frozen", "labels", "group_specs", "identities"))
-    _check_treedef_alignment(plan.trainable, plan.frozen, "plan.trainable", "plan.frozen")
-    _check_treedef_alignment(plan.trainable, plan.labels, "plan.trainable", "plan.labels")
+    _check_treedef_alignment(
+        plan.trainable, plan.frozen, "plan.trainable", "plan.frozen"
+    )
+    _check_treedef_alignment(
+        plan.trainable, plan.labels, "plan.trainable", "plan.labels"
+    )
     _check_treedef_alignment(
         plan.trainable,
         plan.identities,
@@ -96,7 +100,9 @@ def validate_plan(
         if label not in raw_groups:
             raise ValueError(f"label {label!r} is missing from plan.group_specs.")
         if identity is None:
-            raise ValueError("every trainable array leaf must carry a logical identity.")
+            raise ValueError(
+                "every trainable array leaf must carry a logical identity."
+            )
 
         arr = jnp.asarray(leaf)
         stats = labels_seen.setdefault(label, {"params": 0, "bytes": 0, "leaves": 0})
@@ -156,9 +162,7 @@ def plan_fingerprint(
     leaf_records = []
     label_leaves = _tree_leaves(labels)
     identity_leaves = (
-        [None] * len(label_leaves)
-        if identities is None
-        else _tree_leaves(identities)
+        [None] * len(label_leaves) if identities is None else _tree_leaves(identities)
     )
     for index, (path, leaf) in enumerate(_tree_leaves_with_path(trainable)):
         label = label_leaves[index]
@@ -219,7 +223,9 @@ def _require_attrs(obj: Any, attrs: tuple[str, ...]) -> None:
         raise TypeError(f"fine-tuning plan is missing attributes: {missing!r}.")
 
 
-def _check_treedef_alignment(left: Any, right: Any, left_name: str, right_name: str) -> None:
+def _check_treedef_alignment(
+    left: Any, right: Any, left_name: str, right_name: str
+) -> None:
     left_def = jtu.tree_structure(left, is_leaf=_is_none_leaf)
     right_def = jtu.tree_structure(right, is_leaf=_is_none_leaf)
     if left_def != right_def:

@@ -94,7 +94,9 @@ def galore_adamw(
     if min_matrix_size < 0:
         raise ValueError("GaLore min_matrix_size must be non-negative.")
     if projection not in {"auto", "left", "right", "two_sided"}:
-        raise ValueError("GaLore projection must be 'auto', 'left', 'right', or 'two_sided'.")
+        raise ValueError(
+            "GaLore projection must be 'auto', 'left', 'right', or 'two_sided'."
+        )
     if basis_method != "svd":
         raise NotImplementedError("GaLore currently supports basis_method='svd'.")
     if state_on_basis_refresh not in {"reuse_coordinates", "reset", "transport"}:
@@ -181,8 +183,16 @@ def projected_state_nbytes(
     rows, cols = shape
     rank = min(rank, rows, cols)
     orientation = _resolve_orientation(rows, cols, projection)
-    basis_items = (rows + cols) * rank if orientation == "two_sided" else (rows if orientation == "left" else cols) * rank
-    coord_items = rank * rank if orientation == "two_sided" else (rank * cols if orientation == "left" else rows * rank)
+    basis_items = (
+        (rows + cols) * rank
+        if orientation == "two_sided"
+        else (rows if orientation == "left" else cols) * rank
+    )
+    coord_items = (
+        rank * rank
+        if orientation == "two_sided"
+        else (rank * cols if orientation == "left" else rows * rank)
+    )
     return int(basis_items * jnp.dtype(basis_dtype).itemsize) + int(
         coord_items * jnp.dtype(moment_dtype).itemsize * 2
     )
@@ -202,7 +212,9 @@ def _init_leaf_state(
     if not _eligible(param, min_matrix_size=min_matrix_size):
         zeros = jnp.zeros_like(param, dtype=mu_dtype)
         empty = jnp.zeros((0,), dtype=basis_dtype)
-        return GaLoreLeafState(empty, empty, zeros, zeros, "full", False, tuple(param.shape))
+        return GaLoreLeafState(
+            empty, empty, zeros, zeros, "full", False, tuple(param.shape)
+        )
     rows, cols = param.shape
     rank = min(rank, rows, cols)
     orientation = _resolve_orientation(rows, cols, projection)
@@ -375,18 +387,30 @@ def _transport_projected_moments(
     should_refresh,
 ) -> tuple[jax.Array, jax.Array]:
     if state.orientation == "left":
-        overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(jnp.float32)
+        overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
+            jnp.float32
+        )
         mu = overlap @ state.mu.astype(jnp.float32)
         nu = jnp.square(overlap) @ state.nu.astype(jnp.float32)
     elif state.orientation == "right":
-        overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(jnp.float32)
+        overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
+            jnp.float32
+        )
         mu = state.mu.astype(jnp.float32) @ overlap
         nu = state.nu.astype(jnp.float32) @ jnp.square(overlap)
     else:
-        left_overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(jnp.float32)
-        right_overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(jnp.float32)
+        left_overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
+            jnp.float32
+        )
+        right_overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
+            jnp.float32
+        )
         mu = left_overlap @ state.mu.astype(jnp.float32) @ right_overlap
-        nu = jnp.square(left_overlap) @ state.nu.astype(jnp.float32) @ jnp.square(right_overlap)
+        nu = (
+            jnp.square(left_overlap)
+            @ state.nu.astype(jnp.float32)
+            @ jnp.square(right_overlap)
+        )
     return (
         jnp.where(should_refresh, mu.astype(state.mu.dtype), state.mu),
         jnp.where(should_refresh, nu.astype(state.nu.dtype), state.nu),
@@ -445,7 +469,11 @@ def _reconstruct(
 
 
 def _eligible(param: Any, *, min_matrix_size: int) -> bool:
-    return hasattr(param, "shape") and len(param.shape) == 2 and _numel(param.shape) >= min_matrix_size
+    return (
+        hasattr(param, "shape")
+        and len(param.shape) == 2
+        and _numel(param.shape) >= min_matrix_size
+    )
 
 
 def _resolve_orientation(

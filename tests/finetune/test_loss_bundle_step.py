@@ -257,7 +257,9 @@ def test_stateful_loss_bundle_accumulation_discards_nonfinite_window():
     assert not bool(info.all_finite)
     assert accumulation_state.microsteps_in_window == 0
     assert jnp.allclose(params["w"], plan.trainable["w"])
-    for left, right in zip(jax.tree.leaves(state), jax.tree.leaves(old_state), strict=True):
+    for left, right in zip(
+        jax.tree.leaves(state), jax.tree.leaves(old_state), strict=True
+    ):
         if hasattr(left, "dtype"):
             assert jnp.allclose(left, right)
 

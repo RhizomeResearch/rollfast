@@ -94,9 +94,9 @@ def test_adalora_skipped_update_does_not_advance_controller():
     skipped = controller.update(state, scores, applied=False)
     applied = controller.update(state, scores, applied=True)
 
-    assert int(skipped.step) == 0
+    assert int(skipped.last_allocation_step) == 0
     assert int(skipped.current_budget) == int(state.current_budget)
-    assert int(applied.step) == 1
+    assert int(applied.last_allocation_step) == 1
     assert int(applied.current_budget) < int(state.current_budget)
 
 
@@ -168,7 +168,7 @@ def test_adalora_update_is_jittable_and_mask_shape_is_static():
     state = update(state, scores)
     pattern = controller.rank_pattern(state)
 
-    assert state.rank_mask.shape == (2, 4)
+    assert state.current_support.shape == (2, 4)
     assert pattern["adapter_b"].shape == (3,)
     assert sum(int(rank) for rank in state.ranks) == int(state.current_budget)
 

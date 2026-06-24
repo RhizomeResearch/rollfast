@@ -23,7 +23,9 @@ def _ones_like_trainable(tree):
 def _apollo_leaf_states(state):
     return [
         leaf
-        for leaf in jax.tree.leaves(state, is_leaf=lambda x: isinstance(x, APOLLOLeafState))
+        for leaf in jax.tree.leaves(
+            state, is_leaf=lambda x: isinstance(x, APOLLOLeafState)
+        )
         if isinstance(leaf, APOLLOLeafState)
     ]
 
@@ -115,8 +117,10 @@ def test_apollo_manifest_records_projection_contract():
     assert method_config["normalization_axes"] == "projected_l2_per_channel_or_tensor"
     assert method_config["profile_fidelity"] == "experimental"
     assert method_config["reference_validated"] is False
-    assert method_config["reference_validation"] == "pending_author_implementation_compatibility_test"
-    assert any("reference implementation" in warning for warning in bundle.report.warnings)
+    assert method_config["reference_validation"] == "not_validated_against_reference"
+    assert any(
+        "reference implementation" in warning for warning in bundle.report.warnings
+    )
 
 
 def test_apollo_default_eps_matches_author_profile():
@@ -271,9 +275,6 @@ def test_apollo_first_update_matches_author_step_equation():
     )
     scaled_grad = grads["w"] * factors[:, None] * jnp.sqrt(scale)
     step_size = learning_rate * jnp.sqrt(1.0 - b2) / (1.0 - b1)
-    expected = (
-        -step_size * scaled_grad
-        - learning_rate * weight_decay * params["w"]
-    )
+    expected = -step_size * scaled_grad - learning_rate * weight_decay * params["w"]
 
     assert jnp.allclose(updates["w"], expected, rtol=1e-5, atol=1e-6)

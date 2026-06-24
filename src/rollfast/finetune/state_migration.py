@@ -71,19 +71,13 @@ class OptimizerMigrationReport:
         """Return the 2026 state-transfer report view for this migration."""
 
         reset_ids = (
-            self.preserved_param_leaves
-            if self.state_policy == "reset_all"
-            else ()
+            self.preserved_param_leaves if self.state_policy == "reset_all" else ()
         )
         preserved_ids = (
-            ()
-            if self.state_policy == "reset_all"
-            else self.preserved_param_leaves
+            () if self.state_policy == "reset_all" else self.preserved_param_leaves
         )
         converted_ids = (
-            ()
-            if self.state_policy == "reset_all"
-            else self.changed_group_leaves
+            () if self.state_policy == "reset_all" else self.changed_group_leaves
         )
         warnings = _transfer_warnings(self, reset_ids, converted_ids)
         exact = (

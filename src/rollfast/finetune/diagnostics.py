@@ -14,7 +14,12 @@ from rollfast.optim.adam8 import (
     quantized_nbytes,
 )
 
-from .config import CompiledGroup, OptimizerBundle, SCHEMA_VERSION, StateQuantizationConfig
+from .config import (
+    CompiledGroup,
+    OptimizerBundle,
+    SCHEMA_VERSION,
+    StateQuantizationConfig,
+)
 from .validation import validate_plan
 
 
@@ -207,10 +212,7 @@ def estimate_optimizer_state_memory(
     by_category: dict[str, int] = {}
     by_group: dict[str, int] = {}
     by_placement: dict[str, int] = {}
-    leaves = [
-        _with_estimated_placement(leaf, bundle)
-        for leaf in leaves
-    ]
+    leaves = [_with_estimated_placement(leaf, bundle) for leaf in leaves]
     for leaf in leaves:
         by_category[leaf.category] = by_category.get(leaf.category, 0) + leaf.bytes
         by_placement[leaf.placement] = by_placement.get(leaf.placement, 0) + leaf.bytes
@@ -395,11 +397,7 @@ def _quantize_group_state(
     keep_tags = {tag.lower() for tag in state_quantization.keep_fp32_tags}
     group_terms = {tag.lower() for tag in group.tags}
     group_terms.update((group.source_label.lower(), group.role.lower()))
-    return not any(
-        keep_tag in term
-        for keep_tag in keep_tags
-        for term in group_terms
-    )
+    return not any(keep_tag in term for keep_tag in keep_tags for term in group_terms)
 
 
 def _estimate_moment_leaves(

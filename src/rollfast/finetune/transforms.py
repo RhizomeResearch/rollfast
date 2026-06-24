@@ -39,7 +39,9 @@ def clip_by_global_norm(
             partition_axis_names=partition_axis_names,
             replicated_axis_names=replicated_axis_names,
         )
-        scale = jnp.minimum(1.0, jnp.asarray(max_norm, dtype=jnp.float32) / (norm + 1e-6))
+        scale = jnp.minimum(
+            1.0, jnp.asarray(max_norm, dtype=jnp.float32) / (norm + 1e-6)
+        )
         clipped = jax.tree.map(
             lambda leaf: _scale_leaf(leaf, scale),
             updates,

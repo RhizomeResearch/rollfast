@@ -98,7 +98,9 @@ def test_state_checkpoint_rejects_mismatched_model_checkpoint_id():
         model_checkpoint_id="model-step-1",
     )
 
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="model checkpoint mismatch"):
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError, match="model checkpoint mismatch"
+    ):
         rfft.restore_state_checkpoint(
             bundle,
             checkpoint,
@@ -151,7 +153,9 @@ def test_state_checkpoint_rejects_mismatched_logical_id_table_hash():
         metadata=checkpoint.metadata,
     )
 
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="logical-ID table mismatch"):
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError, match="logical-ID table mismatch"
+    ):
         rfft.restore_state_checkpoint(
             bundle,
             incompatible,
@@ -189,7 +193,9 @@ def test_state_checkpoint_rejects_mismatched_quantization_metadata():
         metadata=checkpoint.metadata,
     )
 
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="quantization metadata mismatch"):
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError, match="quantization metadata mismatch"
+    ):
         rfft.restore_state_checkpoint(
             bundle,
             incompatible,
@@ -326,13 +332,17 @@ def test_schedule_free_checkpoint_rejects_missing_schedule_free_state():
         metadata=checkpoint.metadata,
     )
 
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="schedule-free optimizer state"):
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError, match="schedule-free optimizer state"
+    ):
         rfft.restore_state_checkpoint(
             bundle,
             missing_state,
             model_checkpoint_id="model-step-1",
         )
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="schedule-free state metadata"):
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError, match="schedule-free state metadata"
+    ):
         rfft.restore_state_checkpoint(
             bundle,
             missing_metadata,

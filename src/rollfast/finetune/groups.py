@@ -97,9 +97,7 @@ def _rule_lr_multiplier(
 
 
 def _resolve_weight_decay(group: PlanGroup, rules: tuple[GroupRule, ...]) -> bool:
-    selected = [
-        rule for rule in rules if rule.weight_decay is not None
-    ]
+    selected = [rule for rule in rules if rule.weight_decay is not None]
     if not selected:
         return group.weight_decay
     max_priority = max(rule.priority for rule in selected)
@@ -107,7 +105,9 @@ def _resolve_weight_decay(group: PlanGroup, rules: tuple[GroupRule, ...]) -> boo
     values = {rule.weight_decay for rule in highest}
     if len(values) > 1:
         names = tuple(rule.name or repr(rule) for rule in highest)
-        raise ValueError(f"conflicting weight_decay rules at priority {max_priority}: {names}")
+        raise ValueError(
+            f"conflicting weight_decay rules at priority {max_priority}: {names}"
+        )
     return bool(highest[-1].weight_decay)
 
 
@@ -123,7 +123,9 @@ def _resolve_optimizer(
     values = {rule.optimizer for rule in highest}
     if len(values) > 1:
         names = tuple(rule.name or repr(rule) for rule in highest)
-        raise ValueError(f"conflicting optimizer rules at priority {max_priority}: {names}")
+        raise ValueError(
+            f"conflicting optimizer rules at priority {max_priority}: {names}"
+        )
     return highest[-1].optimizer or default
 
 

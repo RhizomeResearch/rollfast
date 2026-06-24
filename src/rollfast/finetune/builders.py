@@ -367,8 +367,7 @@ def galore_adamw_from_plan(
             precision,
         ),
         state_policies={
-            group.source_label: "galore_projected_moments"
-            for group in compiled_groups
+            group.source_label: "galore_projected_moments" for group in compiled_groups
         },
     )
     return OptimizerBundle(
@@ -416,7 +415,9 @@ def apollo_adamw_from_plan(
     """Build grouped APOLLO AdamW from a fine-tuning plan."""
 
     apollo = APOLLOConfig() if apollo is None else apollo
-    resolved_weight_decay = apollo.weight_decay if weight_decay is None else weight_decay
+    resolved_weight_decay = (
+        apollo.weight_decay if weight_decay is None else weight_decay
+    )
     optimizer = OptimizerConfig(
         name="apollo_adamw",
         base_lr=base_lr,
@@ -482,7 +483,11 @@ def apollo_adamw_from_plan(
             *_apollo_profile_warnings(),
         ),
     )
-    policy = "apollo_mini_tensor_scaling" if apollo.mini else f"apollo_{apollo.scaling}_scaling"
+    policy = (
+        "apollo_mini_tensor_scaling"
+        if apollo.mini
+        else f"apollo_{apollo.scaling}_scaling"
+    )
     report = replace(
         report,
         estimated_state_bytes=_estimate_apollo_state_bytes(
@@ -1044,9 +1049,7 @@ def estimate_optimizer_state(
 
     precision = PrecisionConfig() if precision is None else precision
     state_quantization = (
-        StateQuantizationConfig()
-        if state_quantization is None
-        else state_quantization
+        StateQuantizationConfig() if state_quantization is None else state_quantization
     )
     if not state_quantization.enabled:
         itemsize = jnp.dtype(precision.moment_dtype).itemsize
@@ -1144,9 +1147,7 @@ def _hybrid_group_transform(
     family_kwargs: dict[str, Any],
 ) -> optax.GradientTransformation:
     clean_kwargs = {
-        key_: value
-        for key_, value in family_kwargs.items()
-        if value is not None
+        key_: value for key_, value in family_kwargs.items() if value is not None
     }
     if family == "aurora":
         return aurora(
@@ -1367,7 +1368,9 @@ def _build_grouped_galore_transform(
                 axis_name=gradient_policy.axis_name,
             )
         else:
-            raise NotImplementedError(f"Unsupported optimizer for GaLore builder: {group.optimizer!r}.")
+            raise NotImplementedError(
+                f"Unsupported optimizer for GaLore builder: {group.optimizer!r}."
+            )
 
     chain_parts: list[optax.GradientTransformation] = []
     if gradient_policy.clip_global_norm is not None:
@@ -1407,10 +1410,7 @@ def _build_factorized_adamw_transform(
         )
         for group in groups
     }
-    weight_decays = {
-        group.source_label: group.weight_decay_value
-        for group in groups
-    }
+    weight_decays = {group.source_label: group.weight_decay_value for group in groups}
     adam = scale_by_adam(
         b1=optimizer.b1,
         b2=optimizer.b2,
@@ -1530,7 +1530,9 @@ def _build_grouped_transform(
         )
         if group.optimizer == "adamw8":
             if not state_quantization.enabled:
-                raise ValueError("adamw8 groups require StateQuantizationConfig.enabled.")
+                raise ValueError(
+                    "adamw8 groups require StateQuantizationConfig.enabled."
+                )
             transforms[group.source_label] = adamw8(
                 learning_rate=lr_schedule,
                 b1=optimizer.b1,
@@ -1713,10 +1715,7 @@ def _decay_mask_from_labels(
     labels: Any,
     groups: tuple[CompiledGroup, ...],
 ) -> Any:
-    decay_by_label = {
-        group.source_label: group.weight_decay
-        for group in groups
-    }
+    decay_by_label = {group.source_label: group.weight_decay for group in groups}
     return jax.tree.map(
         lambda label: None if label is None else bool(decay_by_label[label]),
         labels,
@@ -1810,7 +1809,9 @@ def _hybrid_profile_warnings(family: str) -> tuple[str, ...]:
     return ()
 
 
-def _hybrid_method_config(family: str, family_kwargs: Mapping[str, Any]) -> dict[str, Any]:
+def _hybrid_method_config(
+    family: str, family_kwargs: Mapping[str, Any]
+) -> dict[str, Any]:
     config = dict(family_kwargs.get("config", {}))
     if family == "muon":
         return {
@@ -1925,10 +1926,10 @@ def _precision_warnings(trainable: Any, precision: PrecisionConfig) -> tuple[str
     warnings: list[str] = []
     if jnp.dtype(jnp.float16) in dtypes and precision.loss_scale == "none":
         warnings.append("fp16 without loss scaling.")
-    if (
-        precision.master_params == "never"
-        and dtypes & {jnp.dtype(jnp.float16), jnp.dtype(jnp.bfloat16)}
-    ):
+    if precision.master_params == "never" and dtypes & {
+        jnp.dtype(jnp.float16),
+        jnp.dtype(jnp.bfloat16),
+    }:
         warnings.append("low-precision stored parameters without master parameters.")
     return tuple(warnings)
 
@@ -1963,11 +1964,7 @@ def _quantize_group_state(
     keep_tags = {tag.lower() for tag in state_quantization.keep_fp32_tags}
     group_terms = {tag.lower() for tag in group.tags}
     group_terms.update((group.source_label.lower(), group.role.lower()))
-    return not any(
-        keep_tag in term
-        for keep_tag in keep_tags
-        for term in group_terms
-    )
+    return not any(keep_tag in term for keep_tag in keep_tags for term in group_terms)
 
 
 def _can_use_factorized_adamw(
@@ -2133,9 +2130,7 @@ def _galore_projection_profile(projection: str) -> str:
 def _galore_known_deviations(galore: GaLoreConfig) -> tuple[str, ...]:
     deviations = []
     if galore.projection == "auto":
-        deviations.append(
-            "projection_auto_uses_memory_min_orientation_not_galore_std"
-        )
+        deviations.append("projection_auto_uses_memory_min_orientation_not_galore_std")
     if galore.state_on_basis_refresh == "transport":
         deviations.append("basis_transport_experimental_not_reference_validated")
     return tuple(deviations)
@@ -2186,7 +2181,7 @@ def _apollo_method_config(apollo: APOLLOConfig) -> dict[str, Any]:
         "projection_refresh_policy": refresh_policy,
         "profile_fidelity": "experimental",
         "reference_validated": False,
-        "reference_validation": "pending_author_implementation_compatibility_test",
+        "reference_validation": "not_validated_against_reference",
     }
 
 

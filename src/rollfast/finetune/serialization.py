@@ -110,7 +110,9 @@ def restore_state_checkpoint(
     """Validate and return the state PyTree from ``checkpoint``."""
 
     if not model_checkpoint_id:
-        raise ValueError("model_checkpoint_id is required for optimizer checkpoint restore.")
+        raise ValueError(
+            "model_checkpoint_id is required for optimizer checkpoint restore."
+        )
     _validate_checkpoint_schema(checkpoint)
     if strict:
         expected = bundle.report.fingerprint
@@ -140,7 +142,9 @@ def restore_state_checkpoint(
                 "optimizer-state checkpoint logical-ID table mismatch: "
                 f"expected {expected_logical_ids!r}, got {checkpoint_logical_ids!r}."
             )
-        checkpoint_model_state_hash = checkpoint.manifest.get("model_state_structure_hash")
+        checkpoint_model_state_hash = checkpoint.manifest.get(
+            "model_state_structure_hash"
+        )
         expected_model_state_hash = bundle.report.model_state_structure_hash
         if checkpoint_model_state_hash != expected_model_state_hash:
             raise OptimizerStateRestoreError(
@@ -275,8 +279,7 @@ def _counters_to_dict(counters: Any | None) -> dict[str, int]:
     fields = getattr(counters, "_fields", None)
     if fields is not None:
         return {
-            field: int(jax.device_get(getattr(counters, field)))
-            for field in fields
+            field: int(jax.device_get(getattr(counters, field))) for field in fields
         }
     if hasattr(counters, "__dataclass_fields__"):
         return {
@@ -284,10 +287,7 @@ def _counters_to_dict(counters: Any | None) -> dict[str, int]:
             for field in counters.__dataclass_fields__
         }
     if isinstance(counters, Mapping):
-        return {
-            str(key): int(jax.device_get(value))
-            for key, value in counters.items()
-        }
+        return {str(key): int(jax.device_get(value)) for key, value in counters.items()}
     raise TypeError("counters must be a mapping, dataclass, NamedTuple, or None.")
 
 

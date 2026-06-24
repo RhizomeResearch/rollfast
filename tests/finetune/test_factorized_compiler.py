@@ -67,7 +67,9 @@ def _contains_state_type(state, name: str) -> bool:
     if isinstance(state, tuple):
         return any(_contains_state_type(item, name) for item in state)
     if hasattr(state, "_fields"):
-        return any(_contains_state_type(getattr(state, field), name) for field in state._fields)
+        return any(
+            _contains_state_type(getattr(state, field), name) for field in state._fields
+        )
     if isinstance(state, dict):
         return any(_contains_state_type(item, name) for item in state.values())
     return False

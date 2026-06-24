@@ -27,7 +27,9 @@ def with_reference_sharding(value: Any, reference: Any) -> Any:
     return jax.lax.with_sharding_constraint(value, sharding)
 
 
-def astype_preserving_sharding(value: Any, dtype: Any, reference: Any | None = None) -> Any:
+def astype_preserving_sharding(
+    value: Any, dtype: Any, reference: Any | None = None
+) -> Any:
     """Cast an array and keep its reference sharding explicit."""
 
     if value is None:
@@ -41,7 +43,9 @@ def zeros_like_preserving_sharding(value: Any, dtype: Any | None = None) -> Any:
 
     if value is None:
         return None
-    zeros = jnp.zeros_like(value) if dtype is None else jnp.zeros_like(value, dtype=dtype)
+    zeros = (
+        jnp.zeros_like(value) if dtype is None else jnp.zeros_like(value, dtype=dtype)
+    )
     return with_reference_sharding(zeros, value)
 
 

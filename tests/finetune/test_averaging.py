@@ -137,12 +137,14 @@ def test_schedule_free_keeps_named_eval_views_with_ema():
     assert bundle.default_eval_view == "ema"
     assert {"optimizer", "schedule_free", "ema"} <= set(bundle.eval_views)
     assert bundle.manifest()["ema"]["source_view"] == "schedule_free_eval"
-    assert bundle.eval_params(params, state, view="schedule_free")["head"][
-        "w"
-    ].shape == params["head"]["w"].shape
-    assert bundle.eval_params(params, state, view="ema")["head"]["w"].shape == params[
-        "head"
-    ]["w"].shape
+    assert (
+        bundle.eval_params(params, state, view="schedule_free")["head"]["w"].shape
+        == params["head"]["w"].shape
+    )
+    assert (
+        bundle.eval_params(params, state, view="ema")["head"]["w"].shape
+        == params["head"]["w"].shape
+    )
 
 
 def test_schedule_free_ema_defaults_to_schedule_free_eval_source():

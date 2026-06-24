@@ -313,9 +313,7 @@ def scale_by_adam8(
             is_leaf=_is_state_leaf,
         )
         mu_f32 = jax.tree.map(
-            lambda g, m: (
-                m if _is_passthrough_leaf(m) else b1 * m + (1.0 - b1) * g
-            ),
+            lambda g, m: m if _is_passthrough_leaf(m) else b1 * m + (1.0 - b1) * g,
             updates_f32,
             mu_prev,
             is_leaf=_is_passthrough_leaf,
@@ -338,11 +336,7 @@ def scale_by_adam8(
             mu_bc = _safe_bias_correction(mu_f32, mu_bc_factor_next)
             g_bc = _safe_bias_correction(updates_f32, mu_bc_factor)
             mu_hat = jax.tree.map(
-                lambda m, g: (
-                    m
-                    if _is_passthrough_leaf(m)
-                    else b1 * m + (1.0 - b1) * g
-                ),
+                lambda m, g: m if _is_passthrough_leaf(m) else b1 * m + (1.0 - b1) * g,
                 mu_bc,
                 g_bc,
                 is_leaf=_is_passthrough_leaf,
@@ -353,9 +347,7 @@ def scale_by_adam8(
 
         adam_updates = jax.tree.map(
             lambda m, v: (
-                m
-                if _is_passthrough_leaf(m)
-                else m / (jnp.sqrt(v + eps_root) + eps)
+                m if _is_passthrough_leaf(m) else m / (jnp.sqrt(v + eps_root) + eps)
             ),
             mu_hat,
             nu_hat,

@@ -188,9 +188,11 @@ def apollo_state_nbytes(
     resolved_rank = min(1 if mini else rank, projected_dim)
     projection_items = resolved_rank * projected_dim
     moment_items = resolved_rank * channel_dim
-    return int(projection_items * projection_itemsize) + int(
-        moment_items * moment_itemsize * 2
-    ) + int(moment_itemsize)
+    return (
+        int(projection_items * projection_itemsize)
+        + int(moment_items * moment_itemsize * 2)
+        + int(moment_itemsize)
+    )
 
 
 def _init_leaf_state(
@@ -448,7 +450,9 @@ def _scaling_factors(
     eps,
 ) -> jax.Array:
     if scaling == "tensor":
-        return jnp.linalg.norm(projected_update) / (jnp.linalg.norm(projected_grad) + eps)
+        return jnp.linalg.norm(projected_update) / (
+            jnp.linalg.norm(projected_grad) + eps
+        )
     update_norm = jnp.linalg.norm(projected_update, axis=0)
     grad_norm = jnp.linalg.norm(projected_grad, axis=0)
     return update_norm / (grad_norm + eps)

@@ -26,7 +26,9 @@ def adamw_from_equimo_plan(plan: Any, **kwargs: Any) -> OptimizerBundle:
     return adamw_from_plan(plan, **kwargs)
 
 
-def make_equimo_update_step(plan: Any, loss_fn: Any, optimizer: OptimizerBundle, **kwargs: Any):
+def make_equimo_update_step(
+    plan: Any, loss_fn: Any, optimizer: OptimizerBundle, **kwargs: Any
+):
     """Return a single-update helper that calls ``plan.combine`` before loss."""
 
     _validate_equimo_like_plan(plan)

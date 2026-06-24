@@ -50,7 +50,9 @@ def restore_offloaded_optimizer_state(
 ) -> Any:
     """Move an offloaded optimizer state back to device arrays."""
 
-    resolved = StateOffloadPolicy(enabled=True, target="device") if policy is None else policy
+    resolved = (
+        StateOffloadPolicy(enabled=True, target="device") if policy is None else policy
+    )
     if not resolved.enabled:
         return state
     if reference is None:

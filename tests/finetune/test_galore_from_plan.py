@@ -24,7 +24,9 @@ def _ones_like_trainable(tree):
 def _galore_leaf_states(state):
     return [
         leaf
-        for leaf in jax.tree.leaves(state, is_leaf=lambda x: isinstance(x, GaLoreLeafState))
+        for leaf in jax.tree.leaves(
+            state, is_leaf=lambda x: isinstance(x, GaLoreLeafState)
+        )
         if isinstance(leaf, GaLoreLeafState)
     ]
 
@@ -151,11 +153,15 @@ def test_galore_transport_refresh_is_experimental_and_preserves_shapes():
     grads = _ones_like_trainable(plan.trainable)
     state = bundle.init(plan.trainable)
     _, state = bundle.update(grads, state, plan.trainable)
-    first_shapes = tuple(leaf.mu.shape for leaf in _galore_leaf_states(state) if leaf.projected)
+    first_shapes = tuple(
+        leaf.mu.shape for leaf in _galore_leaf_states(state) if leaf.projected
+    )
     second_grads = jax.tree.map(
-        lambda x: (jnp.arange(x.size, dtype=x.dtype).reshape(x.shape) + 1.0)
-        if x is not None
-        else None,
+        lambda x: (
+            (jnp.arange(x.size, dtype=x.dtype).reshape(x.shape) + 1.0)
+            if x is not None
+            else None
+        ),
         plan.trainable,
         is_leaf=lambda x: x is None,
     )
@@ -166,11 +172,15 @@ def test_galore_transport_refresh_is_experimental_and_preserves_shapes():
     assert tuple(leaf.mu.shape for leaf in projected_states) == first_shapes
     assert all(jnp.all(leaf.nu >= 0.0) for leaf in projected_states)
     assert manifest["method_config"]["state_on_basis_refresh"] == "transport"
-    assert manifest["method_config"]["state_transport_profile"] == "experimental_basis_overlap"
+    assert (
+        manifest["method_config"]["state_transport_profile"]
+        == "experimental_basis_overlap"
+    )
     assert manifest["method_config"]["reference_validated"] is False
-    assert "basis_transport_experimental_not_reference_validated" in manifest[
-        "method_config"
-    ]["known_deviations"]
+    assert (
+        "basis_transport_experimental_not_reference_validated"
+        in manifest["method_config"]["known_deviations"]
+    )
     assert any("experimental" in warning for warning in bundle.report.warnings)
 
 
@@ -254,4 +264,7 @@ def test_galore_sharded_refresh_opt_in_reports_communication_cost():
     assert method_config["basis_refresh_collective"] == "host_or_device_all_gather"
     assert method_config["basis_refresh_communication_bytes"] > 0
     assert method_config["allow_host_materialization"] is True
-    assert any("estimated refresh communication bytes" in warning for warning in bundle.report.warnings)
+    assert any(
+        "estimated refresh communication bytes" in warning
+        for warning in bundle.report.warnings
+    )

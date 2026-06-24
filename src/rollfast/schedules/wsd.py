@@ -46,9 +46,7 @@ def wsd_schedule(
         else int(warmup_steps)
     )
     resolved_decay_steps = (
-        int(total_steps * decay_fraction)
-        if decay_steps is None
-        else int(decay_steps)
+        int(total_steps * decay_fraction) if decay_steps is None else int(decay_steps)
     )
     if resolved_warmup_steps < 0:
         raise ValueError("warmup_steps must be non-negative.")
@@ -73,9 +71,7 @@ def wsd_schedule(
 
         # Case 3: decay_start <= t < total_steps.
         if resolved_decay_steps > 0:
-            progress = (count - float(decay_start) + 1.0) / float(
-                resolved_decay_steps
-            )
+            progress = (count - float(decay_start) + 1.0) / float(resolved_decay_steps)
             progress = jnp.clip(progress, 0.0, 1.0)
             decay_val = peak_lr + (end_lr - peak_lr) * progress
         else:

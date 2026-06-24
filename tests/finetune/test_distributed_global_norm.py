@@ -29,14 +29,11 @@ def test_partition_norm_axis_resolution_filters_replicated_axes():
         )
         is None
     )
-    assert (
-        resolve_partition_norm_axis_name(
-            axis_name=("data", "model"),
-            partition_axis_names=("model", "tensor"),
-            replicated_axis_names=("data",),
-        )
-        == ("model", "tensor")
-    )
+    assert resolve_partition_norm_axis_name(
+        axis_name=("data", "model"),
+        partition_axis_names=("model", "tensor"),
+        replicated_axis_names=("data",),
+    ) == ("model", "tensor")
 
 
 def test_global_l2_norm_reduces_only_partition_axes(monkeypatch):

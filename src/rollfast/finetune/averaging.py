@@ -161,9 +161,7 @@ def make_averaging_eval_fn(
             return params
         averaging_state = state if isinstance(state, AveragingState) else None
         inner_state = (
-            averaging_state.inner_state
-            if averaging_state is not None
-            else state
+            averaging_state.inner_state if averaging_state is not None else state
         )
         if view == "ema":
             if not ema.enabled or averaging_state is None:
@@ -237,9 +235,7 @@ def _update_ema(
     cast_params = _cast_tree(params, config.state_dtype)
     next_ema = jax.tree.map(
         lambda old, new: (
-            None
-            if old is None
-            else config.decay * old + (1.0 - config.decay) * new
+            None if old is None else config.decay * old + (1.0 - config.decay) * new
         ),
         ema_params,
         cast_params,
@@ -271,9 +267,7 @@ def _update_swa(
     next_count = swa_count + jnp.asarray(1, dtype=jnp.int32)
     next_swa = jax.tree.map(
         lambda old, new: (
-            None
-            if old is None
-            else old + (new - old) / next_count.astype(new.dtype)
+            None if old is None else old + (new - old) / next_count.astype(new.dtype)
         ),
         swa_params,
         cast_params,
@@ -307,9 +301,11 @@ def _eval_swa(params: Any, state: AveragingState) -> Any:
 
 def _cast_tree(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(
-        lambda x: astype_preserving_sharding(x, dtype)
-        if x is not None and hasattr(x, "astype")
-        else x,
+        lambda x: (
+            astype_preserving_sharding(x, dtype)
+            if x is not None and hasattr(x, "astype")
+            else x
+        ),
         tree,
         is_leaf=lambda x: x is None,
     )
@@ -317,9 +313,7 @@ def _cast_tree(tree: Any, dtype: Any) -> Any:
 
 def _where_tree(condition: jax.Array, true_tree: Any, false_tree: Any) -> Any:
     return jax.tree.map(
-        lambda true, false: (
-            None if true is None else jnp.where(condition, true, false)
-        ),
+        lambda true, false: None if true is None else jnp.where(condition, true, false),
         true_tree,
         false_tree,
         is_leaf=lambda x: x is None,
@@ -353,13 +347,15 @@ def _ema_mask_from_labels(
     include_tags = {tag.lower() for tag in ema.include_tags}
     exclude_tags = {tag.lower() for tag in ema.exclude_tags}
     return jax.tree.map(
-        lambda label: None
-        if label is None
-        else _ema_include_label(
-            str(label),
-            groups_by_label.get(str(label)),
-            include_tags=include_tags,
-            exclude_tags=exclude_tags,
+        lambda label: (
+            None
+            if label is None
+            else _ema_include_label(
+                str(label),
+                groups_by_label.get(str(label)),
+                include_tags=include_tags,
+                exclude_tags=exclude_tags,
+            )
         ),
         labels,
         is_leaf=lambda x: x is None,

@@ -30,7 +30,10 @@ def test_state_memory_summary_measures_adamw_state_categories():
         == summary.total_bytes
     )
     assert all(leaf.placement for leaf in summary.leaves)
-    assert summary.to_dict()["estimated_state_bytes"] == bundle.report.estimated_state_bytes
+    assert (
+        summary.to_dict()["estimated_state_bytes"]
+        == bundle.report.estimated_state_bytes
+    )
 
 
 def test_state_memory_summary_accounts_for_blockwise_int8_state():
@@ -65,7 +68,9 @@ def test_state_memory_summary_accounts_for_blockwise_int8_state():
 
     assert q_summary.total_bytes < fp32_summary.total_bytes
     assert any(leaf.storage == "blockwise_int8" for leaf in q_summary.leaves)
-    assert q_summary.by_category["first_moment"] < fp32_summary.by_category["first_moment"]
+    assert (
+        q_summary.by_category["first_moment"] < fp32_summary.by_category["first_moment"]
+    )
 
 
 def test_state_memory_summary_reports_kron_preconditioner_factors():
@@ -184,7 +189,9 @@ def test_state_memory_summary_reports_no_preconditioners_for_aurora_prism():
             schedule="constant",
             clip_global_norm=None,
         )
-        summary = rfft.optimizer_state_memory_summary(bundle, bundle.init(plan.trainable))
+        summary = rfft.optimizer_state_memory_summary(
+            bundle, bundle.init(plan.trainable)
+        )
 
         assert summary.preconditioner_bytes == 0
         assert "first_moment" in summary.by_category
@@ -205,7 +212,9 @@ def test_state_memory_summary_serializes_quantized_leaf_metadata():
         ),
     )
     summary = rfft.optimizer_state_memory_summary(bundle, bundle.init(plan.trainable))
-    first_quantized = next(leaf for leaf in summary.leaves if leaf.storage == "blockwise_int8")
+    first_quantized = next(
+        leaf for leaf in summary.leaves if leaf.storage == "blockwise_int8"
+    )
 
     assert "scale" in first_quantized.dtype
     assert isinstance(first_quantized.bytes, int)

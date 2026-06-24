@@ -117,7 +117,9 @@ def test_adamw8_quantized_blocks_preserve_named_sharding():
     state = bundle.init(plan.trainable)
     blocks = [
         leaf
-        for leaf in jax.tree.leaves(state, is_leaf=lambda x: isinstance(x, QuantizedBlocks))
+        for leaf in jax.tree.leaves(
+            state, is_leaf=lambda x: isinstance(x, QuantizedBlocks)
+        )
         if isinstance(leaf, QuantizedBlocks)
     ]
 

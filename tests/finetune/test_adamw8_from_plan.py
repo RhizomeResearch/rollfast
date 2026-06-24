@@ -114,10 +114,7 @@ def test_adamw8_from_plan_quantizes_eligible_group_state_and_reports_bytes():
         rfft.StateQuantizationConfig.from_dict(bundle.manifest()["state_quantization"])
         == quantization
     )
-    group_rows = {
-        row["label"]: row
-        for row in bundle.report.group_table()
-    }
+    group_rows = {row["label"]: row for row in bundle.report.group_table()}
     assert groups["large_decay"].optimizer == "adamw8"
     assert groups["bias_no_decay"].optimizer == "adamw8"
     assert group_rows["large_decay"]["state_policy"] == "blockwise_int8_moments"
@@ -129,7 +126,9 @@ def test_adamw8_from_plan_quantizes_eligible_group_state_and_reports_bytes():
         DYNAMIC_SIGNED_CODEBOOK_ID,
         DYNAMIC_UNSIGNED_CODEBOOK_ID,
     }
-    assert bundle.report.estimated_state_bytes < fp32_bundle.report.estimated_state_bytes
+    assert (
+        bundle.report.estimated_state_bytes < fp32_bundle.report.estimated_state_bytes
+    )
     assert tree_state_nbytes(state) < tree_state_nbytes(fp32_state)
 
 

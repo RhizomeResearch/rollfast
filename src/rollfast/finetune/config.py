@@ -345,12 +345,20 @@ class PrecisionConfig:
             if expected is None
             else _dtype_from_name(expected),
             gradient_dtype=_dtype_from_name(data.get("gradient_dtype", "float32")),
-            accumulation_dtype=_dtype_from_name(data.get("accumulation_dtype", "float32")),
+            accumulation_dtype=_dtype_from_name(
+                data.get("accumulation_dtype", "float32")
+            ),
             master_params=data.get("master_params", "auto"),
-            master_param_dtype=_dtype_from_name(data.get("master_param_dtype", "float32")),
+            master_param_dtype=_dtype_from_name(
+                data.get("master_param_dtype", "float32")
+            ),
             moment_dtype=_dtype_from_name(data.get("moment_dtype", "float32")),
-            preconditioner_dtype=_dtype_from_name(data.get("preconditioner_dtype", "float32")),
-            update_compute_dtype=_dtype_from_name(data.get("update_compute_dtype", "float32")),
+            preconditioner_dtype=_dtype_from_name(
+                data.get("preconditioner_dtype", "float32")
+            ),
+            update_compute_dtype=_dtype_from_name(
+                data.get("update_compute_dtype", "float32")
+            ),
             cast_back=data.get("cast_back", "nearest"),
             loss_scale=data.get("loss_scale", "none"),
             static_loss_scale=data.get("static_loss_scale", 2**15),
@@ -962,7 +970,9 @@ class GaLoreConfig:
     projection: Literal["auto", "left", "right", "two_sided"] = "auto"
     basis_method: Literal["svd", "randomized_svd"] = "svd"
     basis_dtype: Any = jnp.float32
-    state_on_basis_refresh: Literal["reuse_coordinates", "reset", "transport"] = "reuse_coordinates"
+    state_on_basis_refresh: Literal["reuse_coordinates", "reset", "transport"] = (
+        "reuse_coordinates"
+    )
     min_matrix_size: int = 4096
     target: Literal["matrix_only"] = "matrix_only"
     fallback_optimizer: OptimizerName = "adamw"
@@ -1020,7 +1030,9 @@ class APOLLOConfig:
         if self.weight_decay < 0.0:
             raise ValueError("APOLLO weight_decay must be non-negative.")
         if self.fallback_optimizer != "adamw":
-            raise NotImplementedError("APOLLO currently supports fallback_optimizer='adamw'.")
+            raise NotImplementedError(
+                "APOLLO currently supports fallback_optimizer='adamw'."
+            )
         if self.norm_growth_limiter <= 1.0:
             raise ValueError("APOLLO norm_growth_limiter must be greater than 1.")
 
@@ -1082,7 +1094,9 @@ class MuonConfig:
         if self.consistent_rms is not None and self.consistent_rms <= 0.0:
             raise ValueError("Muon consistent_rms must be positive when provided.")
         if self.fallback_optimizer != "adamw":
-            raise NotImplementedError("Muon currently supports fallback_optimizer='adamw'.")
+            raise NotImplementedError(
+                "Muon currently supports fallback_optimizer='adamw'."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

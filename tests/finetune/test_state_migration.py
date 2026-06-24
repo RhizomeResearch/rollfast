@@ -151,7 +151,9 @@ def test_reconfigure_preserves_shared_head_moments_and_initializes_backbone():
         0.0,
     )
     assert any("key:head/key:w" in path for path in migration.preserved_state_leaves)
-    assert any("key:blocks/idx:0/key:w" in path for path in migration.initialized_state_leaves)
+    assert any(
+        "key:blocks/idx:0/key:w" in path for path in migration.initialized_state_leaves
+    )
     assert "logical/head.w" in migration.preserved_param_leaves
     assert "logical/blocks.0.w" in migration.initialized_param_leaves
     assert migration.schedule_counter_behavior.startswith("initialized count")
@@ -214,7 +216,9 @@ def test_transfer_optimizer_state_can_be_exact_for_identical_stage():
         clip_global_norm=None,
     )
     state = bundle.init(plan.trainable)
-    _, state = bundle.update(_ones_like_trainable(plan.trainable), state, plan.trainable)
+    _, state = bundle.update(
+        _ones_like_trainable(plan.trainable), state, plan.trainable
+    )
 
     _, migrated_state, transfer = rfft.transfer_optimizer_state(
         old_plan=plan,
@@ -374,8 +378,12 @@ def test_reconfigure_counter_policy_is_explicit():
         counter_policy="continue_global_step",
     )
 
-    assert all(jnp.all(count == 0) for count in _count_leaves(restart_state, "head_decay"))
-    assert any(jnp.all(count > 0) for count in _count_leaves(continued_state, "head_decay"))
+    assert all(
+        jnp.all(count == 0) for count in _count_leaves(restart_state, "head_decay")
+    )
+    assert any(
+        jnp.all(count > 0) for count in _count_leaves(continued_state, "head_decay")
+    )
 
 
 def test_reconfigure_preserves_kron_preconditioners_across_group_relabel():
@@ -431,8 +439,7 @@ def test_reconfigure_preserves_kron_preconditioners_across_group_relabel():
         ),
     )
     assert any(
-        "attr:Qs_preconditioners" in path
-        for path in migration.preserved_state_leaves
+        "attr:Qs_preconditioners" in path for path in migration.preserved_state_leaves
     )
     assert "logical/blocks.0.w" in migration.changed_group_leaves
 

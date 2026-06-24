@@ -10,11 +10,6 @@ from rollfast.optim.dimension_numbers import (
     _get_dimension_numbers,
     _mask_dimension_numbers,
 )
-from rollfast.optim.prism import PrismDimensionNumbers
-
-
-def test_prism_dimension_numbers_is_compatibility_alias():
-    assert PrismDimensionNumbers is MatrixDimensionNumbers
 
 
 def test_get_dimension_numbers_defaults_to_rank_two_leaves():

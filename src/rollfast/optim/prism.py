@@ -56,11 +56,6 @@ _INVROOT_COEFFS: dict[int, list[tuple[float, float, float]]] = {
 }
 
 
-PrismDimensionNumbers = MatrixDimensionNumbers
-_is_prism_leaf = _is_dimension_numbers_leaf
-_compute_prism_reshape = _compute_matrix_reshape
-
-
 def get_equinox_prism_spec(
     model: Any,
     skip_depthwise_conv: bool = True,
@@ -89,7 +84,7 @@ def get_equinox_prism_spec(
         target_spec = None
 
         if isinstance(layer, _LINEAR_TYPES):
-            target_spec = PrismDimensionNumbers(reduction_axis=1, output_axis=0)
+            target_spec = MatrixDimensionNumbers(reduction_axis=1, output_axis=0)
 
         elif isinstance(layer, _CONV_TYPES):
             groups = getattr(layer, "groups", 1)
@@ -97,7 +92,7 @@ def get_equinox_prism_spec(
 
             if not (skip_depthwise_conv and is_depthwise):
                 ndim = layer.weight.ndim
-                target_spec = PrismDimensionNumbers(
+                target_spec = MatrixDimensionNumbers(
                     reduction_axis=tuple(range(1, ndim)), output_axis=0
                 )
 
@@ -107,9 +102,9 @@ def get_equinox_prism_spec(
         specs = eqx.tree_at(lambda l: l.weight, layer, target_spec)
 
         return jax.tree.map(
-            lambda x: x if isinstance(x, PrismDimensionNumbers) else None,
+            lambda x: x if isinstance(x, MatrixDimensionNumbers) else None,
             specs,
-            is_leaf=lambda x: isinstance(x, PrismDimensionNumbers),
+            is_leaf=lambda x: isinstance(x, MatrixDimensionNumbers),
         )
 
     return jax.tree.map(
@@ -123,7 +118,7 @@ def _make_param_labels(dim_nums_tree: base.Params) -> base.Params:
     """Converts a dimension numbers tree into optimization labels.
 
     Args:
-        dim_nums_tree: A PyTree of `PrismDimensionNumbers` or `None`.
+        dim_nums_tree: A PyTree of `MatrixDimensionNumbers` or `None`.
 
     Returns:
         A PyTree of strings, where leaves are labeled 'prism' if a dimension spec
@@ -132,7 +127,7 @@ def _make_param_labels(dim_nums_tree: base.Params) -> base.Params:
     return jax.tree.map(
         lambda d: "prism" if d is not None else "adam",
         dim_nums_tree,
-        is_leaf=_is_prism_leaf,
+        is_leaf=_is_dimension_numbers_leaf,
     )
 
 
@@ -453,7 +448,7 @@ def _prism_ortho_step(
     gamma: float,
     ns_iters: int,
     mu_nest: Optional[jax.Array] = None,
-    dim_nums: Optional[PrismDimensionNumbers] = None,
+    dim_nums: Optional[MatrixDimensionNumbers] = None,
     mode: str = "original",
     inv_steps: int = 6,
     inv_eps: float = 1e-5,
@@ -481,7 +476,7 @@ def _prism_ortho_step(
     if mode == "original":
         if is_fast_2d:
             return _apply_prism_math(updates, mu_raw, m_target_eff, gamma, ns_iters)
-        reshape_fn, inverse_fn = _compute_prism_reshape(updates, dim_nums)
+        reshape_fn, inverse_fn = _compute_matrix_reshape(updates, dim_nums)
         O_flat = jax.vmap(lambda g, m, t: _apply_prism_math(g, m, t, gamma, ns_iters))(
             reshape_fn(updates), reshape_fn(mu_raw), reshape_fn(m_target_eff)
         )
@@ -506,7 +501,7 @@ def _prism_ortho_step(
         )
         if is_fast_2d:
             return _fn(updates, mu_raw, m_target_eff)
-        reshape_fn, inverse_fn = _compute_prism_reshape(updates, dim_nums)
+        reshape_fn, inverse_fn = _compute_matrix_reshape(updates, dim_nums)
         O_flat = jax.vmap(_fn)(
             reshape_fn(updates),
             reshape_fn(mu_raw),
@@ -781,7 +776,7 @@ def scale_by_prism(
             mu_f32,
             target_for_ortho_f32,
             resolved_dim_nums,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
         if nesterov and not shape_nesterov:
@@ -820,7 +815,7 @@ def scale_by_prism(
                 )
 
             def _add_wd(u, p, m=True):
-                if _is_prism_leaf(u) or _is_prism_leaf(p):
+                if _is_dimension_numbers_leaf(u) or _is_dimension_numbers_leaf(p):
                     return u
                 if isinstance(m, _masking.MaskedNode) or m is None or not m:
                     return u
@@ -828,14 +823,18 @@ def scale_by_prism(
 
             if _wd_mask is not None:
                 new_updates = jax.tree.map(
-                    _add_wd, new_updates, params, _wd_mask, is_leaf=_is_prism_leaf
+                    _add_wd,
+                    new_updates,
+                    params,
+                    _wd_mask,
+                    is_leaf=_is_dimension_numbers_leaf,
                 )
             else:
                 new_updates = jax.tree.map(
                     lambda u, p: _add_wd(u, p),
                     new_updates,
                     params,
-                    is_leaf=_is_prism_leaf,
+                    is_leaf=_is_dimension_numbers_leaf,
                 )
 
         new_updates = jax.lax.cond(
@@ -960,7 +959,7 @@ def prism(
         adam_b1: Beta1 for Adam.
         adam_b2: Beta2 for Adam.
         adam_eps: Epsilon for Adam.
-        prism_weight_dimension_numbers: Optional PyTree of `PrismDimensionNumbers`.
+        prism_weight_dimension_numbers: Optional PyTree of `MatrixDimensionNumbers`.
             - If None (default): Automatically selects all 2D parameters for PRISM.
             - If provided: Uses the spec to select PRISM parameters. Leaves set to None
               fall back to Adam.
@@ -992,7 +991,7 @@ def prism(
             lambda d, p: None if p is None else ("prism" if d is not None else "adam"),
             dim_nums,
             params,
-            is_leaf=_is_prism_leaf,
+            is_leaf=_is_dimension_numbers_leaf,
         )
 
     # Spec Masking for the Prism chain

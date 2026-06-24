@@ -165,8 +165,7 @@ def test_kron_manifest_marks_psgd_profile_and_no_internal_adam_fallback():
     assert method_config["method"] == "kron"
     assert method_config["implemented_profile"] == "rollfast_psgd_kron"
     assert (
-        method_config["reference_algorithm"]
-        == "psgd_kronecker_factored_preconditioner"
+        method_config["reference_algorithm"] == "psgd_kronecker_factored_preconditioner"
     )
     assert method_config["matrix_optimizer"] == "rollfast.optim.psgd.kron"
     assert method_config["fallback_optimizer"] is None

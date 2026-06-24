@@ -30,9 +30,11 @@ class ScaleByAdamState(NamedTuple):
 
 def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
     return jax.tree.map(
-        lambda x: x
-        if isinstance(x, _masking.MaskedNode) or x is None
-        else zeros_like_preserving_sharding(x, dtype),
+        lambda x: (
+            x
+            if isinstance(x, _masking.MaskedNode) or x is None
+            else zeros_like_preserving_sharding(x, dtype)
+        ),
         params,
         is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
     )

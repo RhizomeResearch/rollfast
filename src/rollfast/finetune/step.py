@@ -284,16 +284,14 @@ def make_loss_scaled_master_update_step(
     """Return a master-parameter step with static/dynamic loss scaling."""
 
     scaled_value_and_grad = jax.value_and_grad(
-        lambda master, visible_template, loss_scale, *args, **kwargs: (
-            _scale_loss_value(
-                loss_fn(
-                    _cast_tree_like(master, visible_template),
-                    *args,
-                    **kwargs,
-                ),
-                loss_scale,
-                has_aux=has_aux,
-            )
+        lambda master, visible_template, loss_scale, *args, **kwargs: _scale_loss_value(
+            loss_fn(
+                _cast_tree_like(master, visible_template),
+                *args,
+                **kwargs,
+            ),
+            loss_scale,
+            has_aux=has_aux,
         ),
         has_aux=True,
     )
@@ -863,14 +861,12 @@ def make_stateful_sam_step(
             replicated_axis_names=config.replicated_axis_names,
         )
         perturbed = add_perturbation(trainable, perturbation)
-        (_, (perturbed_value, perturbed_model_state)), perturbed_grads = (
-            value_and_grad(
-                perturbed,
-                model_state,
-                sam_key,
-                *args,
-                **kwargs,
-            )
+        (_, (perturbed_value, perturbed_model_state)), perturbed_grads = value_and_grad(
+            perturbed,
+            model_state,
+            sam_key,
+            *args,
+            **kwargs,
         )
         perturbed_loss, perturbed_aux = _split_value_aux(
             perturbed_value,
@@ -1025,7 +1021,9 @@ def _evaluate_loss_bundle_value_and_grad(
             micro_args,
             micro_kwargs,
         )
-        total_bundle = bundle if total_bundle is None else _add_loss_bundles(total_bundle, bundle)
+        total_bundle = (
+            bundle if total_bundle is None else _add_loss_bundles(total_bundle, bundle)
+        )
         total_grads = grads if total_grads is None else _tree_add(total_grads, grads)
     return total_bundle, total_grads
 
@@ -1166,8 +1164,7 @@ def _stop_gradient_loss_bundle(bundle: LossBundle) -> LossBundle:
         },
         new_model_state=bundle.new_model_state,
         aux_sums={
-            key: jax.lax.stop_gradient(value)
-            for key, value in bundle.aux_sums.items()
+            key: jax.lax.stop_gradient(value) for key, value in bundle.aux_sums.items()
         },
         aux_normalizers={
             key: jax.lax.stop_gradient(value)
@@ -1181,10 +1178,7 @@ def _add_mappings(
     right: dict[str, Any] | Any,
 ) -> dict[str, Any]:
     keys = set(left) | set(right)
-    return {
-        key: left.get(key, 0) + right.get(key, 0)
-        for key in keys
-    }
+    return {key: left.get(key, 0) + right.get(key, 0) for key in keys}
 
 
 def _select_mapping(
@@ -1194,8 +1188,7 @@ def _select_mapping(
 ) -> dict[str, Any]:
     keys = set(true) | set(false)
     return {
-        key: jnp.where(condition, true.get(key, 0), false.get(key, 0))
-        for key in keys
+        key: jnp.where(condition, true.get(key, 0), false.get(key, 0)) for key in keys
     }
 
 
@@ -1452,9 +1445,7 @@ def _tree_zeros_like(tree: Any) -> Any:
 def _select_tree(condition: Any, true_tree: Any, false_tree: Any) -> Any:
     return jax.tree.map(
         lambda true_leaf, false_leaf: (
-            None
-            if true_leaf is None
-            else jnp.where(condition, true_leaf, false_leaf)
+            None if true_leaf is None else jnp.where(condition, true_leaf, false_leaf)
         ),
         true_tree,
         false_tree,
@@ -1468,8 +1459,7 @@ def _check_state_policy(
 ) -> None:
     if state_policy == "optimizer_step_aggregate" and model_state_aggregator is None:
         raise NotImplementedError(
-            "optimizer_step_aggregate requires a model-provided state "
-            "aggregation hook."
+            "optimizer_step_aggregate requires a model-provided state aggregation hook."
         )
     if state_policy not in {
         "frozen",

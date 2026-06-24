@@ -120,7 +120,7 @@ def test_finetune_hybrid_signatures_have_plan_controls():
             "moment_dtype",
             "axis_name",
             "ema",
-                "swa",
+            "swa",
         ):
             assert name in signature.parameters
 

@@ -21,18 +21,6 @@ class AdaLoRAState(NamedTuple):
     last_allocation_step: jax.Array
 
     @property
-    def step(self) -> jax.Array:
-        """Backward-compatible alias for the applied optimizer-step count."""
-
-        return self.last_allocation_step
-
-    @property
-    def rank_mask(self) -> jax.Array:
-        """Backward-compatible alias for the active rank support mask."""
-
-        return self.current_support
-
-    @property
     def ranks(self) -> jax.Array:
         """Return active rank counts per AdaLoRA group."""
 
@@ -305,7 +293,9 @@ def allocate_rank_mask(
     adjusted = jnp.where(flat_candidate, flat_scores - tie_break, -jnp.inf)
     order = jnp.argsort(-adjusted)
     selected_flat = jnp.arange(flat_scores.size) < remaining
-    selected = jnp.zeros(flat_scores.shape, dtype=jnp.bool_).at[order].set(selected_flat)
+    selected = (
+        jnp.zeros(flat_scores.shape, dtype=jnp.bool_).at[order].set(selected_flat)
+    )
     selected = jnp.reshape(selected, (group_count, max_rank))
     return jnp.logical_or(mandatory, jnp.logical_and(selected, candidate))
 

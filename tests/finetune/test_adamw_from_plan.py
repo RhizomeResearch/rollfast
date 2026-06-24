@@ -182,9 +182,7 @@ def test_make_update_step_updates_trainable_tree():
 
     def loss_fn(params):
         return sum(
-            jnp.sum(leaf**2)
-            for leaf in jax.tree.leaves(params)
-            if leaf is not None
+            jnp.sum(leaf**2) for leaf in jax.tree.leaves(params) if leaf is not None
         )
 
     step = rfft.make_update_step(loss_fn, bundle)
