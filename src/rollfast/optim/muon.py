@@ -408,6 +408,7 @@ def muon(
     preconditioning: MuonPreconditioning = "frobenius",
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
+    adam_eps: jax.typing.ArrayLike | None = None,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
     adam_weight_decay: base.ScalarOrSchedule | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
@@ -424,6 +425,8 @@ def muon(
     """Muon optimizer with automatic Muon/AdamW partitioning."""
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
+    if adam_eps is None:
+        adam_eps = eps
     effective_adam_weight_decay = (
         weight_decay if adam_weight_decay is None else adam_weight_decay
     )
@@ -464,7 +467,7 @@ def muon(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,
                 b2=adam_b2,
-                eps=eps,
+                eps=adam_eps,
                 eps_root=adam_eps_root,
                 weight_decay=effective_adam_weight_decay,
                 weight_decay_mask=weight_decay_mask,

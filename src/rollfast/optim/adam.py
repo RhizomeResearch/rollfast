@@ -5,8 +5,6 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-import optax
-import optax.tree
 from optax._src import base, combine, numerics, transform, utils
 
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
@@ -108,7 +106,7 @@ def scale_by_adam(
 
     def init_fn(params):
         mu = _zeros_like_tree(params, canonical_mu_dtype)  # First moment
-        nu = optax.tree.zeros_like(params, dtype=canonical_nu_dtype)  # Second moment
+        nu = _zeros_like_tree(params, canonical_nu_dtype)  # Second moment
 
         magma_s = _init_magma_state(params) if use_magma else ()
 

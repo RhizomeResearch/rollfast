@@ -229,6 +229,47 @@ Equinox integration helpers such as `get_equinox_prism_spec` and
 pip install "rollfast[equinox]"
 ```
 
+## Examples and Fine-Tuning
+
+See [`docs/usage.md`](./docs/usage.md) for compact examples covering AdamW,
+structured optimizers, Schedule-Free evaluation parameters, and stochastic
+rounding helpers.
+
+Runnable examples live under [`examples/`](./examples):
+
+| Script | Covers |
+| ------ | ------ |
+| [`examples/adamw_quickstart.py`](./examples/adamw_quickstart.py) | AdamW on a small PyTree with a weight-decay mask |
+| [`examples/schedule_free_eval.py`](./examples/schedule_free_eval.py) | Schedule-Free Adam training parameters and averaged eval parameters |
+| [`examples/finetuning/`](./examples/finetuning) | Equimo plan-aware optimizers, EMA/SWA, SAM/ASAM, AdaLoRA, state migration, and memory diagnostics |
+
+`rollfast.finetune` compiles model-library fine-tuning plans into grouped Optax
+optimizers. It is designed for Equimo's `equimo.finetune.FineTunePlan`, but the
+core only requires a structural plan with `trainable`, `labels`, and
+`group_specs` fields.
+
+```python
+import rollfast.finetune as rfft
+
+optim = rfft.adamw_from_plan(
+    plan,
+    total_steps=20_000,
+    base_lr=5e-4,
+    schedule="warmup_cosine",
+    weight_decay=0.05,
+    clip_global_norm=1.0,
+)
+
+print(optim.report)
+opt_state = optim.init(plan.trainable)
+```
+
+Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and
+checkpoint guidance in
+[`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md)
+and averaging guidance in
+[`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md).
+
 ## Usage
 
 ### 1. Muon

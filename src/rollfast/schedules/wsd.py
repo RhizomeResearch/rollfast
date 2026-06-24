@@ -40,6 +40,10 @@ def wsd_schedule(
     warmup_shape: ScheduleShape = "linear",
     decay_shape: ScheduleShape = "linear",
     final_lr_ratio: float = 0.0,
+    *,
+    warmup_steps: int | None = None,
+    decay_steps: int | None = None,
+    end_lr_ratio: float | None = None,
     warmup_power: float = 1.0,
     decay_power: float = 1.0,
     exponential_rate: float = 5.0,
@@ -64,6 +68,9 @@ def wsd_schedule(
         warmup_shape: Warmup interpolation shape.
         decay_shape: Decay interpolation shape.
         final_lr_ratio: Final learning-rate ratio relative to ``peak_lr``.
+        warmup_steps: Explicit warmup step count. Overrides ``warmup_fraction``.
+        decay_steps: Explicit decay step count. Overrides ``decay_fraction``.
+        end_lr_ratio: Backward-compatible alias for ``final_lr_ratio``.
         warmup_power: Exponent used when ``warmup_shape="power"``.
         decay_power: Exponent used when ``decay_shape="power"``.
         exponential_rate: Curvature used by exponential warmup/decay shapes.
@@ -77,8 +84,12 @@ def wsd_schedule(
         raise ValueError("warmup_fraction must be in [0, 1].")
     if not 0.0 <= decay_fraction <= 1.0:
         raise ValueError("decay_fraction must be in [0, 1].")
-    if warmup_fraction + decay_fraction > 1.0:
-        raise ValueError("warmup_fraction + decay_fraction must be <= 1.")
+    if end_lr_ratio is not None:
+        if final_lr_ratio != 0.0 and final_lr_ratio != end_lr_ratio:
+            raise ValueError(
+                "final_lr_ratio and end_lr_ratio must match when both are provided."
+            )
+        final_lr_ratio = end_lr_ratio
     if not 0.0 <= final_lr_ratio <= 1.0:
         raise ValueError("final_lr_ratio must be in [0, 1].")
     if warmup_power <= 0.0:
@@ -90,11 +101,23 @@ def wsd_schedule(
     _validate_shape("warmup_shape", warmup_shape)
     _validate_shape("decay_shape", decay_shape)
 
-    warmup_steps = int(total_steps * warmup_fraction)
-    decay_steps = int(total_steps * decay_fraction)
+    resolved_warmup_steps = (
+        int(total_steps * warmup_fraction)
+        if warmup_steps is None
+        else int(warmup_steps)
+    )
+    resolved_decay_steps = (
+        int(total_steps * decay_fraction) if decay_steps is None else int(decay_steps)
+    )
+    if resolved_warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative.")
+    if resolved_decay_steps < 0:
+        raise ValueError("decay_steps must be non-negative.")
+    if resolved_warmup_steps + resolved_decay_steps > total_steps:
+        raise ValueError("warmup_steps + decay_steps must not exceed total_steps.")
 
-    T_w = warmup_steps
-    T_c = total_steps - decay_steps
+    T_w = resolved_warmup_steps
+    T_c = total_steps - resolved_decay_steps
     T_final = total_steps - 1
     decay_denominator = max(T_final - T_c, 1)
 

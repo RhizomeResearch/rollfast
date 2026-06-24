@@ -1,5 +1,6 @@
 from .optim.adam import adamw as adamw
 from .optim.adam import scale_by_adam as scale_by_adam
+from .optim.adam8 import adamw8 as adamw8
 from .optim.aurora import (
     AuroraDimensionNumbers as AuroraDimensionNumbers,
 )
@@ -91,6 +92,8 @@ from .optim.psgd import scale_by_kron as scale_by_kron
 from .optim.rmnp import rmnp as rmnp
 from .optim.rmnp import scale_by_rmnp as scale_by_rmnp
 from .optim.rmnp import scale_by_rmnp_shape as scale_by_rmnp_shape
+from .optim.sam import global_l2_norm as global_l2_norm
+from .optim.sam import sam_perturbation as sam_perturbation
 from .optim.soda import (
     soda as soda,
 )
@@ -157,6 +160,7 @@ __all__ = [
     "WeightingMode",
     "__version__",
     "adamw",
+    "adamw8",
     "adamw_hyperball",
     "apply_hyperball",
     "apply_updates",
@@ -167,6 +171,7 @@ __all__ = [
     "contranormuon",
     "get_equinox_aurora_spec",
     "get_equinox_prism_spec",
+    "global_l2_norm",
     "hyperball_riemannian_aurora",
     "kron",
     "kron_hyperball",
@@ -199,6 +204,7 @@ __all__ = [
     "scale_by_rmnp",
     "scale_by_rmnp_shape",
     "scale_by_trasmuon",
+    "sam_perturbation",
     "schedule_free",
     "schedule_free_adam",
     "schedule_free_aurora",

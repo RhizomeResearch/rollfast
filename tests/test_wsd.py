@@ -38,6 +38,37 @@ def test_wsd_schedule_supports_cosine_decay_to_ratio():
     assert cast(float, sched(99)) == pytest.approx(0.1)
 
 
+def test_wsd_schedule_honors_explicit_step_counts():
+    sched = wsd_schedule(
+        peak_lr=1.0,
+        total_steps=10,
+        warmup_steps=2,
+        warmup_fraction=0.8,
+        decay_steps=3,
+        decay_fraction=0.0,
+    )
+
+    assert float(sched(0)) < 1.0
+    assert float(sched(1)) <= 1.0
+    assert float(sched(2)) == pytest.approx(1.0)
+    assert float(sched(6)) == pytest.approx(1.0)
+    assert float(sched(7)) == pytest.approx(1.0)
+    assert float(sched(8)) < 1.0
+    assert float(sched(9)) == pytest.approx(0.0)
+
+
+def test_wsd_schedule_accepts_end_lr_ratio_alias():
+    sched = wsd_schedule(
+        peak_lr=1.0,
+        total_steps=10,
+        warmup_fraction=0.0,
+        decay_fraction=0.2,
+        end_lr_ratio=0.2,
+    )
+
+    assert float(sched(9)) == pytest.approx(0.2)
+
+
 def test_wsd_schedule_documents_inclusive_boundaries():
     sched = wsd_schedule(
         peak_lr=1.0,
@@ -83,6 +114,16 @@ def test_wsd_schedule_rejects_invalid_shape():
             warmup_fraction=0.0,
             decay_fraction=0.2,
             decay_shape=invalid_shape,  # type: ignore[arg-type]
+        )
+
+
+def test_wsd_schedule_rejects_overlapping_explicit_regions():
+    with pytest.raises(ValueError, match="must not exceed total_steps"):
+        wsd_schedule(
+            peak_lr=1.0,
+            total_steps=10,
+            warmup_steps=8,
+            decay_steps=3,
         )
 
 
