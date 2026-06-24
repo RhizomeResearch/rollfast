@@ -12,7 +12,7 @@ norm-preserving weight decay, **SODA**, and a robust
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
 `rollfast` prioritizes memory efficiency (via scanned layers and Kronecker
-factorizations), multi-gpu compatibility, mixed-precision trainings and
+factorizations), multi-GPU compatibility, mixed-precision training, and
 scalability for large models.
 
 ## Algorithms
@@ -158,6 +158,20 @@ ______________________________________________________________________
 ```bash
 pip install rollfast
 ```
+
+## Examples
+
+See [`docs/usage.md`](./docs/usage.md) for a compact non-fine-tuning usage
+guide covering optimizer PyTrees, structured optimizers, Schedule-Free
+evaluation views, and stochastic rounding helpers.
+
+Runnable examples live under [`examples/`](./examples):
+
+| Script | Covers |
+| ------ | ------ |
+| [`examples/adamw_quickstart.py`](./examples/adamw_quickstart.py) | AdamW on a small PyTree with a weight-decay mask |
+| [`examples/schedule_free_eval.py`](./examples/schedule_free_eval.py) | Schedule-Free Adam training parameters and averaged eval parameters |
+| [`examples/finetuning/`](./examples/finetuning) | Equimo plan-aware optimizers, EMA/SWA, SAM/ASAM, AdaLoRA, state migration, and memory diagnostics |
 
 ## Fine-Tuning Plans
 

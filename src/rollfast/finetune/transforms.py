@@ -12,6 +12,8 @@ from rollfast.utils import AxisName, dist_reduce, resolve_partition_norm_axis_na
 
 
 class GlobalNormClipState(NamedTuple):
+    """State for the global-norm clipping transform."""
+
     count: jax.Array
 
 

@@ -474,6 +474,8 @@ class GroupRule:
 
 @dataclass(frozen=True)
 class EMAConfig:
+    """Configuration for maintaining an exponential moving average of params."""
+
     enabled: bool = False
     decay: float = 0.9999
     update_every: int = 1
@@ -514,6 +516,8 @@ class EMAConfig:
 
 @dataclass(frozen=True)
 class SWAConfig:
+    """Configuration for stochastic weight averaging over applied updates."""
+
     enabled: bool = False
     start_step: int | None = None
     start_fraction: float = 0.75
@@ -558,6 +562,8 @@ class SWAConfig:
 
 @dataclass(frozen=True)
 class SAMConfig:
+    """Configuration for a plain sharpness-aware minimization two-pass step."""
+
     enabled: bool = False
     rho: float = 0.05
     norm: SAMNorm = "global_l2"
@@ -624,6 +630,8 @@ class SAMConfig:
 
 @dataclass(frozen=True)
 class ASAMConfig:
+    """Configuration for adaptive sharpness-aware minimization."""
+
     enabled: bool = False
     rho: float = 0.5
     eta: float = 0.01
@@ -683,6 +691,8 @@ class ASAMConfig:
 
 @dataclass(frozen=True)
 class AdaLoRAControllerConfig:
+    """Configuration for fixed-shape AdaLoRA rank-budget scheduling."""
+
     initial_budget: int = 12
     target_budget: int = 8
     t_init: int = 0
@@ -908,6 +918,8 @@ class StateOffloadPolicy:
 
 @dataclass(frozen=True)
 class AccumulationState:
+    """State accumulated across microbatches before an optimizer update."""
+
     grad_numerator: Any
     normalizer: Any
     metric_sums: Any
@@ -926,6 +938,8 @@ class LossScaleState(NamedTuple):
 
 @dataclass(frozen=True)
 class StepCounters:
+    """Logical counters used by fine-tuning step helpers."""
+
     microstep: Any
     attempted_update: Any
     successful_update: Any
@@ -937,6 +951,8 @@ class StepCounters:
 
 @dataclass(frozen=True)
 class RNGStreams:
+    """Named PRNG streams carried by stateful fine-tuning steps."""
+
     forward: Any
     sam: Any
     stochastic_rounding: Any
@@ -946,6 +962,8 @@ class RNGStreams:
 
 @dataclass(frozen=True)
 class FineTuneStepState:
+    """Complete mutable state bundle for stateful fine-tuning step helpers."""
+
     optimizer_state: Any
     model_state: Any | None
     master_params: Any | None
@@ -1162,6 +1180,8 @@ class CompiledGroup:
 
 @dataclass(frozen=True)
 class SchedulePoint:
+    """One sampled step/value pair from a compiled schedule preview."""
+
     step: int
     value: float
 

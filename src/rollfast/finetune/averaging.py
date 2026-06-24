@@ -29,6 +29,8 @@ EvalFn = Callable[[Any, optax.OptState | None, str], Any]
 
 
 def averaging_enabled(ema: EMAConfig, swa: SWAConfig) -> bool:
+    """Return whether any parameter averaging wrapper is enabled."""
+
     return ema.enabled or swa.enabled
 
 
@@ -153,6 +155,8 @@ def make_averaging_eval_fn(
     swa: SWAConfig,
     inner_eval_fn: EvalFn | None = None,
 ) -> EvalFn | None:
+    """Build an eval-parameter resolver for optimizer, EMA, and SWA views."""
+
     if not averaging_enabled(ema, swa) and inner_eval_fn is None:
         return None
 
@@ -184,6 +188,8 @@ def eval_views(
     swa: SWAConfig,
     inner_views: tuple[str, ...] = ("optimizer",),
 ) -> tuple[str, ...]:
+    """Return the named evaluation views exposed by averaging configuration."""
+
     views = list(inner_views)
     if ema.enabled:
         views.append("ema")
@@ -198,6 +204,8 @@ def default_eval_view(
     swa: SWAConfig,
     inner_default: str = "optimizer",
 ) -> str:
+    """Return the preferred evaluation view for a compiled optimizer bundle."""
+
     if ema.enabled:
         return "ema"
     if swa.enabled:

@@ -44,6 +44,8 @@ def compile_groups(
 
 
 def matches_rule(group: PlanGroup, rule: GroupRule) -> bool:
+    """Return whether a plan group satisfies a Rollfast override rule."""
+
     if rule.label is not None and group.label != rule.label:
         return False
     if rule.label_prefix is not None and not group.label.startswith(rule.label_prefix):
