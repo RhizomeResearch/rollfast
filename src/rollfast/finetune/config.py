@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from importlib import metadata as importlib_metadata
+import math
 from typing import Any, Callable, Literal, Mapping, NamedTuple, cast
 
 import jax.numpy as jnp
@@ -460,6 +461,7 @@ class GroupRule:
     max_depth: int | None = None
     lr_multiplier: float = 1.0
     weight_decay: bool | None = None
+    weight_decay_value: float | None = None
     optimizer: OptimizerName | None = None
     priority: int = 0
     name: str = ""
@@ -467,6 +469,16 @@ class GroupRule:
     def __post_init__(self) -> None:
         if self.lr_multiplier <= 0.0:
             raise ValueError("lr_multiplier must be positive.")
+        if self.weight_decay is not None and self.weight_decay_value is not None:
+            raise ValueError(
+                "weight_decay and weight_decay_value are mutually exclusive."
+            )
+        if self.weight_decay_value is not None:
+            weight_decay_value = float(self.weight_decay_value)
+            if not math.isfinite(weight_decay_value):
+                raise ValueError("weight_decay_value must be finite.")
+            if weight_decay_value < 0.0:
+                raise ValueError("weight_decay_value must be non-negative.")
         if self.min_depth is not None and self.max_depth is not None:
             if self.min_depth > self.max_depth:
                 raise ValueError("min_depth cannot exceed max_depth.")

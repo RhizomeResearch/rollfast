@@ -60,6 +60,12 @@ def test_config_validation_rejects_invalid_values():
         rfft.AccumulationConfig(steps=0)
     with pytest.raises(ValueError, match="lr_multiplier"):
         rfft.GroupRule(label="head", lr_multiplier=0.0)
+    with pytest.raises(ValueError, match="weight_decay_value"):
+        rfft.GroupRule(label="head", weight_decay_value=-0.1)
+    with pytest.raises(ValueError, match="weight_decay_value"):
+        rfft.GroupRule(label="head", weight_decay_value=float("inf"))
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        rfft.GroupRule(label="head", weight_decay=True, weight_decay_value=0.01)
     with pytest.raises(ValueError, match="EMA decay"):
         rfft.EMAConfig(decay=1.0)
     with pytest.raises(ValueError, match="EMA source_view"):

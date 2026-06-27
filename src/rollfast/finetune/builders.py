@@ -1277,6 +1277,9 @@ def _build_grouped_schedule_free_transform(
         base_parts.append(_clip_by_policy(gradient_policy))
     base_parts.append(_multi_transform(transforms, labels))
     base_optimizer = optax.chain(*base_parts)
+    adamc_weight_decay = (
+        _single_adamc_weight_decay(groups) if use_adamc_enabled else 0.0
+    )
 
     def learning_rate_tree(count, params):
         del params
@@ -1304,7 +1307,7 @@ def _build_grouped_schedule_free_transform(
         polyak_f_star=polyak_f_star,
         polyak_axis_name=polyak_axis_name,
         lr_max_init=optimizer.eps,
-        adamc_weight_decay=optimizer.weight_decay if use_adamc_enabled else 0.0,
+        adamc_weight_decay=adamc_weight_decay,
         adamc_weight_decay_mask=decay_mask,
     )
     if gradient_policy.nonfinite == "skip":
@@ -1727,6 +1730,16 @@ def _decay_mask_from_labels(
         labels,
         is_leaf=lambda x: x is None,
     )
+
+
+def _single_adamc_weight_decay(groups: tuple[CompiledGroup, ...]) -> float:
+    values = {group.weight_decay_value for group in groups if group.weight_decay_value}
+    if len(values) > 1:
+        raise ValueError(
+            "Schedule-Free AdamC supports only one nonzero weight_decay_value "
+            "across groups."
+        )
+    return next(iter(values), 0.0)
 
 
 def _resolve_sf_bool(enabled_by_plus: bool, value: bool | None) -> bool:

@@ -21,6 +21,28 @@ def test_compile_groups_applies_llrd_and_rollfast_rules_once():
     assert by_label["block_00_decay"].weight_decay_value == pytest.approx(0.05)
 
 
+def test_compile_groups_supports_wd_ft_weight_decay_values():
+    normalized = rfft.validate_plan(tiny_plan())
+    groups = rfft.compile_groups(
+        normalized.groups,
+        rfft.OptimizerConfig(base_lr=1e-3, weight_decay=0.123),
+        (
+            rfft.GroupRule(role="backbone", weight_decay_value=0.05),
+            rfft.GroupRule(role="head", weight_decay_value=0.01),
+            rfft.GroupRule(tag="bias", weight_decay_value=0.0, priority=1),
+        ),
+    )
+    by_label = {group.source_label: group for group in groups}
+
+    assert by_label["block_00_decay"].weight_decay_value == pytest.approx(0.05)
+    assert by_label["block_01_decay"].weight_decay_value == pytest.approx(0.05)
+    assert by_label["head_decay"].weight_decay_value == pytest.approx(0.01)
+    assert by_label["block_00_no_decay"].weight_decay_value == 0.0
+    assert by_label["block_01_no_decay"].weight_decay_value == 0.0
+    assert by_label["block_00_decay"].weight_decay is True
+    assert by_label["block_00_no_decay"].weight_decay is False
+
+
 def test_lora_b_ratio_applies_only_to_lora_b_labels():
     normalized = rfft.validate_plan(tiny_lora_plan())
     groups = rfft.compile_groups(
@@ -43,5 +65,19 @@ def test_conflicting_equal_priority_rules_raise():
             (
                 rfft.GroupRule(role="head", weight_decay=True, priority=1),
                 rfft.GroupRule(role="head", weight_decay=False, priority=1),
+            ),
+        )
+
+
+def test_conflicting_equal_priority_weight_decay_values_raise():
+    normalized = rfft.validate_plan(tiny_plan())
+
+    with pytest.raises(ValueError, match="conflicting weight_decay"):
+        rfft.compile_groups(
+            normalized.groups,
+            rfft.OptimizerConfig(),
+            (
+                rfft.GroupRule(role="backbone", weight_decay_value=0.05, priority=1),
+                rfft.GroupRule(tag="block", weight_decay_value=0.01, priority=1),
             ),
         )

@@ -18,10 +18,10 @@ def compile_groups(
     for label, group in sorted(groups.items()):
         matched = tuple(rule for rule in rules if matches_rule(group, rule))
         rule_lr = _rule_lr_multiplier(group, optimizer, matched)
-        weight_decay = _resolve_weight_decay(group, matched)
+        weight_decay_value = _resolve_weight_decay_value(group, optimizer, matched)
+        weight_decay = weight_decay_value != 0.0
         optimizer_name = _resolve_optimizer(optimizer.name, matched)
         effective_lr = optimizer.base_lr * group.lr_multiplier * rule_lr
-        weight_decay_value = optimizer.weight_decay if weight_decay else 0.0
         compiled.append(
             CompiledGroup(
                 source_label=label,
@@ -98,19 +98,33 @@ def _rule_lr_multiplier(
     return multiplier
 
 
-def _resolve_weight_decay(group: PlanGroup, rules: tuple[GroupRule, ...]) -> bool:
-    selected = [rule for rule in rules if rule.weight_decay is not None]
+def _resolve_weight_decay_value(
+    group: PlanGroup,
+    optimizer: OptimizerConfig,
+    rules: tuple[GroupRule, ...],
+) -> float:
+    selected = [
+        rule
+        for rule in rules
+        if rule.weight_decay is not None or rule.weight_decay_value is not None
+    ]
     if not selected:
-        return group.weight_decay
+        return optimizer.weight_decay if group.weight_decay else 0.0
     max_priority = max(rule.priority for rule in selected)
     highest = [rule for rule in selected if rule.priority == max_priority]
-    values = {rule.weight_decay for rule in highest}
+    values = {_rule_weight_decay_value(rule, optimizer) for rule in highest}
     if len(values) > 1:
         names = tuple(rule.name or repr(rule) for rule in highest)
         raise ValueError(
             f"conflicting weight_decay rules at priority {max_priority}: {names}"
         )
-    return bool(highest[-1].weight_decay)
+    return _rule_weight_decay_value(highest[-1], optimizer)
+
+
+def _rule_weight_decay_value(rule: GroupRule, optimizer: OptimizerConfig) -> float:
+    if rule.weight_decay_value is not None:
+        return float(rule.weight_decay_value)
+    return optimizer.weight_decay if rule.weight_decay else 0.0
 
 
 def _resolve_optimizer(

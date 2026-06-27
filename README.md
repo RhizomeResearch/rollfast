@@ -264,6 +264,38 @@ print(optim.report)
 opt_state = optim.init(plan.trainable)
 ```
 
+Group rules can override the plan's learning-rate and weight-decay policy. The
+plan-level `weight_decay` flag is boolean: when it is enabled, Rollfast uses the
+optimizer's global `weight_decay`; when disabled, the compiled group uses `0.0`.
+Use `GroupRule(weight_decay_value=...)` when different groups need different
+absolute decay coefficients:
+
+```python
+wd_ft_rules = (
+    rfft.GroupRule(role="backbone", weight_decay_value=0.05),
+    rfft.GroupRule(role="head", weight_decay_value=0.01),
+    rfft.GroupRule(tag="bias", weight_decay_value=0.0, priority=1),
+    rfft.GroupRule(tag="norm", weight_decay_value=0.0, priority=1),
+    rfft.GroupRule(tag="positional", weight_decay_value=0.0, priority=1),
+    rfft.GroupRule(tag="cls", weight_decay_value=0.0, priority=1),
+    rfft.GroupRule(tag="register", weight_decay_value=0.0, priority=1),
+)
+
+optim = rfft.adamw_from_plan(
+    plan,
+    total_steps=20_000,
+    weight_decay=0.05,
+    group_rules=wd_ft_rules,
+)
+```
+
+`weight_decay` and `weight_decay_value` are mutually exclusive on one
+`GroupRule`. If multiple matching decay rules have the same priority, they must
+resolve to the same coefficient; otherwise compilation raises a conflict. The
+compiled report shows the effective numeric value as each group's
+`weight_decay_value`. Schedule-Free AdamC mode still supports only one nonzero
+decay coefficient across groups.
+
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and
 checkpoint guidance in
 [`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md)

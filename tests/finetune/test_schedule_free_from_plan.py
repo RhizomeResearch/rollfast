@@ -48,6 +48,20 @@ def test_schedule_free_adam_from_plan_reports_grouped_lrs():
     assert method_config["config"]["external_schedule"] == "wsd"
 
 
+def test_schedule_free_adamc_rejects_multiple_weight_decay_values():
+    with pytest.raises(ValueError, match="Schedule-Free AdamC"):
+        rfft.schedule_free_adam_from_plan(
+            tiny_plan(),
+            total_steps=20,
+            schedule="wsd",
+            schedule_free_plus=True,
+            group_rules=(
+                rfft.GroupRule(role="backbone", weight_decay_value=0.05),
+                rfft.GroupRule(role="head", weight_decay_value=0.01),
+            ),
+        )
+
+
 def test_schedule_free_adam_updates_and_returns_eval_params():
     plan = tiny_plan()
     bundle = rfft.schedule_free_adam_from_plan(
