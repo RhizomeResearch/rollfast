@@ -17,6 +17,9 @@ def compile_groups(
     compiled = []
     for label, group in sorted(groups.items()):
         matched = tuple(rule for rule in rules if matches_rule(group, rule))
+        matched_rule_names = tuple(
+            dict.fromkeys(rule.name for rule in matched if rule.name)
+        )
         rule_lr = _rule_lr_multiplier(group, optimizer, matched)
         weight_decay_value = _resolve_weight_decay_value(group, optimizer, matched)
         weight_decay = weight_decay_value != 0.0
@@ -38,6 +41,7 @@ def compile_groups(
                 param_count=group.param_count,
                 byte_count=group.byte_count,
                 leaf_count=group.leaf_count,
+                matched_rule_names=matched_rule_names,
             )
         )
     return tuple(compiled)
@@ -80,9 +84,26 @@ def preview_groups(groups: tuple[CompiledGroup, ...]) -> tuple[dict[str, object]
             "role": group.role,
             "depth": group.depth,
             "tags": tuple(sorted(group.tags)),
+            "matched_rules": group.matched_rule_names,
         }
         for group in groups
     )
+
+
+def unmatched_rule_warnings(
+    groups: dict[str, PlanGroup],
+    rules: Iterable[GroupRule] = (),
+) -> tuple[str, ...]:
+    """Return warnings for named rules that do not match any plan group."""
+
+    plan_groups = tuple(groups.values())
+    warnings = []
+    for rule in rules:
+        if not rule.name:
+            continue
+        if not any(matches_rule(group, rule) for group in plan_groups):
+            warnings.append(f"group rule {rule.name!r} matched no groups.")
+    return tuple(dict.fromkeys(warnings))
 
 
 def _rule_lr_multiplier(
@@ -153,4 +174,9 @@ def _is_lora_b_group(group: PlanGroup) -> bool:
     )
 
 
-__all__ = ("compile_groups", "matches_rule", "preview_groups")
+__all__ = (
+    "compile_groups",
+    "matches_rule",
+    "preview_groups",
+    "unmatched_rule_warnings",
+)

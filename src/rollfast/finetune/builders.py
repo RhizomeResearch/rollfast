@@ -52,7 +52,7 @@ from .config import (
     ShardingPolicy,
     StateQuantizationConfig,
 )
-from .groups import compile_groups
+from .groups import compile_groups, unmatched_rule_warnings
 from .schedules import build_schedule, preview_schedule
 from .transforms import clip_by_global_norm
 from .validation import validate_plan
@@ -124,6 +124,7 @@ def compile_optimizer(
     normalized = validate_plan(plan, allow_empty_groups=allow_empty_groups)
     schedule = schedule.resolved(total_steps)
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
+    rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_transform(
         labels=normalized.labels,
         groups=compiled_groups,
@@ -154,7 +155,10 @@ def compile_optimizer(
         accumulation,
         precision,
         state_quantization=state_quantization,
-        warnings=_report_warnings(normalized.warnings, normalized.trainable, precision),
+        warnings=(
+            *_report_warnings(normalized.warnings, normalized.trainable, precision),
+            *rule_warnings,
+        ),
     )
     return OptimizerBundle(
         tx=tx,
@@ -306,6 +310,7 @@ def galore_adamw_from_plan(
 ) -> OptimizerBundle:
     """Build grouped GaLore AdamW from a fine-tuning plan."""
 
+    group_rules = tuple(group_rules)
     optimizer = OptimizerConfig(
         name="galore_adamw",
         base_lr=base_lr,
@@ -331,7 +336,8 @@ def galore_adamw_from_plan(
     )
 
     normalized = validate_plan(plan)
-    compiled_groups = compile_groups(normalized.groups, optimizer, tuple(group_rules))
+    compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
+    rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     refresh_communication_bytes = _estimate_galore_refresh_communication_bytes(
         normalized.trainable,
         normalized.labels,
@@ -372,6 +378,7 @@ def galore_adamw_from_plan(
         precision,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
+            *rule_warnings,
             *_galore_profile_warnings(galore),
             *_galore_sharding_warnings(
                 sharding,
@@ -435,6 +442,7 @@ def apollo_adamw_from_plan(
 ) -> OptimizerBundle:
     """Build grouped APOLLO AdamW from a fine-tuning plan."""
 
+    group_rules = tuple(group_rules)
     apollo = APOLLOConfig() if apollo is None else apollo
     resolved_weight_decay = (
         apollo.weight_decay if weight_decay is None else weight_decay
@@ -465,7 +473,8 @@ def apollo_adamw_from_plan(
     )
 
     normalized = validate_plan(plan)
-    compiled_groups = compile_groups(normalized.groups, optimizer, tuple(group_rules))
+    compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
+    rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_apollo_transform(
         labels=normalized.labels,
         groups=compiled_groups,
@@ -497,6 +506,7 @@ def apollo_adamw_from_plan(
         precision,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
+            *rule_warnings,
             *_apollo_profile_warnings(),
         ),
     )
@@ -606,6 +616,7 @@ def schedule_free_adam_from_plan(
 
     normalized = validate_plan(plan)
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
+    rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_schedule_free_transform(
         labels=normalized.labels,
         groups=compiled_groups,
@@ -659,7 +670,10 @@ def schedule_free_adam_from_plan(
         schedule_config,
         accumulation,
         precision,
-        warnings=_report_warnings(normalized.warnings, normalized.trainable, precision),
+        warnings=(
+            *_report_warnings(normalized.warnings, normalized.trainable, precision),
+            *rule_warnings,
+        ),
     )
     return OptimizerBundle(
         tx=tx,
@@ -987,6 +1001,7 @@ def _hybrid_optimizer_from_plan(
     precision = PrecisionConfig(moment_dtype=moment_dtype)
     normalized = validate_plan(plan)
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
+    rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_hybrid_transform(
         labels=normalized.labels,
         groups=compiled_groups,
@@ -1023,6 +1038,7 @@ def _hybrid_optimizer_from_plan(
         precision,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
+            *rule_warnings,
             *_hybrid_profile_warnings(family),
         ),
     )
@@ -1783,7 +1799,7 @@ def _make_report(
         accumulation_steps=accumulation.steps,
         schedule_step_counter=schedule.step_counter,
         state_policies=_state_policies(groups, precision, state_quantization),
-        warnings=warnings,
+        warnings=tuple(dict.fromkeys(warnings)),
     )
 
 

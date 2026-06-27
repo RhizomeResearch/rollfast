@@ -91,6 +91,39 @@ def test_lora_plus_ratio_is_visible_in_report():
     assert groups["lora_B_decay"].effective_lr == pytest.approx(3.2e-3)
 
 
+def test_report_exposes_verbose_rule_breakdown_and_unmatched_rule_warning():
+    bundle = rfft.adamw_from_plan(
+        tiny_plan(),
+        total_steps=20,
+        base_lr=1e-3,
+        weight_decay=0.05,
+        schedule="constant",
+        clip_global_norm=None,
+        group_rules=(
+            rfft.GroupRule(
+                label="head_decay",
+                lr_multiplier=2.0,
+                name="head_rule",
+            ),
+            rfft.GroupRule(label="missing_decay", name="missing_rule"),
+        ),
+    )
+    groups = {group.source_label: group for group in bundle.report.groups}
+    default_rows = {row["label"]: row for row in bundle.report.group_table()}
+    verbose_rows = {
+        row["label"]: row for row in bundle.report.group_table(verbose=True)
+    }
+
+    assert groups["head_decay"].matched_rule_names == ("head_rule",)
+    assert "matched_rules" not in default_rows["head_decay"]
+    assert verbose_rows["head_decay"]["base_lr"] == pytest.approx(1e-3)
+    assert verbose_rows["head_decay"]["plan_lr_multiplier"] == pytest.approx(2.0)
+    assert verbose_rows["head_decay"]["rule_lr_multiplier"] == pytest.approx(2.0)
+    assert verbose_rows["head_decay"]["matched_rules"] == ("head_rule",)
+    assert bundle.report.policy_table() == bundle.report.group_table(verbose=True)
+    assert "group rule 'missing_rule' matched no groups." in bundle.report.warnings
+
+
 def test_lora_plus_ratio_controls_update_magnitude():
     plan = tiny_lora_plan()
     bundle = rfft.adamw_from_plan(

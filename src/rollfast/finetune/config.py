@@ -83,6 +83,33 @@ class ScheduleConfig:
         resolved_total = self.total_steps if total_steps is None else total_steps
         return replace(self, total_steps=resolved_total)
 
+    @classmethod
+    def warmup_cosine_from_epochs(
+        cls,
+        *,
+        num_epochs: int,
+        num_batches: int,
+        warmup_epochs: float,
+        end_lr_ratio: float = 0.01,
+        step_counter: StepCounter = "optimizer",
+    ) -> "ScheduleConfig":
+        """Build a warmup-cosine schedule from epoch and batch counts."""
+
+        if num_epochs <= 0:
+            raise ValueError("num_epochs must be positive.")
+        if num_batches <= 0:
+            raise ValueError("num_batches must be positive.")
+        warmup_epoch_count = float(warmup_epochs)
+        if not math.isfinite(warmup_epoch_count) or warmup_epoch_count < 0.0:
+            raise ValueError("warmup_epochs must be finite and non-negative.")
+        return cls(
+            kind="warmup_cosine",
+            total_steps=int(num_epochs * num_batches),
+            warmup_steps=int(warmup_epoch_count * num_batches),
+            end_lr_ratio=end_lr_ratio,
+            step_counter=step_counter,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -1189,6 +1216,7 @@ class CompiledGroup:
     param_count: int
     byte_count: int
     leaf_count: int
+    matched_rule_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1217,9 +1245,10 @@ class OptimizerReport:
     state_policies: Mapping[str, str] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
-    def group_table(self) -> tuple[dict[str, Any], ...]:
-        return tuple(
-            {
+    def group_table(self, verbose: bool = False) -> tuple[dict[str, Any], ...]:
+        rows = []
+        for group in self.groups:
+            row = {
                 "label": group.source_label,
                 "optimizer": group.optimizer,
                 "effective_lr": group.effective_lr,
@@ -1230,8 +1259,23 @@ class OptimizerReport:
                 "role": group.role,
                 "depth": group.depth,
             }
-            for group in self.groups
-        )
+            if verbose:
+                row.update(
+                    {
+                        "base_lr": group.base_lr,
+                        "plan_lr_multiplier": group.plan_lr_multiplier,
+                        "rule_lr_multiplier": group.rule_lr_multiplier,
+                        "weight_decay_enabled": group.weight_decay,
+                        "tags": tuple(sorted(group.tags)),
+                        "matched_rules": group.matched_rule_names,
+                        "leaves": group.leaf_count,
+                    }
+                )
+            rows.append(row)
+        return tuple(rows)
+
+    def policy_table(self) -> tuple[dict[str, Any], ...]:
+        return self.group_table(verbose=True)
 
     def __str__(self) -> str:
         lines = [

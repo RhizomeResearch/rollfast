@@ -10,13 +10,14 @@ def test_compile_groups_applies_llrd_and_rollfast_rules_once():
     groups = rfft.compile_groups(
         normalized.groups,
         rfft.OptimizerConfig(base_lr=1e-3, weight_decay=0.05),
-        (rfft.GroupRule(label="head_decay", lr_multiplier=3.0),),
+        (rfft.GroupRule(label="head_decay", lr_multiplier=3.0, name="head_lr"),),
     )
     by_label = {group.source_label: group for group in groups}
 
     assert by_label["block_00_decay"].effective_lr == pytest.approx(5e-4)
     assert by_label["block_01_decay"].effective_lr == pytest.approx(1e-3)
     assert by_label["head_decay"].effective_lr == pytest.approx(6e-3)
+    assert by_label["head_decay"].matched_rule_names == ("head_lr",)
     assert by_label["block_00_no_decay"].weight_decay_value == 0.0
     assert by_label["block_00_decay"].weight_decay_value == pytest.approx(0.05)
 
@@ -81,3 +82,15 @@ def test_conflicting_equal_priority_weight_decay_values_raise():
                 rfft.GroupRule(tag="block", weight_decay_value=0.01, priority=1),
             ),
         )
+
+
+def test_preview_groups_includes_matched_rule_names():
+    normalized = rfft.validate_plan(tiny_plan())
+    groups = rfft.compile_groups(
+        normalized.groups,
+        rfft.OptimizerConfig(),
+        (rfft.GroupRule(label="head_decay", lr_multiplier=2.0, name="head_lr"),),
+    )
+    rows = {row["label"]: row for row in rfft.preview_groups(groups)}
+
+    assert rows["head_decay"]["matched_rules"] == ("head_lr",)

@@ -68,7 +68,12 @@ from .diagnostics import (
     estimate_optimizer_state_memory,
     optimizer_state_memory_summary,
 )
-from .groups import compile_groups, matches_rule, preview_groups
+from .groups import (
+    compile_groups,
+    matches_rule,
+    preview_groups,
+    unmatched_rule_warnings,
+)
 from .offload import (
     offload_optimizer_state,
     restore_offloaded_optimizer_state,
@@ -76,12 +81,16 @@ from .offload import (
     with_state_offload,
 )
 from .recipes import (
+    DEFAULT_NO_DECAY_TAGS,
     FineTuneOptimizerRecipe,
     adapters_adamw,
     bitfit_adamw,
+    discriminative_adamw_rules,
     full_ft_adamw,
+    head_backbone_adamw,
     linear_probe_adamw,
     lora_adamw,
+    no_decay_rules,
     partial_ft_adamw,
     prompts_adamw,
 )
@@ -150,6 +159,7 @@ __all__ = (
     "CompiledGroup",
     "CompiledPolicyTrees",
     "CounterPolicy",
+    "DEFAULT_NO_DECAY_TAGS",
     "EMAConfig",
     "FineTuneStepState",
     "FineTuneOptimizerRecipe",
@@ -202,6 +212,7 @@ __all__ = (
     "build_schedule",
     "compile_groups",
     "compile_optimizer",
+    "discriminative_adamw_rules",
     "estimate_optimizer_state",
     "estimate_optimizer_state_memory",
     "full_ft_adamw",
@@ -209,6 +220,7 @@ __all__ = (
     "hybrid_aurora_adam_from_plan",
     "hybrid_kron_adam_from_plan",
     "hybrid_prism_adam_from_plan",
+    "head_backbone_adamw",
     "muon_adam_from_plan",
     "init_accumulation_state",
     "init_finetune_step_state",
@@ -235,6 +247,7 @@ __all__ = (
     "make_state_checkpoint",
     "make_update_step",
     "matches_rule",
+    "no_decay_rules",
     "optimizer_from_plan",
     "optimizer_state_memory_summary",
     "offload_optimizer_state",
@@ -245,6 +258,7 @@ __all__ = (
     "prompts_adamw",
     "reconfigure_optimizer",
     "transfer_optimizer_state",
+    "unmatched_rule_warnings",
     "restore_state_checkpoint",
     "restore_offloaded_optimizer_state",
     "save_state_checkpoint",

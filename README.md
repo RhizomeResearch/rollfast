@@ -264,28 +264,48 @@ print(optim.report)
 opt_state = optim.init(plan.trainable)
 ```
 
-Group rules can override the plan's learning-rate and weight-decay policy. The
-plan-level `weight_decay` flag is boolean: when it is enabled, Rollfast uses the
-optimizer's global `weight_decay`; when disabled, the compiled group uses `0.0`.
-Use `GroupRule(weight_decay_value=...)` when different groups need different
-absolute decay coefficients:
+Group rules can override the plan's learning-rate and weight-decay policy. They
+match normalized plan groups, not individual parameter leaves, so tag-based
+rules depend on the plan producer's `group_specs` metadata and label
+granularity. The plan-level `weight_decay` flag is boolean: when it is enabled,
+Rollfast uses the optimizer's global `weight_decay`; when disabled, the compiled
+group uses `0.0`.
+
+Use `head_backbone_adamw(...)` for a common discriminative fine-tuning setup
+where the backbone and head use different LR/WD values and standard no-decay
+tags force zero decay:
 
 ```python
-wd_ft_rules = (
-    rfft.GroupRule(role="backbone", weight_decay_value=0.05),
-    rfft.GroupRule(role="head", weight_decay_value=0.01),
-    rfft.GroupRule(tag="bias", weight_decay_value=0.0, priority=1),
-    rfft.GroupRule(tag="norm", weight_decay_value=0.0, priority=1),
-    rfft.GroupRule(tag="positional", weight_decay_value=0.0, priority=1),
-    rfft.GroupRule(tag="cls", weight_decay_value=0.0, priority=1),
-    rfft.GroupRule(tag="register", weight_decay_value=0.0, priority=1),
+recipe = rfft.head_backbone_adamw(
+    total_steps=20_000,
+    backbone_lr=1e-5,
+    head_lr=1e-3,
+    backbone_weight_decay=0.05,
+    head_weight_decay=0.01,
+    no_decay_tags=rfft.DEFAULT_NO_DECAY_TAGS,
+)
+
+optim = rfft.compile_optimizer(plan, recipe=recipe)
+print(optim.report.policy_table())
+```
+
+For direct builders, `discriminative_adamw_rules(...)` returns
+`(base_lr, weight_decay, group_rules)`:
+
+```python
+base_lr, weight_decay, rules = rfft.discriminative_adamw_rules(
+    backbone_lr=1e-5,
+    head_lr=1e-3,
+    backbone_weight_decay=0.05,
+    head_weight_decay=0.01,
 )
 
 optim = rfft.adamw_from_plan(
     plan,
     total_steps=20_000,
-    weight_decay=0.05,
-    group_rules=wd_ft_rules,
+    base_lr=base_lr,
+    weight_decay=weight_decay,
+    group_rules=rules,
 )
 ```
 
@@ -293,8 +313,16 @@ optim = rfft.adamw_from_plan(
 `GroupRule`. If multiple matching decay rules have the same priority, they must
 resolve to the same coefficient; otherwise compilation raises a conflict. The
 compiled report shows the effective numeric value as each group's
-`weight_decay_value`. Schedule-Free AdamC mode still supports only one nonzero
-decay coefficient across groups.
+`weight_decay_value`. Named rules appear in `CompiledGroup.matched_rule_names`,
+`preview_groups(...)`, and `OptimizerReport.group_table(verbose=True)`;
+unmatched named rules are reported as warnings. Schedule-Free AdamC mode still
+supports only one nonzero decay coefficient across groups.
+
+`ScheduleConfig.warmup_cosine_from_epochs(...)` converts epoch-based training
+lengths to steps for the fine-tuning builders. Rollfast's warmup schedules
+preserve the existing behavior that step 0 starts at `peak_lr / warmup_steps`
+when warmup is enabled. AdamW fine-tuning defaults keep `eps=1e-6`; pass
+`eps=1e-8` when mirroring Optax/PyTorch-style AdamW settings exactly.
 
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and
 checkpoint guidance in

@@ -51,3 +51,32 @@ def test_preview_uses_schedule_factory():
     assert preview[0].step == 0
     assert preview[-1].step == 4
     assert preview[-1].value == pytest.approx(0.01)
+
+
+def test_warmup_cosine_from_epochs_resolves_step_counts():
+    config = rfft.ScheduleConfig.warmup_cosine_from_epochs(
+        num_epochs=5,
+        num_batches=100,
+        warmup_epochs=2,
+        end_lr_ratio=0.05,
+    )
+
+    assert config.kind == "warmup_cosine"
+    assert config.total_steps == 500
+    assert config.warmup_steps == 200
+    assert config.end_lr_ratio == pytest.approx(0.05)
+
+
+def test_warmup_cosine_from_epochs_rejects_invalid_counts():
+    with pytest.raises(ValueError, match="num_epochs"):
+        rfft.ScheduleConfig.warmup_cosine_from_epochs(
+            num_epochs=0,
+            num_batches=100,
+            warmup_epochs=2,
+        )
+    with pytest.raises(ValueError, match="warmup_epochs"):
+        rfft.ScheduleConfig.warmup_cosine_from_epochs(
+            num_epochs=5,
+            num_batches=100,
+            warmup_epochs=-1,
+        )
