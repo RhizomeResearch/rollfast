@@ -33,7 +33,11 @@ from rollfast.optim.psgd import (
     scale_by_kron,
 )
 from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
-from rollfast.utils import _stochastic_round_bf16, _validate_nonnegative_static_scalar
+from rollfast.utils import (
+    _fresh_prng_key,
+    _stochastic_round_bf16,
+    _validate_nonnegative_static_scalar,
+)
 
 ScheduleFreeLearningRate = (
     base.ScalarOrSchedule | Callable[[jax.typing.ArrayLike, base.Params | None], Any]
@@ -160,7 +164,7 @@ def schedule_free(
     b1: float = 0.9,
     weighting_mode: str | WeightingMode = WeightingMode.SCHEDULET,
     state_dtype: jax.typing.DTypeLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     *,
     r: float = 0.0,
     c_warmup: int = 0,
@@ -314,6 +318,7 @@ def schedule_free(
     base_optimizer = base.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         dtype = (
             state_dtype
             if state_dtype is not None
@@ -331,7 +336,7 @@ def schedule_free(
             step_count=jnp.zeros([], dtype=jnp.int32),
             base_state=base_optimizer.init(params),
             z=z,
-            key=key,
+            key=state_key,
             lr_max=_tree_scalar_like_params(lr_max_init, params),
             scheduled_lr=_tree_scalar_like_params(0.0, params),
             grad_l1_ema=jnp.asarray(0.0, dtype=jnp.float32),
@@ -654,7 +659,7 @@ def schedule_free_prism(
     permissive_spike_protection: bool = True,
     mu_dtype: jax.typing.DTypeLike | None = None,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     # Partitioning Arguments
     adam_learning_rate: float | None = None,
     adam_b1: float | None = None,
@@ -696,7 +701,8 @@ def schedule_free_prism(
 
     partition = _make_matrix_partition_fns(prism_weight_dimension_numbers, "prism")
 
-    key_prism, key_adam = jax.random.split(key, 2)
+    root_key = _fresh_prng_key(key)
+    key_prism, key_adam = jax.random.split(root_key, 2)
 
     prism_components = [
         scale_by_prism(
@@ -765,7 +771,7 @@ def schedule_free_prism(
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
-        key=key,
+        key=root_key,
         r=sf_r,
         c_warmup=sf_c_warmup,
         weight_lr_power=sf_weight_lr_power,
@@ -821,7 +827,7 @@ def schedule_free_kron(
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     *,
     schedule_free_plus: bool = False,
     sf_r: float = 0.0,
@@ -988,7 +994,7 @@ def schedule_free_adam(
     weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     mu_dtype: jax.typing.DTypeLike | None = None,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     *,
     schedule_free_plus: bool = False,
     sf_r: float = 0.0,
@@ -1099,7 +1105,7 @@ def schedule_free_aurora(
     mu_dtype: jax.typing.DTypeLike | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     adam_learning_rate: float | None = None,
     adam_b1: float | None = None,
     adam_b2: float | None = None,
@@ -1138,7 +1144,8 @@ def schedule_free_aurora(
         decay_fraction=decay_fraction,
     )
 
-    key_aurora, key_adam = jax.random.split(key, 2)
+    root_key = _fresh_prng_key(key)
+    key_aurora, key_adam = jax.random.split(root_key, 2)
 
     partition = _make_matrix_partition_fns(
         aurora_weight_dimension_numbers,
@@ -1234,7 +1241,7 @@ def schedule_free_aurora(
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
-        key=key,
+        key=root_key,
         r=sf_r,
         c_warmup=sf_c_warmup,
         weight_lr_power=sf_weight_lr_power,

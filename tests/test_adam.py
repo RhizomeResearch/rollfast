@@ -58,6 +58,32 @@ def test_adamw():
     assert updates["w"].shape == (2, 2)
 
 
+@pytest.mark.parametrize("explicit_key", (False, True))
+def test_adamw_reinit_after_donated_state_uses_fresh_key(explicit_key):
+    params = {"w": jnp.asarray([1.0, -1.0])}
+    grads = jax.tree.map(jnp.ones_like, params)
+    kwargs = {"key": jax.random.PRNGKey(123)} if explicit_key else {}
+    tx = adamw(learning_rate=1e-3, **kwargs)
+    state1 = tx.init(params)
+
+    @jax.jit(donate_argnums=(1,))
+    def step(params, state):
+        _, new_state = tx.update(grads, state, params)
+        return new_state
+
+    state1_after = step(params, state1)
+    jax.tree.map(
+        lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else None,
+        state1_after,
+    )
+
+    state2 = jax.device_put(tx.init(params))
+    jax.tree.map(
+        lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else None,
+        state2,
+    )
+
+
 def test_adamw_matches_optax_masked_decoupled_weight_decay():
     params = {
         "w": jnp.array([1.0, -2.0], dtype=jnp.float32),

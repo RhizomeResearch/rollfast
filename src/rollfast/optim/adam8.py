@@ -11,7 +11,11 @@ import jax.numpy as jnp
 from optax._src import base, combine, numerics, transform, utils
 from optax.transforms import _masking
 
-from rollfast.utils import _safe_bias_correction, zeros_like_preserving_sharding
+from rollfast.utils import (
+    _fresh_prng_key,
+    _safe_bias_correction,
+    zeros_like_preserving_sharding,
+)
 
 
 SYMMETRIC_INT8_CODEBOOK_ID = "rollfast.symmetric_int8.neg127_pos127.v1"
@@ -250,7 +254,7 @@ def scale_by_adam8(
     block_layout: BlockLayout = "shard_local",
     quantize: bool = True,
     nesterov: bool = False,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Rescale gradients by Adam while storing eligible moments as 8-bit blocks."""
 
@@ -267,7 +271,7 @@ def scale_by_adam8(
         raise ValueError("block_layout must be 'shard_local' or 'logical_global'.")
 
     def init_fn(params):
-        key_mu, key_nu, next_key = jax.random.split(key, 3)
+        key_mu, key_nu, next_key = jax.random.split(_fresh_prng_key(key), 3)
         mu = _init_moment_tree(
             params,
             block_size=block_size,
@@ -405,7 +409,7 @@ def adamw8(
     quantize: bool = True,
     nesterov: bool = False,
     use_magma: bool = False,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """AdamW whose eligible moment leaves use blockwise 8-bit codebook state."""
 

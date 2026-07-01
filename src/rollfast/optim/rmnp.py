@@ -36,6 +36,7 @@ from rollfast.optim.dimension_numbers import (
 from rollfast.optim.muon import scale_by_muon_shape
 from rollfast.utils import (
     MomentumAccumulator,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _prepare_first_moment_runtime,
@@ -90,7 +91,7 @@ def scale_by_rmnp(
     adaptive: bool = False,
     momentum_accumulator: MomentumAccumulator = "ema",
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Scale updates with Row-Momentum Normalized Preconditioning.
 
@@ -108,10 +109,11 @@ def scale_by_rmnp(
     )
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         return ScaleByRmnpState(
             count=jnp.zeros([], jnp.int32),
             mu=_zeros_like_tree(params, canonical_mu_dtype),
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -230,7 +232,7 @@ def rmnp(
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """RMNP optimizer with AdamW fallback for non-matrix parameters."""
     if adam_learning_rate is None:
@@ -239,7 +241,7 @@ def rmnp(
         weight_decay if adam_weight_decay is None else adam_weight_decay
     )
 
-    key_rmnp, key_adam = jax.random.split(key, 2)
+    key_rmnp, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(rmnp_weight_dimension_numbers, "rmnp")
     rmnp_components = [

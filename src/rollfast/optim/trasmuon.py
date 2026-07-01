@@ -36,6 +36,7 @@ from rollfast.optim.orthogonalization import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _prepare_first_moment_runtime,
@@ -239,7 +240,7 @@ def scale_by_trasmuon(
     momentum_accumulator: MomentumAccumulator = "ema",
     mu_dtype: jax.typing.DTypeLike | None = None,
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Scale updates with TrasMuon's matrix direction.
 
@@ -280,6 +281,7 @@ def scale_by_trasmuon(
         return _get_dimension_numbers(weight_dimension_numbers, params_or_updates)
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         dim_nums = resolve_dim_nums(params)
         return ScaleByTrasMuonState(
             count=jnp.zeros([], jnp.int32),
@@ -308,7 +310,7 @@ def scale_by_trasmuon(
                 dim_nums,
                 is_leaf=_is_dimension_numbers_leaf,
             ),
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -415,7 +417,7 @@ def trasmuon(
     adam_weight_decay: base.ScalarOrSchedule | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     trasmuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """TrasMuon optimizer with automatic matrix/AdamW partitioning."""
     if adam_learning_rate is None:
@@ -424,7 +426,7 @@ def trasmuon(
         weight_decay if adam_weight_decay is None else adam_weight_decay
     )
 
-    key_trasmuon, key_adam = jax.random.split(key, 2)
+    key_trasmuon, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(
         trasmuon_weight_dimension_numbers,

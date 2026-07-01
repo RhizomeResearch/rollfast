@@ -44,6 +44,7 @@ from rollfast.optim.orthogonalization import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
 )
 
@@ -505,7 +506,7 @@ def scale_by_prism(
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """The core PRISM gradient transformation.
 
@@ -580,11 +581,12 @@ def scale_by_prism(
     )
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         return ScaleByPrismState(
             count=jnp.zeros([], jnp.int32),
             mu=init_matrix_momentum_state(params, canonical_mu_dtype),
             magma_s=init_matrix_magma_state(params, use_magma),
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -780,7 +782,7 @@ def prism(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     # Partitioning Arguments
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
@@ -861,7 +863,7 @@ def prism(
         via Anisotropic Spectral Shaping.
         URL: https://leloykun.github.io/ponder/shampoo-prism/
     """
-    key_prism, key_adam = jax.random.split(key, 2)
+    key_prism, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate

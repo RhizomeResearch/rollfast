@@ -41,6 +41,7 @@ from rollfast.optim.dimension_numbers import (
 from rollfast.utils import (
     MomentumAccumulator,
     _cast_state_tree,
+    _fresh_prng_key,
     _momentum_grad_scale,
     _resolve_scalar,
     _tree_stochastic_cast,
@@ -186,7 +187,7 @@ def scale_by_pion(
     momentum_accumulator: MomentumAccumulator = "ema",
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     r"""Pion's spectrum-preserving matrix update as an Optax transform.
 
@@ -206,6 +207,7 @@ def scale_by_pion(
     )
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
         states = jax.tree.map(
             lambda p, d: _zeros_for_pion(p, d, canonical_mu_dtype),
@@ -220,7 +222,7 @@ def scale_by_pion(
             v_in=v_in,
             m_out=m_out,
             v_out=v_out,
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -324,7 +326,7 @@ def pion(
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Pion optimizer with AdamW fallback for non-matrix parameters.
 
@@ -337,7 +339,7 @@ def pion(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    key_pion, key_adam = jax.random.split(key, 2)
+    key_pion, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(pion_weight_dimension_numbers, "pion")
 

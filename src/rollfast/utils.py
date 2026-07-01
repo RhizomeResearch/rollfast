@@ -70,6 +70,12 @@ def _init_magma_state(params: base.Params) -> base.Params:
     )
 
 
+def _fresh_prng_key(key: jax.Array | None, seed: int = 42) -> jax.Array:
+    """Return a fresh PRNG key buffer for optimizer state initialization."""
+    source = jax.random.PRNGKey(seed) if key is None else key
+    return jnp.array(source, copy=True)
+
+
 def _apply_weight_decay_leaf(
     update: jax.Array,
     param: jax.Array,

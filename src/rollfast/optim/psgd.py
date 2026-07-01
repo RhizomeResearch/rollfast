@@ -18,6 +18,7 @@ from optax.transforms import _masking
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
     _apply_weight_decay_tree,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _resolve_mask,
     _resolve_scalar,
@@ -781,7 +782,7 @@ def scale_by_kron(
     weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     axis_name: str | None = None,
     verbose: bool = False,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Implements PSGD Kron (Preconditioned SGD with Kronecker factorization).
 
@@ -905,6 +906,7 @@ def scale_by_kron(
             return fn(*args)
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
 
         scanned_layers_ = scanned_layers
@@ -1030,7 +1032,7 @@ def scale_by_kron(
             Ls_lipschitz=Ls,
             needs_scale_init=jnp.array(lazy_init, dtype=jnp.bool_),
             magma_s=magma_s,
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -1513,7 +1515,7 @@ def kron(
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     verbose: bool = False,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
 

@@ -38,6 +38,7 @@ from rollfast.optim.orthogonalization import (
 )
 from rollfast.utils import (
     MomentumAccumulator,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _prepare_first_moment_runtime,
@@ -226,7 +227,7 @@ def scale_by_normuon(
     nesterov: bool = True,
     bias_correction: bool = False,
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Scale updates with NorMuon/ContraMuon matrix directions.
 
@@ -266,6 +267,7 @@ def scale_by_normuon(
         return _get_dimension_numbers(weight_dimension_numbers, params_or_updates)
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         dim_nums = resolve_dim_nums(params)
         return ScaleByNorMuonState(
             count=jnp.zeros([], jnp.int32),
@@ -276,7 +278,7 @@ def scale_by_normuon(
                 dim_nums,
                 is_leaf=_is_dimension_numbers_leaf,
             ),
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -385,7 +387,7 @@ def _partitioned_muon_variant(
     adam_learning_rate: base.ScalarOrSchedule | None,
     weight_dimension_numbers: WeightDimNumOrFn | None,
     consistent_rms: jax.typing.ArrayLike | None,
-    key: jax.Array,
+    key: jax.Array | None,
 ) -> base.GradientTransformation:
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -393,7 +395,7 @@ def _partitioned_muon_variant(
         weight_decay if adam_weight_decay is None else adam_weight_decay
     )
 
-    key_muon, key_adam = jax.random.split(key, 2)
+    key_muon, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(weight_dimension_numbers, label)
     matrix_components = [
@@ -472,7 +474,7 @@ def normuon(
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     normuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """NorMuon optimizer with automatic matrix/AdamW partitioning.
 
@@ -536,7 +538,7 @@ def contramuon(
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     contramuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """ContraMuon optimizer with automatic matrix/AdamW partitioning.
 
@@ -601,7 +603,7 @@ def contranormuon(
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     contranormuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """ContraMuon plus NorMuon normalization with AdamW fallback."""
     return _partitioned_muon_variant(

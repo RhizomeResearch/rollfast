@@ -140,7 +140,7 @@ def soda_adam(
     mu_dtype: jax.typing.DTypeLike | None = None,
     nesterov: bool = False,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Adam base optimizer wrapped with SODA."""
     lr_schedule, _ = _make_wsd_schedule_pair(
@@ -200,7 +200,7 @@ def soda_prism(
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     prism_weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """PRISM base optimizer wrapped with SODA."""
     prism_schedule, adam_schedule = _make_wsd_schedule_pair(
@@ -283,7 +283,7 @@ def soda_kron(
     permissive_spike_protection: bool = True,
     newton_schulz_iters: int = 5,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """PSGD Kron base optimizer wrapped with SODA."""
     lr_schedule, _ = _make_wsd_schedule_pair(
@@ -351,7 +351,7 @@ def soda_muon(
     adam_learning_rate: float | None = None,
     muon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Rollfast Muon base optimizer wrapped with SODA."""
     muon_schedule, adam_schedule = _make_wsd_schedule_pair(
@@ -407,7 +407,7 @@ def soda_rmnp(
     adam_learning_rate: float | None = None,
     rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """RMNP base optimizer wrapped with SODA."""
     rmnp_schedule, adam_schedule = _make_wsd_schedule_pair(

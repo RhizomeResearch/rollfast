@@ -23,6 +23,7 @@ from rollfast.schedules.schedulefree import (
     schedule_free,
     schedule_free_eval_params,
 )
+from rollfast.utils import _fresh_prng_key
 
 from ._protocols import FineTunePlanProtocol
 from .averaging import (
@@ -578,7 +579,7 @@ def schedule_free_adam_from_plan(
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
     polyak_axis_name: str | tuple[str, ...] | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> OptimizerBundle:
     """Build grouped Schedule-Free Adam from a fine-tuning plan."""
 
@@ -774,7 +775,7 @@ def hybrid_aurora_adam_from_plan(
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     polar_ns_iters: int = 12,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> OptimizerBundle:
     """Build grouped Aurora/Adam from a fine-tuning plan."""
 
@@ -821,7 +822,7 @@ def hybrid_prism_adam_from_plan(
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     ns_iters: int = 5,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> OptimizerBundle:
     """Build grouped PRISM/Adam from a fine-tuning plan."""
 
@@ -866,7 +867,7 @@ def hybrid_kron_adam_from_plan(
     swa: SWAConfig | None = None,
     b1: float = 0.9,
     preconditioner_update_probability: float = 1.0,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> OptimizerBundle:
     """Build grouped PSGD/Kron from a fine-tuning plan."""
 
@@ -915,7 +916,7 @@ def muon_adam_from_plan(
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> OptimizerBundle:
     """Build grouped Muon/AdamW from a fine-tuning plan."""
 
@@ -972,7 +973,7 @@ def _hybrid_optimizer_from_plan(
     adam_b1: float,
     adam_b2: float,
     adam_eps: float,
-    key: jax.Array,
+    key: jax.Array | None,
     family_kwargs: dict[str, Any],
 ) -> OptimizerBundle:
     group_rules = tuple(group_rules)
@@ -1104,9 +1105,10 @@ def _build_grouped_hybrid_transform(
     adam_b1: float,
     adam_b2: float,
     adam_eps: float,
-    key: jax.Array,
+    key: jax.Array | None,
     family_kwargs: dict[str, Any],
 ) -> optax.GradientTransformation:
+    root_key = _fresh_prng_key(key)
     transforms = {}
     for index, group in enumerate(groups):
         if group.optimizer != optimizer.name:
@@ -1118,7 +1120,7 @@ def _build_grouped_hybrid_transform(
             peak_lr=group.effective_lr,
             total_steps=schedule.total_steps,
         )
-        group_key = jax.random.fold_in(key, index)
+        group_key = jax.random.fold_in(root_key, index)
         transforms[group.source_label] = _hybrid_group_transform(
             family,
             learning_rate=lr_schedule,
@@ -1226,6 +1228,7 @@ def _hybrid_group_transform(
             adam_weight_decay=weight_decay,
             adam_learning_rate=learning_rate,
             consistent_rms=clean_kwargs.pop("consistent_rms", None),
+            key=key,
         )
     raise ValueError(f"unknown hybrid optimizer family: {family!r}.")
 
@@ -1242,7 +1245,7 @@ def _build_grouped_schedule_free_transform(
     weighting_mode: str | WeightingMode,
     sf_b1: float,
     state_dtype: Any | None,
-    key: jax.Array,
+    key: jax.Array | None,
     schedule_free_plus: bool,
     sf_r: float,
     sf_c_warmup: int,
@@ -1256,6 +1259,7 @@ def _build_grouped_schedule_free_transform(
     polyak_f_star: float,
     polyak_axis_name: str | tuple[str, ...] | None,
 ) -> optax.GradientTransformation:
+    root_key = _fresh_prng_key(key)
     polyak_enabled = _resolve_sf_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_bool(schedule_free_plus, use_adamc)
     use_lr_max_enabled = _resolve_sf_bool(schedule_free_plus, sf_use_lr_max)
@@ -1273,7 +1277,7 @@ def _build_grouped_schedule_free_transform(
         )
         lr_schedules[group.source_label] = lr_schedule
         inner_weight_decay = 0.0 if use_adamc_enabled else group.weight_decay_value
-        group_key = jax.random.fold_in(key, index)
+        group_key = jax.random.fold_in(root_key, index)
         transforms[group.source_label] = adamw(
             learning_rate=lr_schedule,
             b1=optimizer.b1,
@@ -1311,7 +1315,7 @@ def _build_grouped_schedule_free_transform(
         b1=sf_b1,
         weighting_mode=weighting_mode,
         state_dtype=state_dtype,
-        key=key,
+        key=root_key,
         r=sf_r,
         c_warmup=sf_c_warmup,
         weight_lr_power=sf_weight_lr_power,
@@ -1545,6 +1549,7 @@ def _build_grouped_transform(
         )
 
     transforms = {}
+    root_key = _fresh_prng_key(None)
     for index, group in enumerate(groups):
         if group.optimizer not in ("adamw", "adamw8"):
             raise NotImplementedError(f"Unsupported optimizer: {group.optimizer!r}.")
@@ -1574,7 +1579,7 @@ def _build_grouped_transform(
                 quantize=_quantize_group_state(group, state_quantization),
                 nesterov=optimizer.nesterov,
                 use_magma=optimizer.use_magma,
-                key=jax.random.fold_in(jax.random.PRNGKey(42), index),
+                key=jax.random.fold_in(root_key, index),
             )
         else:
             transforms[group.source_label] = adamw(

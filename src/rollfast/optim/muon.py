@@ -42,6 +42,7 @@ from rollfast.optim.orthogonalization import (
 from rollfast.utils import (
     MomentumAccumulator,
     _apply_weight_decay_tree,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
@@ -180,7 +181,7 @@ def scale_by_muon(
     weight_decay: base.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Rescale updates according to the Muon algorithm.
 
@@ -212,12 +213,13 @@ def scale_by_muon(
         return _get_dimension_numbers(weight_dimension_numbers, params_or_updates)
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         return MuonState(
             count=jnp.zeros([], jnp.int32),
             mu=_zeros_like_tree(params, canonical_mu_dtype),
             ns_coeffs=resolve_ns_coeffs(ns_coeffs, ns_steps),
             magma_s=_init_magma_state(params) if use_magma else (),
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -420,7 +422,7 @@ def muon(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Muon optimizer with automatic Muon/AdamW partitioning."""
     if adam_learning_rate is None:
@@ -431,7 +433,7 @@ def muon(
         weight_decay if adam_weight_decay is None else adam_weight_decay
     )
 
-    key_muon, key_adam = jax.random.split(key, 2)
+    key_muon, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(muon_weight_dimension_numbers, "muon")
 

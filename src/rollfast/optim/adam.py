@@ -11,6 +11,7 @@ from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
     _apply_weight_decay_tree,
     _cast_state_tree,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _init_magma_state,
     _is_aux_leaf,
@@ -48,7 +49,7 @@ def scale_by_adam(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     r"""Rescale updates according to the Adam algorithm.
 
@@ -105,6 +106,7 @@ def scale_by_adam(
     )
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         mu = _zeros_like_tree(params, canonical_mu_dtype)  # First moment
         nu = _zeros_like_tree(params, canonical_nu_dtype)  # Second moment
 
@@ -115,7 +117,7 @@ def scale_by_adam(
             mu=mu,
             nu=nu,
             magma_s=magma_s,
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -248,7 +250,7 @@ def adamw(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     r"""Adam with weight decay regularization.
 

@@ -43,6 +43,7 @@ from rollfast.optim.dimension_numbers import (
 from rollfast.optim.magma import validate_magma_args
 from rollfast.utils import (
     MomentumAccumulator,
+    _fresh_prng_key,
     _has_nonzero_or_scheduled,
     _is_aux_leaf,
 )
@@ -468,7 +469,7 @@ def _scale_by_aurora_impl(
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     if not (0.0 <= b1 < 1.0):
         raise ValueError(f"b1 must be in [0, 1), got {b1}")
@@ -502,11 +503,12 @@ def _scale_by_aurora_impl(
     )
 
     def init_fn(params):
+        state_key = _fresh_prng_key(key)
         return ScaleByAuroraState(
             count=jnp.zeros([], jnp.int32),
             mu=init_matrix_momentum_state(params, canonical_mu_dtype),
             magma_s=init_matrix_magma_state(params, use_magma),
-            key=key,
+            key=state_key,
         )
 
     def update_fn(updates, state, params=None):
@@ -623,7 +625,7 @@ def scale_by_aurora(
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Core practical Aurora transform.
 
@@ -687,7 +689,7 @@ def scale_by_riemannian_aurora(
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformation:
     """Core Riemannian-Aurora transform.
 
@@ -756,7 +758,7 @@ def _build_unscaled_aurora_branch(
     magma_p: float,
     magma_tau: float,
     guard_nonfinite: bool,
-    key: jax.Array,
+    key: jax.Array | None,
     weight_dimension_numbers: AuroraWeightDimNumOrFn | None,
 ) -> base.GradientTransformation:
     """Build the unscaled Aurora direction branch shared by wrappers."""
@@ -866,7 +868,7 @@ def _partitioned_aurora(
     adam_eps: float,
     aurora_weight_dimension_numbers: AuroraWeightDimNumOrFn | None,
 ) -> base.GradientTransformation:
-    key_aurora, key_adam = jax.random.split(key, 2)
+    key_aurora, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -960,7 +962,7 @@ def aurora(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
@@ -1040,7 +1042,7 @@ def riemannian_aurora(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,

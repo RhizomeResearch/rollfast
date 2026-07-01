@@ -1,7 +1,52 @@
 import inspect
 
+import jax
 import rollfast
 import rollfast.finetune as rfft
+import rollfast.finetune.builders as builders_module
+import rollfast.optim.adam as adam_module
+import rollfast.optim.adam8 as adam8_module
+import rollfast.optim.aurora as aurora_module
+import rollfast.optim.hyperball as hyperball_module
+import rollfast.optim.muon as muon_module
+import rollfast.optim.normuon as normuon_module
+import rollfast.optim.pion as pion_module
+import rollfast.optim.prism as prism_module
+import rollfast.optim.psgd as psgd_module
+import rollfast.optim.rmnp as rmnp_module
+import rollfast.optim.soda as soda_module
+import rollfast.optim.trasmuon as trasmuon_module
+import rollfast.schedules.schedulefree as schedulefree_module
+
+
+def test_key_defaults_are_not_jax_arrays():
+    modules = (
+        adam_module,
+        adam8_module,
+        aurora_module,
+        builders_module,
+        hyperball_module,
+        muon_module,
+        normuon_module,
+        pion_module,
+        prism_module,
+        psgd_module,
+        rmnp_module,
+        schedulefree_module,
+        soda_module,
+        trasmuon_module,
+    )
+
+    for module in modules:
+        for name, fn in inspect.getmembers(module, inspect.isfunction):
+            if not fn.__module__.startswith("rollfast."):
+                continue
+            parameter = inspect.signature(fn).parameters.get("key")
+            if parameter is None or parameter.default is inspect.Parameter.empty:
+                continue
+            assert not isinstance(parameter.default, jax.Array), (
+                f"{module.__name__}.{name} captures a JAX array as its key default"
+            )
 
 
 def test_adamw_signature_keeps_core_parameters():

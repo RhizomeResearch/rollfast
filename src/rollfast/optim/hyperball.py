@@ -46,6 +46,7 @@ from rollfast.optim.psgd import (
 from rollfast.optim.rmnp import _build_unscaled_rmnp_branch
 from rollfast.utils import (
     MomentumAccumulator,
+    _fresh_prng_key,
     _is_aux_leaf,
     _resolve_mask,
     _resolve_scalar,
@@ -453,7 +454,7 @@ def adamw_hyperball(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Adam with Hyperball replacing decoupled weight decay on selected leaves."""
     return combine.chain(
@@ -515,7 +516,7 @@ def muon_hyperball(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """Muon/Adam partition with Hyperball replacing decoupled weight decay.
 
@@ -526,7 +527,7 @@ def muon_hyperball(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    key_muon, key_adam = jax.random.split(key, 2)
+    key_muon, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(muon_weight_dimension_numbers, "muon")
     muon_branch = optax_muon._build_unscaled_muon_branch(
@@ -606,7 +607,7 @@ def rmnp_hyperball(
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
 ) -> base.GradientTransformationExtraArgs:
     """RMNP/Adam partition with Hyperball replacing decoupled weight decay.
 
@@ -617,7 +618,7 @@ def rmnp_hyperball(
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
-    key_rmnp, key_adam = jax.random.split(key, 2)
+    key_rmnp, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     partition = _make_matrix_partition_fns(rmnp_weight_dimension_numbers, "rmnp")
     rmnp_branch = _build_unscaled_rmnp_branch(
@@ -696,7 +697,7 @@ def kron_hyperball(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     *,
     hyperball_mask: MaskOrFn = None,
     fallback_weight_decay: bool = False,
@@ -785,7 +786,7 @@ def prism_hyperball(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
@@ -803,7 +804,7 @@ def prism_hyperball(
     By default, the Hyperball projection is applied to the same leaves routed to
     PRISM; Adam fallback leaves receive ordinary Adam-style parameter deltas.
     """
-    key_prism, key_adam = jax.random.split(key, 2)
+    key_prism, key_adam = jax.random.split(_fresh_prng_key(key), 2)
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
@@ -902,7 +903,7 @@ def _partitioned_aurora_hyperball(
     magma_p: float,
     magma_tau: float,
     guard_nonfinite: bool,
-    key: jax.Array,
+    key: jax.Array | None,
     adam_learning_rate: base.ScalarOrSchedule | None,
     adam_b1: float,
     adam_b2: float,
@@ -914,7 +915,7 @@ def _partitioned_aurora_hyperball(
     hyperball_eps: float,
     fallback_weight_decay: bool,
 ) -> base.GradientTransformationExtraArgs:
-    key_aurora, key_adam = jax.random.split(key, 2)
+    key_aurora, key_adam = jax.random.split(_fresh_prng_key(key), 2)
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
 
@@ -1012,7 +1013,7 @@ def aurora_hyperball(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
@@ -1097,7 +1098,7 @@ def riemannian_aurora_hyperball(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
-    key: jax.Array = jax.random.PRNGKey(42),
+    key: jax.Array | None = None,
     adam_learning_rate: base.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
