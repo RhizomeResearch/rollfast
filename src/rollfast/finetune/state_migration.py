@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
 import jax
@@ -23,6 +23,12 @@ CounterPolicy = Literal[
     "restart_schedule",
     "continue_global_step",
     "continue_optimizer_step_with_new_schedule",
+]
+_CounterOwner = Literal[
+    "optimizer_algorithm_schedule",
+    "finite_guard",
+    "accumulation",
+    "averaging",
 ]
 
 
@@ -46,6 +52,7 @@ class OptimizerMigrationReport:
     old_state_bytes: int
     new_state_bytes: int
     schedule_counter_behavior: str
+    clock_behavior: Mapping[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +72,7 @@ class OptimizerMigrationReport:
             "old_state_bytes": self.old_state_bytes,
             "new_state_bytes": self.new_state_bytes,
             "schedule_counter_behavior": self.schedule_counter_behavior,
+            "clock_behavior": dict(self.clock_behavior),
         }
 
     def to_state_transfer_report(self) -> "StateTransferReport":
@@ -100,6 +108,8 @@ class OptimizerMigrationReport:
             counter_policy={
                 "optimizer": self.counter_policy,
                 "schedule": self.schedule_counter_behavior,
+                "selected_policy": self.counter_policy,
+                **self.clock_behavior,
             },
             source_state_bytes=self.old_state_bytes,
             target_state_bytes=self.new_state_bytes,
@@ -155,14 +165,20 @@ def reconfigure_optimizer(
     """Compile a new bundle and migrate compatible optimizer state.
 
     The default policy preserves compatible shared moment leaves by parameter
-    path and initializes newly trainable leaves. Schedule/count leaves are reset
-    unless ``counter_policy='continue_global_step'`` is selected.
+    path and initializes newly trainable leaves. Clock handling is selected by
+    ``counter_policy``. In particular,
+    ``continue_optimizer_step_with_new_schedule`` preserves the optimizer's
+    algorithm/schedule count, so the new schedule is evaluated at that continued
+    optimizer step rather than at zero; wrapper-local clocks restart.
     """
 
     _validate_policy(state_policy, counter_policy)
     if new_bundle is None:
         new_bundle = compile_optimizer(new_plan, recipe=new_recipe, **compile_kwargs)
     new_state = new_bundle.init(new_plan.trainable)
+    if strict:
+        _validate_counter_paths(old_state)
+        _validate_counter_paths(new_state)
     old_params = _param_records(old_plan)
     new_params = _param_records(new_plan)
     param_report = _param_report(old_params, new_params)
@@ -182,6 +198,7 @@ def reconfigure_optimizer(
                 new_state,
                 state_policy=state_policy,
                 counter_policy=counter_policy,
+                strict=strict,
             )
         )
         if strict and incompatible_state:
@@ -207,7 +224,8 @@ def reconfigure_optimizer(
         changed_group_leaves=tuple(param_report["changed_group"]),
         old_state_bytes=tree_state_nbytes(old_state),
         new_state_bytes=tree_state_nbytes(migrated_state),
-        schedule_counter_behavior=_counter_behavior(counter_policy),
+        schedule_counter_behavior=_counter_behavior(counter_policy, state_policy),
+        clock_behavior=_clock_behavior(counter_policy, state_policy),
     )
     return new_bundle, migrated_state, report
 
@@ -248,6 +266,7 @@ def _migrate_state_tree(
     *,
     state_policy: StatePolicy,
     counter_policy: CounterPolicy,
+    strict: bool,
 ) -> tuple[Any, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     old_exact = {
         _path_tokens(path): leaf
@@ -274,6 +293,7 @@ def _migrate_state_tree(
                 old_structured,
                 state_policy=state_policy,
                 counter_policy=counter_policy,
+                strict=strict,
             )
             if candidate is not None:
                 if _compatible_leaf(candidate, leaf):
@@ -306,11 +326,17 @@ def _migration_candidate(
     *,
     state_policy: StatePolicy,
     counter_policy: CounterPolicy,
+    strict: bool,
 ) -> Any | None:
-    if _is_counter_path(tokens):
-        if counter_policy == "continue_global_step":
+    counter_owner = _counter_owner(tokens)
+    if counter_owner is not None:
+        if _preserve_counter(counter_owner, counter_policy):
             return old_exact.get(tokens)
         return None
+    if strict and _looks_like_unknown_counter(tokens):
+        raise ValueError(
+            "unclassified optimizer-state counter: " + _format_tokens(tokens)
+        )
     if state_policy == "preserve_exact_group":
         return old_exact.get(tokens)
     moment_key = _moment_key(tokens)
@@ -494,20 +520,91 @@ def _compatible_leaf(old: Any, new: Any) -> bool:
     )
 
 
-def _is_counter_path(tokens: tuple[str, ...]) -> bool:
-    return bool(tokens) and tokens[-1] in {
-        "attr:count",
+def _counter_owner(tokens: tuple[str, ...]) -> _CounterOwner | None:
+    if not tokens:
+        return None
+    field_name = tokens[-1]
+    if field_name in {"attr:count", "attr:step_count"}:
+        return "optimizer_algorithm_schedule"
+    if field_name in {
         "attr:notfinite_count",
         "attr:total_notfinite",
+        "attr:consecutive_nonfinite",
+        "attr:total_nonfinite",
+    }:
+        return "finite_guard"
+    if field_name in {"attr:mini_step", "attr:gradient_step"}:
+        return "accumulation"
+    if field_name in {"attr:ema_count", "attr:swa_count"}:
+        return "averaging"
+    if tokens == ("attr:step",):
+        return "averaging"
+    return None
+
+
+def _looks_like_unknown_counter(tokens: tuple[str, ...]) -> bool:
+    if not tokens or not tokens[-1].startswith("attr:"):
+        return False
+    field_name = tokens[-1].removeprefix("attr:")
+    return field_name == "step" or field_name.endswith("_count")
+
+
+def _validate_counter_paths(state: Any) -> None:
+    for path, leaf in _path_leaves(state):
+        if not _state_leaf_has_storage(leaf):
+            continue
+        tokens = _path_tokens(path)
+        if _counter_owner(tokens) is None and _looks_like_unknown_counter(tokens):
+            raise ValueError(
+                "unclassified optimizer-state counter: " + _format_tokens(tokens)
+            )
+
+
+def _preserve_counter(owner: _CounterOwner, policy: CounterPolicy) -> bool:
+    if policy == "continue_global_step":
+        return True
+    return (
+        policy == "continue_optimizer_step_with_new_schedule"
+        and owner == "optimizer_algorithm_schedule"
+    )
+
+
+def _clock_behavior(
+    counter_policy: CounterPolicy,
+    state_policy: StatePolicy,
+) -> dict[str, str]:
+    preserve_all = (
+        state_policy != "reset_all" and counter_policy == "continue_global_step"
+    )
+    preserve_optimizer = preserve_all or (
+        state_policy != "reset_all"
+        and counter_policy == "continue_optimizer_step_with_new_schedule"
+    )
+    return {
+        "optimizer_algorithm_schedule": (
+            "preserved" if preserve_optimizer else "reset"
+        ),
+        "finite_guard": "preserved" if preserve_all else "reset",
+        "accumulation": "preserved" if preserve_all else "reset",
+        "averaging": "preserved" if preserve_all else "reset",
     }
 
 
-def _counter_behavior(counter_policy: CounterPolicy) -> str:
+def _counter_behavior(
+    counter_policy: CounterPolicy,
+    state_policy: StatePolicy,
+) -> str:
+    if state_policy == "reset_all":
+        return "all known clocks reset with all optimizer state"
     if counter_policy == "restart_schedule":
-        return "initialized count leaves; stage schedule restarts"
+        return "all known clocks reset; stage schedule restarts at zero"
     if counter_policy == "continue_global_step":
-        return "preserved compatible count leaves"
-    return "preserved moment state; schedule count leaves remain stage-local"
+        return "all compatible known clocks preserved"
+    return (
+        "optimizer algorithm/schedule clocks preserved; finite guard, accumulation, "
+        "and averaging clocks reset; the new schedule is evaluated at the continued "
+        "optimizer step"
+    )
 
 
 def _transfer_warnings(

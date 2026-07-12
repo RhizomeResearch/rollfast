@@ -1,8 +1,10 @@
 import jax
 import jax.numpy as jnp
 import pytest
+from typing import NamedTuple
 
 import rollfast.finetune as rfft
+from rollfast.finetune import state_migration as migration_module
 
 from .helpers import TinyGroup, TinyPlan, tiny_plan
 
@@ -113,6 +115,48 @@ def _count_leaves(state, group_label):
     return leaves
 
 
+def _counter_leaves(state):
+    leaves = {}
+    for path, leaf in jax.tree_util.tree_flatten_with_path(
+        state,
+        is_leaf=lambda x: x is None,
+    )[0]:
+        tokens = tuple(_path_text((part,)) for part in path)
+        owner = migration_module._counter_owner(tokens)
+        if owner is not None and hasattr(leaf, "shape"):
+            leaves[_path_text(path)] = (owner, leaf)
+    return leaves
+
+
+def _advance_clock_fixture(bundle, params):
+    state = bundle.init(params)
+    finite_grads = _ones_like_trainable(params)
+    nonfinite_grads = jax.tree.map(
+        lambda x: None if x is None else jnp.full_like(x, jnp.nan),
+        params,
+        is_leaf=lambda x: x is None,
+    )
+    for grads in (
+        finite_grads,
+        finite_grads,
+        nonfinite_grads,
+        nonfinite_grads,
+        finite_grads,
+    ):
+        updates, state = bundle.update(grads, state, params)
+        params = jax.tree.map(
+            lambda param, update: None if param is None else param + update,
+            params,
+            updates,
+            is_leaf=lambda x: x is None,
+        )
+    return state
+
+
+class _MysteryCounterState(NamedTuple):
+    mystery_count: jax.Array
+
+
 def test_reconfigure_preserves_shared_head_moments_and_initializes_backbone():
     old_plan = _head_only_plan()
     new_plan = tiny_plan()
@@ -156,7 +200,7 @@ def test_reconfigure_preserves_shared_head_moments_and_initializes_backbone():
     )
     assert "logical/head.w" in migration.preserved_param_leaves
     assert "logical/blocks.0.w" in migration.initialized_param_leaves
-    assert migration.schedule_counter_behavior.startswith("initialized count")
+    assert migration.schedule_counter_behavior.startswith("all known clocks reset")
     assert migration.new_state_bytes >= migration.old_state_bytes
 
 
@@ -200,6 +244,12 @@ def test_transfer_optimizer_state_reports_new_preserved_and_warnings():
     assert transfer.source_state_bytes > 0
     assert transfer.target_state_bytes >= transfer.source_state_bytes
     assert transfer.counter_policy["optimizer"] == "restart_schedule"
+    assert transfer.counter_policy["selected_policy"] == "restart_schedule"
+    assert transfer.counter_policy["optimizer_algorithm_schedule"] == "reset"
+    assert transfer.counter_policy["finite_guard"] == "reset"
+    assert transfer.counter_policy["accumulation"] == "reset"
+    assert transfer.counter_policy["averaging"] == "reset"
+    assert transfer.to_dict()["counter_policy"] == dict(transfer.counter_policy)
     assert any("new trainable parameters" in warning for warning in transfer.warnings)
     assert jnp.allclose(
         _state_leaf(migrated_state, "attr:mu", "key:head", "key:w"),
@@ -383,6 +433,146 @@ def test_reconfigure_counter_policy_is_explicit():
     )
     assert any(
         jnp.all(count > 0) for count in _count_leaves(continued_state, "head_decay")
+    )
+
+
+@pytest.mark.parametrize(
+    ("counter_policy", "preserved_owners"),
+    (
+        ("restart_schedule", frozenset()),
+        (
+            "continue_global_step",
+            frozenset(
+                {
+                    "optimizer_algorithm_schedule",
+                    "finite_guard",
+                    "accumulation",
+                    "averaging",
+                }
+            ),
+        ),
+        (
+            "continue_optimizer_step_with_new_schedule",
+            frozenset({"optimizer_algorithm_schedule"}),
+        ),
+    ),
+)
+def test_reconfigure_applies_clock_policy_by_owner(counter_policy, preserved_owners):
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=1.0,
+        accumulation_steps=2,
+        ema=rfft.EMAConfig(enabled=True, decay=0.5),
+        swa=rfft.SWAConfig(enabled=True, start_step=0),
+    )
+    old_state = _advance_clock_fixture(bundle, plan.trainable)
+    initial_state = bundle.init(plan.trainable)
+
+    _, migrated_state, report = rfft.reconfigure_optimizer(
+        old_plan=plan,
+        old_bundle=bundle,
+        old_state=old_state,
+        new_plan=plan,
+        new_bundle=bundle,
+        counter_policy=counter_policy,
+    )
+
+    old_counters = _counter_leaves(old_state)
+    initial_counters = _counter_leaves(initial_state)
+    migrated_counters = _counter_leaves(migrated_state)
+    assert old_counters.keys() == initial_counters.keys() == migrated_counters.keys()
+    assert set(owner for owner, _ in old_counters.values()) == {
+        "optimizer_algorithm_schedule",
+        "finite_guard",
+        "accumulation",
+        "averaging",
+    }
+    for path, (owner, migrated) in migrated_counters.items():
+        expected = (
+            old_counters[path][1]
+            if owner in preserved_owners
+            else initial_counters[path][1]
+        )
+        assert jnp.array_equal(migrated, expected), path
+    assert report.clock_behavior == {
+        owner: "preserved" if owner in preserved_owners else "reset"
+        for owner in (
+            "optimizer_algorithm_schedule",
+            "finite_guard",
+            "accumulation",
+            "averaging",
+        )
+    }
+    serialized = report.to_dict()
+    assert serialized["counter_policy"] == counter_policy
+    assert serialized["clock_behavior"] == report.clock_behavior
+
+
+@pytest.mark.parametrize(
+    ("counter_policy", "preserved"),
+    (
+        ("restart_schedule", False),
+        ("continue_global_step", True),
+        ("continue_optimizer_step_with_new_schedule", True),
+    ),
+)
+def test_reconfigure_schedule_free_step_count_is_optimizer_clock(
+    counter_policy, preserved
+):
+    plan = tiny_plan()
+    bundle = rfft.schedule_free_adam_from_plan(
+        plan,
+        total_steps=10,
+        schedule="wsd",
+        clip_global_norm=None,
+    )
+    old_state = bundle.init(plan.trainable)
+    updates, old_state = bundle.update(
+        _ones_like_trainable(plan.trainable), old_state, plan.trainable
+    )
+    del updates
+
+    _, migrated_state, report = rfft.reconfigure_optimizer(
+        old_plan=plan,
+        old_bundle=bundle,
+        old_state=old_state,
+        new_plan=plan,
+        new_bundle=bundle,
+        counter_policy=counter_policy,
+    )
+
+    old_step = _state_leaf(old_state, "attr:step_count")
+    migrated_step = _state_leaf(migrated_state, "attr:step_count")
+    assert int(old_step) == 1
+    assert int(migrated_step) == (1 if preserved else 0)
+    if counter_policy == "continue_optimizer_step_with_new_schedule":
+        assert "new schedule is evaluated at the continued optimizer step" in (
+            report.schedule_counter_behavior
+        )
+
+
+def test_strict_migration_rejects_unknown_counter_name():
+    state = _MysteryCounterState(jnp.asarray(1, dtype=jnp.int32))
+
+    with pytest.raises(ValueError, match=r"unclassified.*attr:mystery_count"):
+        migration_module._migrate_state_tree(
+            state,
+            state,
+            state_policy="preserve_shared",
+            counter_policy="continue_global_step",
+            strict=True,
+        )
+
+
+def test_counter_classification_covers_supported_legacy_names():
+    assert migration_module._counter_owner(("attr:notfinite_count",)) == (
+        "finite_guard"
+    )
+    assert migration_module._counter_owner(("attr:total_notfinite",)) == (
+        "finite_guard"
     )
 
 

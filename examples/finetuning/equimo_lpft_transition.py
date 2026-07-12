@@ -59,5 +59,6 @@ print(
         "old_state_bytes": migration.old_state_bytes,
         "new_state_bytes": migration.new_state_bytes,
         "counter_policy": migration.counter_policy,
+        "clock_behavior": dict(migration.clock_behavior),
     }
 )
