@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
+import optax
 import pytest
 
 import rollfast.finetune as rfft
@@ -83,7 +86,8 @@ def test_loss_bundle_microbatch_accumulation_uses_true_normalizer():
     assert jnp.asarray(bundle_value.normalizer) == 1
 
 
-def test_stateful_loss_bundle_accumulation_matches_full_weighted_update():
+@pytest.mark.parametrize("jit", [False, True])
+def test_stateful_loss_bundle_accumulation_matches_full_weighted_update(jit):
     plan = _single_weight_plan()
     x = jnp.asarray([0.0, 2.0, 4.0], dtype=jnp.float32)
     normalizers = jnp.asarray([1.0, 3.0, 6.0], dtype=jnp.float32)
@@ -119,6 +123,8 @@ def test_stateful_loss_bundle_accumulation_matches_full_weighted_update():
         bundle,
         accumulation=accumulation,
     )
+    if jit:
+        accumulating_step = jax.jit(accumulating_step)
     scalar_state = bundle.init(plan.trainable)
     accum_state = bundle.init(plan.trainable)
     accumulation_state = rfft.init_accumulation_state(plan.trainable, accumulation)
@@ -427,6 +433,73 @@ def test_jitted_accumulation_replaces_invalid_model_state_payload():
 
     assert completed_counts == [2, 2]
     assert not bool(state.pending_model_state_valid)
+
+
+def test_jitted_accumulation_executes_optimizer_only_at_finite_boundaries():
+    plan = _single_weight_plan()
+    optimizer = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        base_lr=1e-2,
+        schedule="constant",
+        weight_decay=0.0,
+        clip_global_norm=None,
+    )
+    callback_count = 0
+
+    def count_update(_):
+        nonlocal callback_count
+        callback_count += 1
+
+    def counting_update(updates, state, params=None):
+        del params
+        jax.debug.callback(count_update, jnp.asarray(0), ordered=True)
+        return updates, state
+
+    counting_tx = optax.GradientTransformation(
+        lambda params: (),
+        counting_update,
+    )
+    optimizer = replace(optimizer, tx=optax.chain(counting_tx, optimizer.tx))
+    accumulation = rfft.AccumulationConfig(steps=3)
+
+    def bundled_loss(params, multiplier):
+        return rfft.LossBundle(
+            loss_sum=params["w"] * multiplier,
+            normalizer=jnp.asarray(1.0, dtype=jnp.float32),
+            metrics_sums={},
+            metric_normalizers={},
+            new_model_state=None,
+        )
+
+    step = jax.jit(
+        rfft.make_accumulating_loss_bundle_update_step(
+            bundled_loss,
+            optimizer,
+            accumulation=accumulation,
+        )
+    )
+
+    def run_window(multipliers):
+        params = plan.trainable
+        optimizer_state = optimizer.init(params)
+        state = rfft.init_accumulation_state(params, accumulation)
+        observed_counts = []
+        for multiplier in multipliers:
+            params, optimizer_state, state, info = step(
+                params,
+                optimizer_state,
+                state,
+                jnp.asarray(multiplier, dtype=jnp.float32),
+            )
+            jax.block_until_ready((params, optimizer_state, state, info))
+            jax.effects_barrier()
+            observed_counts.append(callback_count)
+        return observed_counts
+
+    assert run_window((1.0, 1.0, 1.0, 1.0, 1.0, 1.0)) == [0, 0, 1, 1, 1, 2]
+    callback_count = 0
+    assert run_window((jnp.inf, 1.0, 1.0)) == [0, 0, 0]
 
 
 def test_stateful_loss_bundle_accumulation_rejects_pre_wrapped_optimizer():

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import jax
 import jax.numpy as jnp
 
@@ -10,6 +12,16 @@ from _common import benchmark_step, emit, metadata, rfft, tiny_plan, tree_l2_los
 
 def _scaled_loss(model, batch):
     return tree_l2_loss(model, target=batch["target"])
+
+
+def _loss_bundle(model):
+    return rfft.LossBundle(
+        loss_sum=tree_l2_loss(model),
+        normalizer=jnp.asarray(1.0, dtype=jnp.float32),
+        metrics_sums={},
+        metric_normalizers={},
+        new_model_state=None,
+    )
 
 
 def main() -> None:
@@ -55,6 +67,49 @@ def main() -> None:
         measured_steps=measured_steps,
     )
 
+    accumulation_factor = 4
+    accumulation = rfft.AccumulationConfig(steps=accumulation_factor)
+    accumulating_step = jax.jit(
+        rfft.make_accumulating_loss_bundle_update_step(
+            _loss_bundle,
+            adamw,
+            accumulation=accumulation,
+        )
+    )
+    accumulation_params = plan.trainable
+    accumulation_optimizer_state = adamw.init(accumulation_params)
+    accumulation_state = rfft.init_accumulation_state(
+        accumulation_params,
+        accumulation,
+    )
+    for _ in range(warmup_steps * accumulation_factor):
+        (
+            accumulation_params,
+            accumulation_optimizer_state,
+            accumulation_state,
+            accumulation_info,
+        ) = accumulating_step(
+            accumulation_params,
+            accumulation_optimizer_state,
+            accumulation_state,
+        )
+    jax.block_until_ready(accumulation_params)
+
+    started = time.perf_counter()
+    for _ in range(measured_steps * accumulation_factor):
+        (
+            accumulation_params,
+            accumulation_optimizer_state,
+            accumulation_state,
+            accumulation_info,
+        ) = accumulating_step(
+            accumulation_params,
+            accumulation_optimizer_state,
+            accumulation_state,
+        )
+    jax.block_until_ready(accumulation_params)
+    accumulation_seconds = (time.perf_counter() - started) / measured_steps
+
     emit(
         {
             "metadata": metadata(
@@ -68,6 +123,11 @@ def main() -> None:
                 "sam_final_loss": float(sam_info.loss),
                 "sam_perturbed_loss": float(sam_info.perturbed_loss),
                 "sam_microbatches": int(batch["target"].shape[0]),
+                "accumulation_factor": accumulation_factor,
+                "accumulation_seconds_per_applied_update": accumulation_seconds,
+                "accumulation_final_loss": float(
+                    accumulation_info.loss_bundle.loss_sum
+                ),
             },
             "notes": [
                 "Tiny CPU/GPU smoke timing; use task hardware for publishable claims.",

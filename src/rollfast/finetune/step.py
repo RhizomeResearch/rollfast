@@ -640,20 +640,28 @@ def make_accumulating_loss_bundle_update_step(
             model_state_aggregator=model_state_aggregator,
         )
         accumulated_bundle = _loss_bundle_from_accumulation(next_accumulation)
-        averaged_grads = _tree_divide(
-            next_accumulation.grad_numerator,
-            next_accumulation.normalizer,
-        )
         boundary = next_accumulation.microsteps_in_window >= accumulation.steps
         update_applied = jnp.logical_and(boundary, next_accumulation.all_finite)
-        updates, candidate_opt_state = optimizer.update(
-            averaged_grads,
-            opt_state,
-            trainable,
+
+        def apply_accumulated_update(operand):
+            current_trainable, current_opt_state = operand
+            averaged_grads = _tree_divide(
+                next_accumulation.grad_numerator,
+                next_accumulation.normalizer,
+            )
+            updates, next_opt_state = optimizer.update(
+                averaged_grads,
+                current_opt_state,
+                current_trainable,
+            )
+            return optax.apply_updates(current_trainable, updates), next_opt_state
+
+        trainable, opt_state = jax.lax.cond(
+            update_applied,
+            apply_accumulated_update,
+            lambda operand: operand,
+            (trainable, opt_state),
         )
-        candidate_trainable = optax.apply_updates(trainable, updates)
-        trainable = _select_tree(update_applied, candidate_trainable, trainable)
-        opt_state = _select_tree(update_applied, candidate_opt_state, opt_state)
         reset_accumulation = init_accumulation_state(trainable, accumulation)
         accumulation_state = _select_accumulation_state(
             boundary,
