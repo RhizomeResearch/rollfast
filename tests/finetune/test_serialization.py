@@ -1,3 +1,5 @@
+import pickle
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -445,6 +447,16 @@ def test_state_checkpoint_rejects_missing_required_master_or_loss_scale():
         )
 
 
+def test_state_checkpoint_requires_trust_before_opening_path(tmp_path):
+    path = tmp_path / "missing.rfopt"
+
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError,
+        match="pickle checkpoints may execute code.*trusted",
+    ):
+        rfft.load_state_checkpoint(path)
+
+
 def test_state_checkpoint_save_and_load(tmp_path):
     plan = tiny_plan()
     bundle = rfft.schedule_free_adam_from_plan(
@@ -462,17 +474,29 @@ def test_state_checkpoint_save_and_load(tmp_path):
         state,
         model_checkpoint_id="model-step-1",
     )
-    loaded = rfft.load_state_checkpoint(path)
+    loaded = rfft.load_state_checkpoint(path, trusted=True)
     restored = rfft.load_state_checkpoint(
         path,
         bundle,
         model_checkpoint_id="model-step-1",
+        trusted=True,
     )
 
     assert loaded.manifest["fingerprint"] == checkpoint.manifest["fingerprint"]
     assert loaded.manifest["model_checkpoint_id"] == "model-step-1"
     assert loaded.manifest["components"]["schedule_free"] is True
     assert restored is not None
+
+
+def test_state_checkpoint_rejects_wrong_object_after_trusted_load(tmp_path):
+    path = tmp_path / "wrong-object.rfopt"
+    path.write_bytes(pickle.dumps({"not": "a Rollfast checkpoint"}))
+
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError,
+        match="does not contain a Rollfast checkpoint",
+    ):
+        rfft.load_state_checkpoint(path, trusted=True)
 
 
 def test_schedule_free_checkpoint_rejects_missing_schedule_free_state():

@@ -1,4 +1,4 @@
-"""Backend-neutral optimizer-state manifests and checkpoint helpers."""
+"""Backend-neutral optimizer-state manifests and trusted-local pickle helpers."""
 
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ class OptimizerStateCheckpoint:
     """Logical optimizer-state checkpoint.
 
     The state PyTree is intentionally left backend-neutral. Users can store this
-    object with their checkpointing system, or use the small pickle helpers for
-    local tests and scripts.
+    object with their checkpointing system, or use the pickle helpers with trusted
+    local files for tests and scripts.
     """
 
     manifest: Mapping[str, Any]
@@ -195,7 +195,7 @@ def save_state_checkpoint(
     base_model_value_hash: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> OptimizerStateCheckpoint:
-    """Save a local pickle checkpoint and return the logical checkpoint."""
+    """Save a trusted-local pickle checkpoint and return the logical checkpoint."""
 
     checkpoint = make_state_checkpoint(
         bundle,
@@ -219,15 +219,21 @@ def load_state_checkpoint(
     path: str | Path,
     bundle: OptimizerBundle | None = None,
     *,
+    trusted: bool = False,
     model_checkpoint_id: str | None = None,
     strict: bool = True,
 ) -> OptimizerStateCheckpoint | Any:
-    """Load a local pickle checkpoint.
+    """Load a pickle checkpoint after explicit trusted-local acknowledgement.
 
     If ``bundle`` is supplied, validate and return only the state PyTree.
     Otherwise return the logical checkpoint object.
     """
 
+    if not trusted:
+        raise OptimizerStateRestoreError(
+            "pickle checkpoints may execute code; only load trusted local files "
+            "by passing trusted=True."
+        )
     with Path(path).open("rb") as handle:
         checkpoint = pickle.load(handle)
     if not isinstance(checkpoint, OptimizerStateCheckpoint):
