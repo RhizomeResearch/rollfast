@@ -4,6 +4,66 @@ import pytest
 import rollfast.finetune as rfft
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ("constant", "warmup_cosine", "wsd", "linear", "polynomial"),
+)
+def test_supported_schedule_kinds_round_trip(kind):
+    config = rfft.ScheduleConfig(kind=kind, total_steps=100)
+
+    assert rfft.ScheduleConfig.from_dict(config.to_dict()) == config
+
+
+@pytest.mark.parametrize("kind", ("custom", "typo"))
+def test_unsupported_schedule_kinds_are_rejected(kind):
+    with pytest.raises(NotImplementedError, match="ScheduleConfig.kind"):
+        rfft.ScheduleConfig(kind=kind)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("step_counter", ("micro", "typo"))
+def test_unsupported_schedule_step_counters_are_rejected(step_counter):
+    with pytest.raises(NotImplementedError, match="ScheduleConfig.step_counter"):
+        rfft.ScheduleConfig(step_counter=step_counter)  # type: ignore[arg-type]
+
+
+def test_supported_accumulation_config_round_trips():
+    config = rfft.AccumulationConfig(
+        remainder="error",
+        reduce_after_accumulation=True,
+        finite_policy="discard_window",
+    )
+
+    assert rfft.AccumulationConfig.from_dict(config.to_dict()) == config
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("remainder", "drop"),
+        ("remainder", "apply_with_true_normalizer"),
+        ("remainder", "typo"),
+        ("reduce_after_accumulation", False),
+        ("reduce_after_accumulation", "typo"),
+        ("finite_policy", "error"),
+        ("finite_policy", "typo"),
+    ),
+)
+def test_unsupported_accumulation_config_is_rejected(field, value):
+    with pytest.raises(NotImplementedError, match=field):
+        rfft.AccumulationConfig(**{field: value})
+
+
+@pytest.mark.parametrize("cast_back", ("stochastic", "typo"))
+def test_unsupported_precision_cast_back_is_rejected(cast_back):
+    with pytest.raises(NotImplementedError, match="PrecisionConfig.cast_back"):
+        rfft.PrecisionConfig(cast_back=cast_back)  # type: ignore[arg-type]
+
+
+def test_legacy_unsupported_config_dictionary_has_a_clear_error():
+    with pytest.raises(NotImplementedError, match="AccumulationConfig.remainder"):
+        rfft.AccumulationConfig.from_dict({"remainder": "drop"})
+
+
 def test_config_round_trips_are_deterministic():
     schedule = rfft.ScheduleConfig(kind="warmup_cosine", total_steps=100)
     assert rfft.ScheduleConfig.from_dict(schedule.to_dict()) == schedule

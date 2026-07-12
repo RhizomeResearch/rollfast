@@ -675,10 +675,6 @@ def schedule_free_adam_from_plan(
         lora_b_lr_ratio=lora_b_lr_ratio,
     )
     schedule_config = _schedule_config(schedule, total_steps)
-    if schedule_config.kind == "warmup_cosine":
-        # Schedule-Free defaults to WSD because the inner optimizer still needs
-        # a stabilizing schedule while the wrapper maintains evaluation params.
-        schedule_config = replace(schedule_config, kind="wsd")
 
     gradient_policy = GradientPolicy(
         clip_global_norm=clip_global_norm,

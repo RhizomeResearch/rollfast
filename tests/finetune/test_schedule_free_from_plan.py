@@ -24,6 +24,35 @@ def _zeros_like_trainable(tree):
     )
 
 
+def test_schedule_free_adam_from_plan_defaults_to_wsd():
+    bundle = rfft.schedule_free_adam_from_plan(tiny_plan(), total_steps=20)
+
+    assert bundle.schedule_config.kind == "wsd"
+
+
+def test_schedule_free_adam_from_plan_honors_explicit_warmup_cosine():
+    schedule = rfft.ScheduleConfig(
+        kind="warmup_cosine",
+        total_steps=20,
+        warmup_steps=2,
+        end_lr_ratio=0.1,
+    )
+
+    bundle = rfft.schedule_free_adam_from_plan(
+        tiny_plan(),
+        total_steps=20,
+        schedule=schedule,
+        base_lr=1.0,
+    )
+
+    assert bundle.schedule_config == schedule
+    preview_lr = max(group.effective_lr for group in bundle.report.groups)
+    assert bundle.report.schedule_preview == rfft.preview_schedule(
+        schedule,
+        peak_lr=preview_lr,
+    )
+
+
 def test_schedule_free_adam_from_plan_reports_grouped_lrs():
     bundle = rfft.schedule_free_adam_from_plan(
         tiny_plan(),

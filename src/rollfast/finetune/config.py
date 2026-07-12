@@ -65,6 +65,24 @@ class ScheduleConfig:
     step_counter: StepCounter = "optimizer"
 
     def __post_init__(self) -> None:
+        supported_kinds = (
+            "constant",
+            "warmup_cosine",
+            "wsd",
+            "linear",
+            "polynomial",
+        )
+        if self.kind not in supported_kinds:
+            raise NotImplementedError(
+                "ScheduleConfig.kind supports only "
+                f"{', '.join(repr(kind) for kind in supported_kinds)}; "
+                f"got {self.kind!r}."
+            )
+        if self.step_counter != "optimizer":
+            raise NotImplementedError(
+                "ScheduleConfig.step_counter supports only 'optimizer'; "
+                f"got {self.step_counter!r}."
+            )
         if self.total_steps is not None and self.total_steps <= 0:
             raise ValueError("total_steps must be positive when provided.")
         if self.warmup_steps is not None and self.warmup_steps < 0:
@@ -287,6 +305,21 @@ class AccumulationConfig:
     def __post_init__(self) -> None:
         if self.steps <= 0:
             raise ValueError("steps must be positive.")
+        if self.remainder != "error":
+            raise NotImplementedError(
+                "AccumulationConfig.remainder supports only 'error'; "
+                f"got {self.remainder!r}."
+            )
+        if self.reduce_after_accumulation is not True:
+            raise NotImplementedError(
+                "AccumulationConfig.reduce_after_accumulation supports only True; "
+                f"got {self.reduce_after_accumulation!r}."
+            )
+        if self.finite_policy != "discard_window":
+            raise NotImplementedError(
+                "AccumulationConfig.finite_policy supports only 'discard_window'; "
+                f"got {self.finite_policy!r}."
+            )
         _canonical_dtype(self.accumulate_dtype)
 
     def to_dict(self) -> dict[str, Any]:
@@ -340,6 +373,12 @@ class PrecisionConfig:
         _canonical_dtype(self.moment_dtype)
         _canonical_dtype(self.preconditioner_dtype)
         _canonical_dtype(self.update_compute_dtype)
+        if self.cast_back != "nearest":
+            raise NotImplementedError(
+                "PrecisionConfig.cast_back supports only 'nearest'; "
+                f"got {self.cast_back!r}. Use rollfast.apply_updates(..., "
+                "stochastic=True) for stochastic BF16 parameter updates."
+            )
         if self.static_loss_scale <= 0.0:
             raise ValueError("static_loss_scale must be positive.")
         if self.growth_factor <= 1.0:

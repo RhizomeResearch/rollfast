@@ -334,7 +334,9 @@ when warmup is enabled. AdamW fine-tuning defaults keep `eps=1e-6`; pass
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and
 checkpoint guidance in
 [`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md)
-and averaging guidance in
+configuration support in
+[`docs/finetuning/configuration.md`](./docs/finetuning/configuration.md), and
+averaging guidance in
 [`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md).
 
 ## Usage
