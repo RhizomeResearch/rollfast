@@ -12,6 +12,31 @@ import jax
 from .config import OptimizerBundle, SCHEMA_VERSION
 
 _CHECKPOINT_FORMAT = "rollfast.finetune.optimizer_state"
+_COMPATIBILITY_FIELDS = (
+    "optimizer_config",
+    "schedule_config",
+    "gradient_policy",
+    "accumulation_config",
+    "precision_config",
+    "sharding_config",
+    "offload_policy",
+    "quantization_metadata",
+    "method_config",
+    "ema",
+    "swa",
+    "eval_params_kind",
+    "eval_views",
+    "default_eval_view",
+)
+_COMPATIBILITY_ALIASES = {
+    "optimizer_config": "optimizer",
+    "schedule_config": "schedule",
+    "accumulation_config": "accumulation",
+    "precision_config": "precision",
+    "sharding_config": "sharding",
+    "offload_policy": "state_offload",
+    "quantization_metadata": "state_quantization",
+}
 
 
 @dataclass(frozen=True)
@@ -128,13 +153,7 @@ def restore_state_checkpoint(
                 "optimizer-state checkpoint model checkpoint mismatch: "
                 f"expected {model_checkpoint_id!r}, got {checkpoint_model_id!r}."
             )
-        checkpoint_sharding = checkpoint.manifest.get("sharding")
-        expected_sharding = bundle.sharding_policy.to_dict()
-        if checkpoint_sharding != expected_sharding:
-            raise OptimizerStateRestoreError(
-                "optimizer-state checkpoint sharding mismatch: "
-                f"expected {expected_sharding!r}, got {checkpoint_sharding!r}."
-            )
+        _validate_manifest_compatibility(bundle, checkpoint.manifest)
         checkpoint_logical_ids = checkpoint.manifest.get("logical_id_table_hash")
         expected_logical_ids = bundle.report.logical_id_table_hash
         if checkpoint_logical_ids != expected_logical_ids:
@@ -150,13 +169,6 @@ def restore_state_checkpoint(
             raise OptimizerStateRestoreError(
                 "optimizer-state checkpoint model-state structure mismatch: "
                 f"expected {expected_model_state_hash!r}, got {checkpoint_model_state_hash!r}."
-            )
-        checkpoint_quantization = checkpoint.manifest.get("state_quantization")
-        expected_quantization = bundle.quantization_config.to_dict()
-        if checkpoint_quantization != expected_quantization:
-            raise OptimizerStateRestoreError(
-                "optimizer-state checkpoint quantization metadata mismatch: "
-                f"expected {expected_quantization!r}, got {checkpoint_quantization!r}."
             )
         if _requires_schedule_free_state(bundle) and not _contains_state_type(
             checkpoint.state,
@@ -267,6 +279,45 @@ def _validate_checkpoint_schema(checkpoint: OptimizerStateCheckpoint) -> None:
             raise OptimizerStateRestoreError(
                 "checkpoint manifest is missing schedule-free state metadata."
             )
+
+
+def _validate_manifest_compatibility(
+    bundle: OptimizerBundle,
+    saved_manifest: Mapping[str, Any],
+) -> None:
+    expected_view = _compatibility_view(bundle.manifest())
+    saved_view = _compatibility_view(saved_manifest)
+    for key in _COMPATIBILITY_FIELDS:
+        expected = expected_view[key]
+        saved = saved_view[key]
+        if saved == expected:
+            continue
+        if key == "sharding_config":
+            mismatch = "sharding mismatch (sharding_config)"
+        elif key == "quantization_metadata":
+            mismatch = "quantization metadata mismatch (quantization_metadata)"
+        else:
+            mismatch = f"compatibility mismatch for {key!r}"
+        raise OptimizerStateRestoreError(
+            f"optimizer-state checkpoint {mismatch}: "
+            f"expected {expected!r}, got {saved!r}."
+        )
+
+
+def _compatibility_view(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    view: dict[str, Any] = {}
+    for key in _COMPATIBILITY_FIELDS:
+        if key in manifest:
+            view[key] = manifest[key]
+            continue
+        alias = _COMPATIBILITY_ALIASES.get(key)
+        if alias is not None and alias in manifest:
+            view[key] = manifest[alias]
+            continue
+        raise OptimizerStateRestoreError(
+            f"checkpoint manifest is missing compatibility field {key!r}."
+        )
+    return view
 
 
 def _requires_schedule_free_state(bundle: OptimizerBundle) -> bool:

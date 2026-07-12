@@ -108,6 +108,179 @@ def test_state_checkpoint_rejects_mismatched_model_checkpoint_id():
         )
 
 
+@pytest.mark.parametrize(
+    ("case", "field"),
+    (
+        ("adamw_to_schedule_free", "optimizer_config"),
+        ("schedule_free_to_adamw", "optimizer_config"),
+        ("schedule_kind", "schedule_config"),
+        ("schedule_length", "schedule_config"),
+        ("accumulation", "accumulation_config"),
+        ("moment_dtype", "precision_config"),
+        ("ema", "ema"),
+        ("swa", "swa"),
+        ("structured_method", "method_config"),
+    ),
+)
+def test_state_checkpoint_rejects_state_defining_mismatch(case, field):
+    plan = tiny_plan()
+    adamw_kwargs = {"total_steps": 10, "schedule": "constant"}
+    schedule_free_kwargs = {"total_steps": 10, "schedule": "constant"}
+
+    if case == "adamw_to_schedule_free":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.schedule_free_adam_from_plan(plan, **schedule_free_kwargs)
+    elif case == "schedule_free_to_adamw":
+        saved = rfft.schedule_free_adam_from_plan(plan, **schedule_free_kwargs)
+        target = rfft.adamw_from_plan(plan, **adamw_kwargs)
+    elif case == "schedule_kind":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.adamw_from_plan(plan, total_steps=10, schedule="linear")
+    elif case == "schedule_length":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.adamw_from_plan(plan, total_steps=11, schedule="constant")
+    elif case == "accumulation":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.adamw_from_plan(plan, **adamw_kwargs, accumulation_steps=2)
+    elif case == "moment_dtype":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.adamw_from_plan(plan, **adamw_kwargs, moment_dtype=jnp.bfloat16)
+    elif case == "ema":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.adamw_from_plan(
+            plan, **adamw_kwargs, ema=rfft.EMAConfig(enabled=True)
+        )
+    elif case == "swa":
+        saved = rfft.adamw_from_plan(plan, **adamw_kwargs)
+        target = rfft.adamw_from_plan(
+            plan, **adamw_kwargs, swa=rfft.SWAConfig(enabled=True, start_step=1)
+        )
+    else:
+        saved = rfft.schedule_free_adam_from_plan(
+            plan, **schedule_free_kwargs, weighting_mode="practical"
+        )
+        target = rfft.schedule_free_adam_from_plan(
+            plan, **schedule_free_kwargs, weighting_mode="theoretical"
+        )
+
+    checkpoint = rfft.make_state_checkpoint(
+        saved,
+        saved.init(plan.trainable),
+        model_checkpoint_id="model-step-1",
+    )
+
+    with pytest.raises(rfft.OptimizerStateRestoreError, match=field):
+        rfft.restore_state_checkpoint(
+            target,
+            checkpoint,
+            model_checkpoint_id="model-step-1",
+        )
+
+
+def test_state_checkpoint_non_strict_allows_state_defining_mismatch():
+    plan = tiny_plan()
+    saved = rfft.schedule_free_adam_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+    )
+    target = rfft.adamw_from_plan(plan, total_steps=10, schedule="constant")
+    state = saved.init(plan.trainable)
+    checkpoint = rfft.make_state_checkpoint(
+        saved,
+        state,
+        model_checkpoint_id="model-step-1",
+    )
+
+    restored = rfft.restore_state_checkpoint(
+        target,
+        checkpoint,
+        model_checkpoint_id="model-step-1",
+        strict=False,
+    )
+
+    assert restored is state
+
+
+def test_state_checkpoint_non_strict_still_validates_schema():
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=10, schedule="constant")
+    checkpoint = rfft.OptimizerStateCheckpoint(
+        manifest={},
+        state=bundle.init(plan.trainable),
+        format="other",
+    )
+
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="unsupported.*format"):
+        rfft.restore_state_checkpoint(
+            bundle,
+            checkpoint,
+            model_checkpoint_id="model-step-1",
+            strict=False,
+        )
+
+
+def test_state_checkpoint_rejects_missing_compatibility_field():
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=10, schedule="constant")
+    checkpoint = rfft.make_state_checkpoint(
+        bundle,
+        bundle.init(plan.trainable),
+        model_checkpoint_id="model-step-1",
+    )
+    incomplete_manifest = dict(checkpoint.manifest)
+    del incomplete_manifest["gradient_policy"]
+    incomplete = rfft.OptimizerStateCheckpoint(
+        manifest=incomplete_manifest,
+        state=checkpoint.state,
+        metadata=checkpoint.metadata,
+    )
+
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError,
+        match="missing compatibility field 'gradient_policy'",
+    ):
+        rfft.restore_state_checkpoint(
+            bundle,
+            incomplete,
+            model_checkpoint_id="model-step-1",
+        )
+
+
+def test_state_checkpoint_normalizes_legacy_compatibility_aliases():
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=10, schedule="constant")
+    checkpoint = rfft.make_state_checkpoint(
+        bundle,
+        bundle.init(plan.trainable),
+        model_checkpoint_id="model-step-1",
+    )
+    legacy_manifest = dict(checkpoint.manifest)
+    for field in (
+        "optimizer_config",
+        "schedule_config",
+        "accumulation_config",
+        "precision_config",
+        "sharding_config",
+        "offload_policy",
+        "quantization_metadata",
+    ):
+        del legacy_manifest[field]
+    legacy = rfft.OptimizerStateCheckpoint(
+        manifest=legacy_manifest,
+        state=checkpoint.state,
+        metadata=checkpoint.metadata,
+    )
+
+    restored = rfft.restore_state_checkpoint(
+        bundle,
+        legacy,
+        model_checkpoint_id="model-step-1",
+    )
+
+    assert restored is checkpoint.state
+
+
 def test_state_checkpoint_rejects_mismatched_sharding_policy():
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(
@@ -184,8 +357,8 @@ def test_state_checkpoint_rejects_mismatched_quantization_metadata():
     incompatible = rfft.OptimizerStateCheckpoint(
         manifest={
             **checkpoint.manifest,
-            "state_quantization": {
-                **checkpoint.manifest["state_quantization"],
+            "quantization_metadata": {
+                **checkpoint.manifest["quantization_metadata"],
                 "block_layout": "logical_global",
             },
         },
