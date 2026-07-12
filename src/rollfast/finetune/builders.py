@@ -65,6 +65,35 @@ class _FactorizedAdamWState(NamedTuple):
     inner_state: optax.OptState
 
 
+def _validate_complex_plan_compatibility(
+    trainable: Any,
+    *,
+    family: str,
+    precision: PrecisionConfig,
+) -> None:
+    complex_paths = [
+        jax.tree_util.keystr(path)
+        for path, leaf in jax.tree_util.tree_leaves_with_path(trainable)
+        if hasattr(leaf, "dtype")
+        and jnp.issubdtype(jnp.dtype(leaf.dtype), jnp.complexfloating)
+    ]
+    if not complex_paths:
+        return
+    path = complex_paths[0]
+    if family != "adamw":
+        raise ValueError(
+            f"{family} does not support complex fine-tuning leaves; found one at "
+            f"{path}. Use plain AdamW or a complex-safe matrix/Adam wrapper."
+        )
+    if precision.master_params == "always" and not jnp.issubdtype(
+        jnp.dtype(precision.master_param_dtype), jnp.complexfloating
+    ):
+        raise ValueError(
+            "plain AdamW cannot use a real master-parameter cast with complex "
+            f"fine-tuning leaves; found one at {path}."
+        )
+
+
 def compile_optimizer(
     plan: FineTunePlanProtocol,
     *,
@@ -124,6 +153,11 @@ def compile_optimizer(
         optimizer = replace(optimizer, name="adamw8")
 
     normalized = validate_plan(plan, allow_empty_groups=allow_empty_groups)
+    _validate_complex_plan_compatibility(
+        normalized.trainable,
+        family=optimizer.name,
+        precision=precision,
+    )
     schedule = schedule.resolved(total_steps)
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
@@ -362,6 +396,11 @@ def galore_adamw_from_plan(
     )
 
     normalized = validate_plan(plan)
+    _validate_complex_plan_compatibility(
+        normalized.trainable,
+        family="galore_adamw",
+        precision=precision,
+    )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     refresh_communication_bytes = _estimate_galore_refresh_communication_bytes(
@@ -501,6 +540,11 @@ def apollo_adamw_from_plan(
     )
 
     normalized = validate_plan(plan)
+    _validate_complex_plan_compatibility(
+        normalized.trainable,
+        family="apollo_adamw",
+        precision=precision,
+    )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_apollo_transform(
@@ -645,6 +689,11 @@ def schedule_free_adam_from_plan(
     precision = PrecisionConfig(moment_dtype=moment_dtype)
 
     normalized = validate_plan(plan)
+    _validate_complex_plan_compatibility(
+        normalized.trainable,
+        family="schedule_free_adam",
+        precision=precision,
+    )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_schedule_free_transform(
@@ -1544,7 +1593,7 @@ def _scale_factorized_adamw_leaf(
     scaled = update
     weight_decay = weight_decays[label]
     if weight_decay != 0.0 and param is not None:
-        scaled = scaled + weight_decay * param.astype(jnp.float32)
+        scaled = scaled + weight_decay * param.astype(update.dtype)
     return (-lr_schedules[label](count) * scaled).astype(update.dtype)
 
 

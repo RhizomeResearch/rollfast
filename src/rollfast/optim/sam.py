@@ -20,7 +20,7 @@ def global_l2_norm(
     """Return the global L2 norm over local leaves and parameter-shard axes."""
 
     sq_sum = sum(
-        jnp.sum(jnp.square(leaf.astype(jnp.float32)))
+        jnp.sum(jnp.square(jnp.abs(leaf)).astype(jnp.float32))
         for leaf in jax.tree.leaves(tree, is_leaf=lambda x: x is None)
         if leaf is not None
     )
@@ -139,8 +139,12 @@ def _direction_leaf(
     if grad is None:
         return None
     if not bool(mask):
-        return jnp.zeros_like(grad, dtype=jnp.float32)
-    grad = grad.astype(jnp.float32)
+        return jnp.zeros_like(grad)
+    grad = grad.astype(
+        jnp.complex64
+        if jnp.issubdtype(grad.dtype, jnp.complexfloating)
+        else jnp.float32
+    )
     if not adaptive:
         return grad
     return (jnp.abs(param).astype(jnp.float32) + eta) * grad
@@ -158,7 +162,7 @@ def _perturb_leaf(
     if direction is None:
         return None
     if not bool(mask):
-        return jnp.zeros_like(direction, dtype=jnp.float32)
+        return jnp.zeros_like(direction)
     if not adaptive:
         return direction * scale
     return (jnp.abs(param).astype(jnp.float32) + eta) * direction * scale

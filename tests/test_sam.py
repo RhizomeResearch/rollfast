@@ -53,3 +53,14 @@ def test_asam_perturbation_scales_with_parameter_magnitude():
         perturbation["small"]
     )
     assert jnp.all(perturbed["large"] > params["large"])
+
+
+def test_complex_sam_uses_hermitian_norm_and_preserves_imaginary_direction():
+    grads = {"w": jnp.asarray([1.0 + 2.0j], dtype=jnp.complex64)}
+
+    perturbation, perturbation_norm = rollfast.sam_perturbation(grads, rho=0.25)
+
+    assert jnp.allclose(rollfast.global_l2_norm(grads), jnp.sqrt(5.0))
+    assert jnp.allclose(perturbation_norm, 0.25, atol=1e-6)
+    assert perturbation["w"].dtype == jnp.complex64
+    assert jnp.any(jnp.imag(perturbation["w"]) != 0.0)

@@ -54,6 +54,18 @@ from rollfast.utils import (
     dist_reduce,
 )
 
+
+def _reject_complex_tree(tree: Any) -> None:
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(
+            jnp.dtype(leaf.dtype), jnp.complexfloating
+        ):
+            raise ValueError(
+                "Hyperball does not support complex leaves; found one at "
+                f"{jax.tree_util.keystr(path)}."
+            )
+
+
 MaskOrFn = Any | Callable[[base.Params], Any] | None
 
 
@@ -284,6 +296,7 @@ def apply_hyperball(
         _validate_nonnegative_static_scalar("weight_decay", weight_decay)
 
     def init_fn(params: base.Params) -> HyperballState:
+        _reject_complex_tree(params)
         return HyperballState(
             count=jnp.zeros([], dtype=jnp.int32),
             init_norm=_init_norm_tree(params, axis_name),
@@ -295,6 +308,9 @@ def apply_hyperball(
         params: base.Params | None = None,
         **extra_args: Any,
     ) -> tuple[base.Updates, base.OptState]:
+        _reject_complex_tree(updates)
+        if params is not None:
+            _reject_complex_tree(params)
         if params is None:
             raise ValueError("`params` must be provided to `apply_hyperball`.")
 

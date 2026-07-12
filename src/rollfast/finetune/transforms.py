@@ -67,7 +67,28 @@ def always_skip_nonfinite(
                 updates,
                 is_leaf=lambda x: x is None,
             )
-            return zero_updates, state.inner_state
+            _, canonical_state = inner.update(
+                zero_updates,
+                state.inner_state,
+                params,
+                **extra_args,
+            )
+
+            def preserve_state_leaf(old, canonical):
+                if not hasattr(old, "dtype") or not hasattr(canonical, "dtype"):
+                    return old
+                if jnp.issubdtype(
+                    old.dtype, jnp.complexfloating
+                ) and not jnp.issubdtype(canonical.dtype, jnp.complexfloating):
+                    return jnp.real(old).astype(canonical.dtype)
+                return old.astype(canonical.dtype)
+
+            preserved_state = jax.tree.map(
+                preserve_state_leaf,
+                state.inner_state,
+                canonical_state,
+            )
+            return zero_updates, preserved_state
 
         guarded_updates, inner_state = jax.lax.cond(
             finite,
@@ -145,8 +166,7 @@ def _global_norm(
     for leaf in jax.tree.leaves(tree, is_leaf=lambda x: x is None):
         if leaf is None or not hasattr(leaf, "dtype"):
             continue
-        arr = jnp.asarray(leaf, dtype=jnp.float32)
-        total = total + jnp.sum(jnp.square(arr))
+        total = total + jnp.sum(jnp.square(jnp.abs(leaf)).astype(jnp.float32))
     norm_axis_name = resolve_partition_norm_axis_name(
         axis_name=axis_name,
         partition_axis_names=partition_axis_names,

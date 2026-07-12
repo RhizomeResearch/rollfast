@@ -46,6 +46,17 @@ from rollfast.schedules.wsd import _make_wsd_schedule_pair
 from rollfast.utils import MomentumAccumulator
 
 
+def _reject_complex_tree(tree) -> None:
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(
+            jnp.dtype(leaf.dtype), jnp.complexfloating
+        ):
+            raise ValueError(
+                "SODA does not support complex leaves; found one at "
+                f"{jax.tree_util.keystr(path)}."
+            )
+
+
 class SodaState(NamedTuple):
     """State for the practical SODA wrapper."""
 
@@ -72,6 +83,7 @@ def soda(
     base_optimizer = base.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
+        _reject_complex_tree(params)
         z0 = jax.tree.map(
             lambda x: (
                 jnp.array(x, dtype=state_dtype, copy=True) if x is not None else None
@@ -86,6 +98,9 @@ def soda(
         )
 
     def update_fn(updates, state, params=None, **extra_args):
+        _reject_complex_tree(updates)
+        if params is not None:
+            _reject_complex_tree(params)
         if params is None:
             raise ValueError("`params` must be provided to `soda`.")
 

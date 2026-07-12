@@ -1347,15 +1347,36 @@ def _cast_tree_like(tree: Any, template: Any) -> Any:
 
 def _cast_gradient_tree(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(
-        lambda leaf: None if leaf is None else astype_preserving_sharding(leaf, dtype),
+        lambda leaf: (
+            None
+            if leaf is None
+            else astype_preserving_sharding(
+                leaf,
+                leaf.dtype
+                if jnp.issubdtype(leaf.dtype, jnp.complexfloating)
+                and not jnp.issubdtype(jnp.dtype(dtype), jnp.complexfloating)
+                else dtype,
+            )
+        ),
         tree,
         is_leaf=lambda x: x is None,
     )
 
 
 def _zeros_like_accumulator(tree: Any, dtype: Any) -> Any:
+    def zeros_leaf(leaf):
+        if leaf is None:
+            return None
+        leaf_dtype = (
+            leaf.dtype
+            if jnp.issubdtype(leaf.dtype, jnp.complexfloating)
+            and not jnp.issubdtype(jnp.dtype(dtype), jnp.complexfloating)
+            else dtype
+        )
+        return zeros_like_preserving_sharding(leaf, leaf_dtype)
+
     return jax.tree.map(
-        lambda leaf: zeros_like_preserving_sharding(leaf, dtype),
+        zeros_leaf,
         tree,
         is_leaf=lambda x: x is None,
     )

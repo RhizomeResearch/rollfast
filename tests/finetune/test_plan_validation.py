@@ -270,3 +270,35 @@ def test_fingerprint_changes_when_identity_sharding_changes():
     assert (
         rfft.validate_plan(plan_a).fingerprint != rfft.validate_plan(plan_b).fingerprint
     )
+
+
+def test_complex_plan_rejects_adamw8_before_state_initialization():
+    plan = replace(
+        _minimal_compiler_plan(),
+        trainable={"w": jnp.ones((2,), dtype=jnp.complex64)},
+    )
+
+    with pytest.raises(ValueError, match=r"adamw8.*complex.*w"):
+        rfft.compile_optimizer(
+            plan,
+            optimizer=rfft.OptimizerConfig(name="adamw8"),
+            state_quantization=rfft.StateQuantizationConfig(enabled=True),
+            total_steps=1,
+        )
+
+
+def test_complex_plan_rejects_real_master_parameter_cast():
+    plan = replace(
+        _minimal_compiler_plan(),
+        trainable={"w": jnp.ones((2,), dtype=jnp.complex64)},
+    )
+
+    with pytest.raises(ValueError, match=r"AdamW.*real master-parameter.*w"):
+        rfft.compile_optimizer(
+            plan,
+            precision=rfft.PrecisionConfig(
+                master_params="always",
+                master_param_dtype=jnp.float32,
+            ),
+            total_steps=1,
+        )

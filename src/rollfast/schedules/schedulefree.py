@@ -43,6 +43,17 @@ ScheduleFreeLearningRate = (
 )
 
 
+def _reject_complex_tree(tree: Any) -> None:
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(
+            jnp.dtype(leaf.dtype), jnp.complexfloating
+        ):
+            raise ValueError(
+                "Schedule-Free does not support complex leaves; found one at "
+                f"{jax.tree_util.keystr(path)}."
+            )
+
+
 class WeightingMode(str, Enum):
     """
     Determines how the iterate averaging parameter c_t is computed.
@@ -317,6 +328,7 @@ def schedule_free(
     base_optimizer = base.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
+        _reject_complex_tree(params)
         state_key = _fresh_prng_key(key)
         z = jax.tree.map(
             lambda t: (
@@ -343,6 +355,9 @@ def schedule_free(
         )
 
     def update_fn(updates, state, params=None, **extra_args):
+        _reject_complex_tree(updates)
+        if params is not None:
+            _reject_complex_tree(params)
         if params is None:
             raise ValueError(
                 "`params` must be provided to `schedule_free.update`; "

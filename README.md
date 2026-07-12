@@ -693,6 +693,17 @@ Matrix optimizers operate on real matrix geometry. Complex parameters should be
 routed to an Adam fallback branch or represented as real-valued tensors before
 using Muon/PRISM/Aurora/RMNP/NorMuon/TrasMuon/Pion matrix branches.
 
+Complex-parameter support is explicit:
+
+| Surface | Complex-parameter policy |
+|---|---|
+| Adam/AdamW and Magma | Supported |
+| Public Muon/PRISM/Aurora/RMNP/NorMuon/TrasMuon/Pion wrappers | Complex leaves route to Adam |
+| Direct matrix transforms | Rejected |
+| SAM/ASAM and global-norm clipping | Supported with Hermitian magnitude |
+| Plain fine-tuning AdamW without a real master-parameter cast | Supported |
+| AdamW8, APOLLO, GaLore, SODA, Schedule-Free, and Hyperball | Rejected before real-only state or update casts |
+
 A bare `MatrixDimensionNumbers(...)` is only for a single array leaf. It is not
 broadcast across PyTrees; for structured params, pass a matching PyTree of
 specs/`None` or a callable such as `get_equinox_prism_spec`.

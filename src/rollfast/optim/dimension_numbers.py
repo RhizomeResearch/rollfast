@@ -57,6 +57,12 @@ def _has_matrix_spec(dim_nums: Any) -> bool:
     return dim_nums is not None and not isinstance(dim_nums, _masking.MaskedNode)
 
 
+def _is_real_array(x: Any) -> bool:
+    return hasattr(x, "dtype") and not jnp.issubdtype(
+        jnp.dtype(x.dtype), jnp.complexfloating
+    )
+
+
 def _validate_matrix_operand(
     x: Any,
     dim_nums: MatrixDimensionNumbers | None,
@@ -154,7 +160,11 @@ def _make_matrix_labels(
         lambda d, p: (
             None
             if p is None
-            else (matrix_label if _has_matrix_spec(d) else fallback_label)
+            else (
+                matrix_label
+                if _has_matrix_spec(d) and _is_real_array(p)
+                else fallback_label
+            )
         ),
         dim_nums_tree,
         params,
@@ -171,7 +181,7 @@ def _make_dimension_numbers_mask(
         lambda d, p: (
             False
             if p is None or isinstance(p, _masking.MaskedNode)
-            else _has_matrix_spec(d)
+            else _has_matrix_spec(d) and _is_real_array(p)
         ),
         dim_nums_tree,
         params,

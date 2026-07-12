@@ -79,6 +79,18 @@ def test_global_norm_clip_uses_explicit_partition_axes(monkeypatch):
     np.testing.assert_allclose(updates["w"], jnp.ones((2,)) / jnp.sqrt(8.0), rtol=1e-5)
 
 
+def test_global_norm_clip_uses_complex_magnitude_and_preserves_phase():
+    tx = clip_by_global_norm(1.0)
+    updates, _ = tx.update(
+        {"w": jnp.asarray([1.0 + 2.0j], dtype=jnp.complex64)},
+        tx.init(None),
+    )
+
+    np.testing.assert_allclose(jnp.abs(updates["w"]), 1.0, rtol=1e-5)
+    assert updates["w"].dtype == jnp.complex64
+    assert jnp.imag(updates["w"][0]) != 0.0
+
+
 def test_sam_perturbation_uses_partition_axes(monkeypatch):
     calls = []
 

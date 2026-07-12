@@ -25,6 +25,17 @@ BlockLayout = Literal["shard_local", "logical_global"]
 CodebookQuantizer = Literal["dynamic_signed", "dynamic_unsigned", "symmetric_int8"]
 
 
+def _reject_complex_tree(tree: Any, family: str) -> None:
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(
+            jnp.dtype(leaf.dtype), jnp.complexfloating
+        ):
+            raise ValueError(
+                f"{family} does not support complex leaves; found one at "
+                f"{jax.tree_util.keystr(path)}."
+            )
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class QuantizedBlocks:
@@ -271,6 +282,7 @@ def scale_by_adam8(
         raise ValueError("block_layout must be 'shard_local' or 'logical_global'.")
 
     def init_fn(params):
+        _reject_complex_tree(params, "AdamW8")
         key_mu, key_nu, next_key = jax.random.split(_fresh_prng_key(key), 3)
         mu = _init_moment_tree(
             params,
@@ -302,6 +314,9 @@ def scale_by_adam8(
         )
 
     def update_fn(updates, state, params=None):
+        _reject_complex_tree(updates, "AdamW8")
+        if params is not None:
+            _reject_complex_tree(params, "AdamW8")
         del params
         key_mu, key_nu, next_key = jax.random.split(state.key, 3)
         updates_f32 = jax.tree.map(

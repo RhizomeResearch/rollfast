@@ -499,3 +499,37 @@ def test_empty_all_frozen_plan_compiles_to_empty_report():
     assert bundle.report.groups == ()
     assert bundle.report.warnings == ("plan has no trainable array leaves.",)
     assert all(getattr(leaf, "shape", ()) == () for leaf in jax.tree.leaves(state))
+
+
+def test_plain_adamw_jit_update_preserves_complex_values():
+    plan = TinyPlan(
+        trainable={"w": jnp.asarray([1.0 + 2.0j], dtype=jnp.complex64)},
+        labels={"w": "w_decay"},
+        group_specs={
+            "w_decay": TinyGroup(
+                "w_decay",
+                role="head",
+                depth=None,
+                lr_multiplier=1.0,
+                weight_decay=True,
+            )
+        },
+    )
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=1,
+        schedule="constant",
+        clip_global_norm=1.0,
+    )
+    grads = {"w": jnp.asarray([1.0 + 2.0j], dtype=jnp.complex64)}
+
+    updates, _ = jax.jit(bundle.update)(
+        grads,
+        bundle.init(plan.trainable),
+        plan.trainable,
+    )
+    updated = optax.apply_updates(plan.trainable, updates)
+
+    assert updated["w"].dtype == jnp.complex64
+    assert jnp.all(jnp.isfinite(updated["w"]))
+    assert jnp.any(jnp.imag(updates["w"]) != 0.0)

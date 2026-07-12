@@ -18,6 +18,17 @@ Projection = Literal["auto", "left", "right", "two_sided"]
 StateOnRefresh = Literal["reuse_coordinates", "reset", "transport"]
 
 
+def _reject_complex_tree(tree: Any) -> None:
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(
+            jnp.dtype(leaf.dtype), jnp.complexfloating
+        ):
+            raise ValueError(
+                "GaLore does not support complex leaves; found one at "
+                f"{jax.tree_util.keystr(path)}."
+            )
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class GaLoreLeafState:
@@ -111,6 +122,7 @@ def galore_adamw(
     decay_requires_params = callable(weight_decay) or weight_decay != 0.0
 
     def init_fn(params):
+        _reject_complex_tree(params)
         leaves = jax.tree.map(
             lambda param: _init_leaf_state(
                 param,
@@ -126,6 +138,9 @@ def galore_adamw(
         return ScaleByGaLoreState(count=jnp.zeros([], jnp.int32), leaves=leaves)
 
     def update_fn(updates, state, params=None):
+        _reject_complex_tree(updates)
+        if params is not None:
+            _reject_complex_tree(params)
         if params is None:
             if decay_requires_params:
                 raise ValueError(
