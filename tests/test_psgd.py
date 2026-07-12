@@ -8,6 +8,16 @@ from rollfast.optim.psgd import KronState, kron, scale_by_kron
 from tests._typing import as_array_dict
 
 
+def _assert_tree_exactly_equal(actual, expected):
+    actual_leaves, actual_structure = jax.tree.flatten(actual)
+    expected_leaves, expected_structure = jax.tree.flatten(expected)
+
+    assert actual_structure == expected_structure
+    assert len(actual_leaves) == len(expected_leaves)
+    for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves, strict=True):
+        assert jnp.array_equal(actual_leaf, expected_leaf)
+
+
 def test_scale_by_kron():
     params = {"w": jnp.ones((4, 4))}
     grads = {"w": jnp.ones((4, 4)) * 0.1}
@@ -124,13 +134,40 @@ def test_scale_by_kron_handles_masked_first_leaf_when_updating_preconditioner():
     assert jnp.all(jnp.isfinite(cast(jax.Array, updates["w"])))
 
 
-def test_scale_by_kron_spike_skip_preserves_momentum_and_zeroes_update():
+@pytest.mark.parametrize("jit_update", [False, True])
+@pytest.mark.parametrize("use_optional_state", [False, True])
+def test_scale_by_kron_strict_spike_skip_preserves_complete_state(
+    jit_update, use_optional_state
+):
     params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
-    grads = {"w": jnp.ones_like(params["w"])}
+    grads = {"w": jnp.full_like(params["w"], 4.0)}
     tx = scale_by_kron(
         b1=0.9,
         preconditioner_update_probability=1.0,
         raw_global_grad_clip=0.01,
+        permissive_spike_protection=False,
+        grad_clip_max_amps=(1e9, 1e9),
+        track_lipschitz=use_optional_state,
+        use_magma=use_optional_state,
+        magma_p=1.0,
+    )
+    state0 = cast(KronState, tx.init(params))
+    update = jax.jit(tx.update) if jit_update else tx.update
+    updates, state1 = update(grads, state0, params)
+    updates = as_array_dict(updates)
+    state1 = cast(KronState, state1)
+
+    assert jnp.array_equal(updates["w"], jnp.zeros_like(updates["w"]))
+    _assert_tree_exactly_equal(state1, state0)
+
+
+def test_scale_by_kron_accepted_first_step_commits_lazy_scale_state():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.full_like(params["w"], 4.0)}
+    tx = scale_by_kron(
+        b1=0.9,
+        preconditioner_update_probability=0.0,
+        raw_global_grad_clip=10.0,
         permissive_spike_protection=False,
         grad_clip_max_amps=(1e9, 1e9),
     )
@@ -138,10 +175,34 @@ def test_scale_by_kron_spike_skip_preserves_momentum_and_zeroes_update():
     updates, state1 = tx.update(grads, state0, params)
     updates = as_array_dict(updates)
     state1 = cast(KronState, state1)
-    mu = cast(dict[str, jax.Array], state1.mu)
 
-    assert jnp.allclose(updates["w"], jnp.zeros_like(updates["w"]))
-    assert jnp.allclose(mu["w"], jnp.zeros_like(mu["w"]))
+    assert jnp.all(jnp.isfinite(updates["w"]))
+    assert not bool(state1.needs_scale_init)
+    assert not jnp.array_equal(
+        jax.tree.leaves(state1.Qs_preconditioners)[0],
+        jax.tree.leaves(state0.Qs_preconditioners)[0],
+    )
+
+
+def test_scale_by_kron_permissive_early_spike_commits_state():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.ones_like(params["w"])}
+    tx = scale_by_kron(
+        b1=0.9,
+        preconditioner_update_probability=1.0,
+        raw_global_grad_clip=0.01,
+        permissive_spike_protection=True,
+        grad_clip_max_amps=(1e9, 1e9),
+    )
+    state0 = cast(KronState, tx.init(params))
+    updates, state1 = tx.update(grads, state0, params)
+    updates = as_array_dict(updates)
+    state1 = cast(KronState, state1)
+
+    assert jnp.all(jnp.isfinite(updates["w"]))
+    assert jnp.any(updates["w"] != 0)
+    assert not bool(state1.needs_scale_init)
+    assert int(state1.count) == int(state0.count) + 1
 
 
 def test_scale_by_kron_magma_spike_skip_handles_masked_first_leaf():
@@ -163,7 +224,8 @@ def test_scale_by_kron_magma_spike_skip_handles_masked_first_leaf():
         magma_p=1.0,
     )
 
-    updates, state = tx.update(grads, tx.init(params), params)
+    state0 = cast(KronState, tx.init(params))
+    updates, state = tx.update(grads, state0, params)
     updates = cast(dict[str, object], updates)
     state = cast(KronState, state)
     mu = cast(dict[str, object], state.mu)
@@ -171,3 +233,4 @@ def test_scale_by_kron_magma_spike_skip_handles_masked_first_leaf():
     assert updates["a"] is None
     assert mu["a"] is None
     assert jnp.allclose(cast(jax.Array, updates["w"]), jnp.zeros((2, 2)))
+    _assert_tree_exactly_equal(state, state0)

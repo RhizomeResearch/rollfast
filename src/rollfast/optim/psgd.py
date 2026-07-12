@@ -1324,16 +1324,6 @@ def scale_by_kron(
         )
         should_skip = jnp.logical_and(skip_condition, is_spike)
 
-        if state.mu is not None:
-            mu_to_save = jax.tree.map(
-                lambda new, old: (
-                    jnp.where(should_skip, old, new) if not _is_psgd_leaf(new) else new
-                ),
-                mu_to_save,
-                state.mu,
-                is_leaf=_is_psgd_leaf,
-            )
-
         # Only update if we were going to update AND we shouldn't skip
         do_update = jnp.logical_and(do_update, jnp.logical_not(should_skip))
 
@@ -1453,17 +1443,10 @@ def scale_by_kron(
             is_leaf=_is_psgd_leaf,
         )
 
-        if use_magma:
-            new_magma_s = jax.tree.map(
-                lambda new_s, old_s: jnp.where(should_skip, old_s, new_s),
-                new_magma_s,
-                state.magma_s,
-            )
-
         Qs_to_save = grads_structure.unflatten(Qs_next)
         Ls_to_save = grads_structure.unflatten(Ls_next) if Ls_next else None
 
-        new_state = KronState(
+        candidate_state = KronState(
             count=count_inc,
             mu=mu_to_save,
             Qs_preconditioners=Qs_to_save,
@@ -1471,6 +1454,14 @@ def scale_by_kron(
             needs_scale_init=needs_scale_init,
             magma_s=new_magma_s,
             key=key_next,
+        )
+        new_state = jax.tree.map(
+            lambda new, old: (
+                old if _is_psgd_leaf(new) else jax.lax.select(should_skip, old, new)
+            ),
+            candidate_state,
+            state,
+            is_leaf=_is_psgd_leaf,
         )
 
         return final_updates, new_state
