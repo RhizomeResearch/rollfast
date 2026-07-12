@@ -1469,12 +1469,13 @@ def _build_factorized_adamw_transform(
         )
 
     def update_fn(updates, state, params=None):
+        if params is None:
+            raise ValueError("`params` must be provided to factorized AdamW.")
         adam_updates, inner_state = adam.update(
             updates,
             state.inner_state,
             params,
         )
-        params_or_updates = adam_updates if params is None else params
         scaled = jax.tree.map(
             lambda update, param, label: _scale_factorized_adamw_leaf(
                 update,
@@ -1485,7 +1486,7 @@ def _build_factorized_adamw_transform(
                 weight_decays=weight_decays,
             ),
             adam_updates,
-            params_or_updates,
+            params,
             labels,
             is_leaf=lambda x: x is None,
         )

@@ -108,6 +108,7 @@ def galore_adamw(
 
     basis_dtype = cast(jax.typing.DTypeLike, utils.canonicalize_dtype(basis_dtype))
     mu_dtype = cast(jax.typing.DTypeLike, utils.canonicalize_dtype(mu_dtype))
+    decay_requires_params = callable(weight_decay) or weight_decay != 0.0
 
     def init_fn(params):
         leaves = jax.tree.map(
@@ -125,6 +126,13 @@ def galore_adamw(
         return ScaleByGaLoreState(count=jnp.zeros([], jnp.int32), leaves=leaves)
 
     def update_fn(updates, state, params=None):
+        if params is None:
+            if decay_requires_params:
+                raise ValueError(
+                    "`params` must be provided to `galore_adamw` when weight_decay "
+                    "is nonzero or scheduled."
+                )
+            params = jax.tree.map(lambda _: None, updates)
         count_inc = cast(jax.Array, numerics.safe_increment(state.count))
         should_refresh = (state.count % update_interval) == 0
         wd_step = (
@@ -158,7 +166,7 @@ def galore_adamw(
             ),
             updates,
             state.leaves,
-            updates if params is None else params,
+            params,
             is_leaf=_is_state_or_passthrough,
         )
         new_updates = jax.tree.map(
@@ -313,8 +321,9 @@ def _update_leaf(
     projected_update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
     update = _reconstruct(projected_update, basis_left, basis_right, state.orientation)
     update = update * scale
-    if param is not None and weight_decay != 0.0:
-        update = update + weight_decay * param.astype(jnp.float32)
+    if param is not None:
+        decay = jnp.asarray(weight_decay, dtype=jnp.float32)
+        update = update + decay * param.astype(jnp.float32)
     update = (-learning_rate * update).astype(grad.dtype)
     return _LeafUpdateResult(
         update,
@@ -349,8 +358,9 @@ def _full_adam_leaf(
     mu_hat = _safe_bias_correction(mu.astype(jnp.float32), 1.0 - b1**count_inc)
     nu_hat = _safe_bias_correction(nu.astype(jnp.float32), 1.0 - b2**count_inc)
     update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
-    if param is not None and weight_decay != 0.0:
-        update = update + weight_decay * param.astype(jnp.float32)
+    if param is not None:
+        decay = jnp.asarray(weight_decay, dtype=jnp.float32)
+        update = update + decay * param.astype(jnp.float32)
     update = (-learning_rate * update).astype(grad.dtype)
     return _LeafUpdateResult(
         update,

@@ -61,6 +61,21 @@ def test_factorized_adamw_matches_manual_first_group_updates():
     assert groups["head_decay"].effective_lr == pytest.approx(2e-3)
 
 
+def test_factorized_adamw_requires_params():
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    state = bundle.init(plan.trainable)
+    grads = _ones_like_trainable(plan.trainable)
+
+    with pytest.raises(ValueError, match=r"params.*factorized AdamW"):
+        bundle.update(grads, state)
+
+
 def _contains_state_type(state, name: str) -> bool:
     if type(state).__name__ == name:
         return True

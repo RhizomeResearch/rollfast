@@ -105,6 +105,7 @@ def apollo_adamw(
     resolved_rank = 1 if mini else rank
     resolved_scaling: Scaling = "tensor" if mini else scaling
     mu_dtype = cast(jax.typing.DTypeLike, utils.canonicalize_dtype(mu_dtype))
+    decay_requires_params = callable(weight_decay) or weight_decay != 0.0
 
     def init_fn(params):
         leaves = _tree_map_with_index(
@@ -120,6 +121,13 @@ def apollo_adamw(
         return ScaleByAPOLLOState(count=jnp.zeros([], jnp.int32), leaves=leaves)
 
     def update_fn(updates, state, params=None):
+        if params is None:
+            if decay_requires_params:
+                raise ValueError(
+                    "`params` must be provided to `apollo_adamw` when weight_decay "
+                    "is nonzero or scheduled."
+                )
+            params = jax.tree.map(lambda _: None, updates)
         count_inc = cast(jax.Array, numerics.safe_increment(state.count))
         wd_step = (
             cast(Callable[[jax.Array], Any], weight_decay)(state.count)
@@ -157,7 +165,7 @@ def apollo_adamw(
             ),
             updates,
             state.leaves,
-            updates if params is None else params,
+            params,
             is_leaf=_is_state_or_passthrough,
         )
         new_updates = jax.tree.map(
@@ -327,8 +335,9 @@ def _update_leaf(
         norm_growth_limiter=norm_growth_limiter,
     )
     update = -step_size * update
-    if param is not None and weight_decay != 0.0:
-        update = update - learning_rate * weight_decay * param.astype(jnp.float32)
+    if param is not None:
+        decay = jnp.asarray(weight_decay, dtype=jnp.float32)
+        update = update - learning_rate * decay * param.astype(jnp.float32)
     update = update.astype(grad.dtype)
     return _LeafUpdateResult(
         update,
@@ -378,8 +387,9 @@ def _full_adam_leaf(
         norm_growth_limiter=norm_growth_limiter,
     )
     update = -step_size * update
-    if param is not None and weight_decay != 0.0:
-        update = update - learning_rate * weight_decay * param.astype(jnp.float32)
+    if param is not None:
+        decay = jnp.asarray(weight_decay, dtype=jnp.float32)
+        update = update - learning_rate * decay * param.astype(jnp.float32)
     update = update.astype(grad.dtype)
     return _LeafUpdateResult(
         update,

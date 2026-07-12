@@ -8,7 +8,7 @@ import optax
 import pytest
 
 import rollfast.finetune as rfft
-from rollfast.optim.galore import GaLoreLeafState
+from rollfast.optim.galore import GaLoreLeafState, galore_adamw
 
 from .helpers import tiny_plan
 
@@ -268,3 +268,80 @@ def test_galore_sharded_refresh_opt_in_reports_communication_cost():
         "estimated refresh communication bytes" in warning
         for warning in bundle.report.warnings
     )
+
+
+@pytest.mark.parametrize("weight_decay", [0.1, lambda count: jnp.asarray(0.0)])
+def test_galore_requires_params_for_configured_weight_decay(weight_decay):
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = jax.tree.map(jnp.ones_like, params)
+    tx = galore_adamw(
+        learning_rate=0.1,
+        rank=1,
+        min_matrix_size=1,
+        weight_decay=weight_decay,
+    )
+
+    with pytest.raises(ValueError, match=r"params.*galore_adamw"):
+        tx.update(grads, tx.init(params))
+
+
+def test_galore_static_zero_weight_decay_allows_missing_params():
+    params = {"w": jnp.ones((2, 2), dtype=jnp.float32)}
+    grads = jax.tree.map(jnp.ones_like, params)
+    tx = galore_adamw(
+        learning_rate=0.1,
+        rank=1,
+        min_matrix_size=1,
+        weight_decay=0.0,
+    )
+
+    updates, _ = tx.update(grads, tx.init(params))
+
+    assert updates["w"].shape == params["w"].shape
+
+
+def test_galore_zero_gradient_decay_uses_params_for_all_leaf_paths():
+    params = {
+        "w": jnp.full((2, 2), 2.0, dtype=jnp.float32),
+        "b": jnp.full((2,), 3.0, dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.zeros_like, params)
+    tx = galore_adamw(
+        learning_rate=0.1,
+        rank=1,
+        min_matrix_size=1,
+        weight_decay=0.2,
+    )
+
+    updates, _ = tx.update(grads, tx.init(params), params)
+
+    assert jax.tree.all(
+        jax.tree.map(
+            lambda update, param: jnp.allclose(update, -0.02 * param),
+            updates,
+            params,
+        )
+    )
+
+
+def test_galore_scheduled_weight_decay_matches_eager_under_jit():
+    params = {
+        "w": jnp.ones((2, 2), dtype=jnp.float32),
+        "b": jnp.ones((2,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.ones_like, params)
+    schedule = lambda count: jnp.where(count == 0, 0.1, 0.0)
+    tx = galore_adamw(
+        learning_rate=0.1,
+        rank=1,
+        min_matrix_size=1,
+        weight_decay=schedule,
+    )
+    eager_state = tx.init(params)
+    jit_state = tx.init(params)
+    jit_update = jax.jit(tx.update)
+
+    for _ in range(2):
+        eager_updates, eager_state = tx.update(grads, eager_state, params)
+        jit_updates, jit_state = jit_update(grads, jit_state, params)
+        assert jax.tree.all(jax.tree.map(jnp.allclose, eager_updates, jit_updates))
