@@ -13,7 +13,7 @@ import optax
 from rollfast.optim.sam import add_perturbation, global_l2_norm, sam_perturbation
 from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
 
-from ._protocols import FineTunePlanProtocol
+from ._protocols import CombinableFineTunePlanProtocol, FineTunePlanProtocol
 from .config import (
     ASAMConfig,
     AccumulationConfig,
@@ -96,7 +96,7 @@ def make_update_step(
 
 
 def make_plan_update_step(
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., Any],
     optimizer: OptimizerBundle,
     *,
@@ -355,7 +355,7 @@ def make_loss_scaled_master_update_step(
 
 
 def make_stateful_loss_scaled_master_update_step(
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., tuple[Any, Any | None]],
     optimizer: OptimizerBundle,
     *,
@@ -474,7 +474,7 @@ def make_stateful_loss_scaled_master_update_step(
 
 
 def make_finetune_update_step(
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., tuple[Any, Any | None]],
     optimizer: OptimizerBundle,
     *,
@@ -545,7 +545,7 @@ def make_finetune_update_step(
 
 
 def make_plan_loss_scaled_master_update_step(
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., Any],
     optimizer: OptimizerBundle,
     *,
@@ -564,7 +564,7 @@ def make_plan_loss_scaled_master_update_step(
 
 
 def make_plan_master_update_step(
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., Any],
     optimizer: OptimizerBundle,
     *,
@@ -671,7 +671,7 @@ def make_accumulating_loss_bundle_update_step(
 
 
 def make_plan_loss_bundle_update_step(
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., LossBundle],
     optimizer: OptimizerBundle,
     *,
@@ -693,7 +693,7 @@ def make_plan_loss_bundle_update_step(
 
 def make_sam_step(
     *,
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     base_optimizer: OptimizerBundle,
     config: SAMConfig | ASAMConfig | None = None,
     loss_fn: Callable[..., Any],
@@ -795,7 +795,7 @@ def make_sam_step(
 
 def make_stateful_sam_step(
     *,
-    plan: FineTunePlanProtocol,
+    plan: CombinableFineTunePlanProtocol,
     base_optimizer: OptimizerBundle,
     config: SAMConfig | ASAMConfig | None = None,
     loss_fn: Callable[..., tuple[Any, Any | None]],

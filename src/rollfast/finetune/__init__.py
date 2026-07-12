@@ -1,6 +1,11 @@
 """Plan-aware optimization utilities for fine-tuning."""
 
-from ._protocols import FineTunePlanProtocol, GroupSpecProtocol, PyTree
+from ._protocols import (
+    CombinableFineTunePlanProtocol,
+    FineTunePlanProtocol,
+    GroupSpecProtocol,
+    PyTree,
+)
 from .adalora import (
     AdaLoRAController,
     AdaLoRAState,
@@ -158,6 +163,7 @@ __all__ = (
     "AveragingState",
     "CompiledGroup",
     "CompiledPolicyTrees",
+    "CombinableFineTunePlanProtocol",
     "CounterPolicy",
     "DEFAULT_NO_DECAY_TAGS",
     "EMAConfig",

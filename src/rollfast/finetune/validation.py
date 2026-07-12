@@ -103,6 +103,12 @@ def validate_plan(
             raise ValueError(
                 "every trainable array leaf must carry a logical identity."
             )
+        logical_id = getattr(identity, "logical_id", None)
+        if not isinstance(logical_id, str) or not logical_id:
+            raise ValueError(
+                "every trainable array leaf identity must provide a non-empty "
+                "logical_id string."
+            )
 
         arr = jnp.asarray(leaf)
         stats = labels_seen.setdefault(label, {"params": 0, "bytes": 0, "leaves": 0})

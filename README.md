@@ -245,8 +245,11 @@ Runnable examples live under [`examples/`](./examples):
 
 `rollfast.finetune` compiles model-library fine-tuning plans into grouped Optax
 optimizers. It is designed for Equimo's `equimo.finetune.FineTunePlan`, but the
-core only requires a structural plan with `trainable`, `labels`, and
-`group_specs` fields.
+core only requires a structural plan with five fields: `trainable`, `frozen`,
+`labels`, `group_specs`, and `identities`. The `frozen`, `labels`, and
+`identities` trees must align structurally with `trainable`, and each trainable
+identity must provide a stable `logical_id`. Plan-aware step helpers additionally
+require a `combine(trainable)` method; compiler-only plans do not.
 
 ```python
 import rollfast.finetune as rfft

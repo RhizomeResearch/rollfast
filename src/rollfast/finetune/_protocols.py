@@ -22,7 +22,7 @@ class GroupSpecProtocol(Protocol):
 
 @runtime_checkable
 class FineTunePlanProtocol(Protocol):
-    """Structural fine-tuning plan protocol.
+    """Minimum structural protocol for compiling a fine-tuning plan.
 
     Equimo's ``FineTunePlan`` satisfies this protocol, but Rollfast does not
     import Equimo to check it.
@@ -32,16 +32,19 @@ class FineTunePlanProtocol(Protocol):
     frozen: PyTree
     labels: PyTree
     group_specs: Mapping[str, GroupSpecProtocol]
-    trainable_mask: PyTree
-    param_info: PyTree
     identities: PyTree
-    model_state: Any | None
-    state_policy: Any
-    aux_losses: tuple[Any, ...]
-    lineage: Any
-    report: Any
+
+
+@runtime_checkable
+class CombinableFineTunePlanProtocol(FineTunePlanProtocol, Protocol):
+    """Fine-tuning plan accepted by plan-aware update helpers."""
 
     def combine(self, trainable: PyTree) -> Any: ...
 
 
-__all__ = ("FineTunePlanProtocol", "GroupSpecProtocol", "PyTree")
+__all__ = (
+    "CombinableFineTunePlanProtocol",
+    "FineTunePlanProtocol",
+    "GroupSpecProtocol",
+    "PyTree",
+)

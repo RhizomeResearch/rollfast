@@ -10,6 +10,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 
 import rollfast
 import rollfast.finetune as rfft
@@ -26,10 +27,17 @@ class TinyGroup:
 
 
 @dataclass(frozen=True)
+class TinyIdentity:
+    logical_id: str
+
+
+@dataclass(frozen=True)
 class TinyPlan:
     trainable: Any
+    frozen: Any
     labels: Any
     group_specs: dict[str, TinyGroup]
+    identities: Any
 
     def combine(self, trainable=None):
         return self.trainable if trainable is None else trainable
@@ -98,7 +106,7 @@ def tiny_plan() -> TinyPlan:
             tags=("head",),
         ),
     }
-    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
+    return _make_plan(trainable, labels, groups)
 
 
 def large_plan() -> TinyPlan:
@@ -126,7 +134,43 @@ def large_plan() -> TinyPlan:
             tags=("bias",),
         ),
     }
-    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
+    return _make_plan(trainable, labels, groups)
+
+
+def _make_plan(
+    trainable: Any,
+    labels: Any,
+    group_specs: dict[str, TinyGroup],
+) -> TinyPlan:
+    frozen = jtu.tree_map(lambda _: None, trainable)
+    identities = jtu.tree_map_with_path(
+        lambda path, _: TinyIdentity(_path_to_logical_id(path)),
+        trainable,
+    )
+    return TinyPlan(
+        trainable=trainable,
+        frozen=frozen,
+        labels=labels,
+        group_specs=group_specs,
+        identities=identities,
+    )
+
+
+def _path_to_logical_id(path: tuple[Any, ...]) -> str:
+    return ".".join(
+        str(
+            entry.key
+            if isinstance(entry, jtu.DictKey)
+            else entry.idx
+            if isinstance(entry, jtu.SequenceKey)
+            else entry.name
+            if isinstance(entry, jtu.GetAttrKey)
+            else entry.key
+            if isinstance(entry, jtu.FlattenedIndexKey)
+            else entry
+        )
+        for entry in path
+    )
 
 
 def metadata(*, warmup_steps: int, measured_steps: int) -> dict[str, Any]:

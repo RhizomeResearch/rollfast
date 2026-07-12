@@ -1,4 +1,6 @@
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +17,101 @@ class _IdentityWithSharding:
     alias_group: str | None = None
     layout: str | None = None
     sharding_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
+class _MinimalCompilerPlan:
+    trainable: Any
+    frozen: Any
+    labels: Any
+    group_specs: dict[str, TinyGroup]
+    identities: Any
+
+
+class _CombinablePlan:
+    def __init__(self, plan: _MinimalCompilerPlan) -> None:
+        self.trainable = plan.trainable
+        self.frozen = plan.frozen
+        self.labels = plan.labels
+        self.group_specs = plan.group_specs
+        self.identities = plan.identities
+        self.combine_calls = 0
+
+    def combine(self, trainable):
+        self.combine_calls += 1
+        return {"params": trainable}
+
+
+def _minimal_compiler_plan() -> _MinimalCompilerPlan:
+    trainable = {"w": jnp.ones((2,), dtype=jnp.float32)}
+    return _MinimalCompilerPlan(
+        trainable=trainable,
+        frozen={"w": None},
+        labels={"w": "w_decay"},
+        group_specs={
+            "w_decay": TinyGroup(
+                "w_decay",
+                role="head",
+                depth=None,
+                lr_multiplier=1.0,
+                weight_decay=True,
+            )
+        },
+        identities={"w": _IdentityWithSharding(logical_id="w")},
+    )
+
+
+def test_minimal_compiler_plan_requires_only_five_fields():
+    plan = _minimal_compiler_plan()
+
+    normalized = rfft.validate_plan(plan)
+
+    assert normalized.logical_id_table_hash
+    assert isinstance(plan, rfft.FineTunePlanProtocol)
+    assert not isinstance(plan, rfft.CombinableFineTunePlanProtocol)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("trainable", "frozen", "labels", "group_specs", "identities"),
+)
+def test_validation_names_each_missing_required_field(missing_field):
+    plan = _minimal_compiler_plan()
+    fields = {
+        name: getattr(plan, name)
+        for name in ("trainable", "frozen", "labels", "group_specs", "identities")
+        if name != missing_field
+    }
+
+    with pytest.raises(TypeError, match=missing_field):
+        rfft.validate_plan(SimpleNamespace(**fields))
+
+
+def test_plan_update_step_calls_combine():
+    plan = _CombinablePlan(_minimal_compiler_plan())
+    optimizer = rfft.adamw_from_plan(
+        plan,
+        total_steps=1,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    step = rfft.make_plan_update_step(
+        plan,
+        lambda model: jnp.sum(model["params"]["w"] ** 2),
+        optimizer,
+    )
+
+    step(plan.trainable, optimizer.init(plan.trainable))
+
+    assert plan.combine_calls == 1
+
+
+def test_validation_rejects_identity_without_logical_id():
+    plan = _minimal_compiler_plan()
+    bad = replace(plan, identities={"w": object()})
+
+    with pytest.raises(ValueError, match="logical_id"):
+        rfft.validate_plan(bad)
 
 
 def test_validate_tiny_plan_counts_groups_and_fingerprint():

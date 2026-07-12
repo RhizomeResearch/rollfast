@@ -32,6 +32,7 @@ def make_equimo_update_step(
     """Return a single-update helper that calls ``plan.combine`` before loss."""
 
     _validate_equimo_like_plan(plan)
+    _require_combine(plan)
     return make_plan_update_step(plan, loss_fn, optimizer, **kwargs)
 
 
@@ -44,13 +45,22 @@ def transition_lpft_stage(plan: Any, **kwargs: Any) -> OptimizerBundle:
 def _validate_equimo_like_plan(plan: Any) -> None:
     missing = [
         attr
-        for attr in ("trainable", "labels", "group_specs", "combine")
+        for attr in ("trainable", "frozen", "labels", "group_specs", "identities")
         if not hasattr(plan, attr)
     ]
     if missing:
         raise TypeError(
             "expected an Equimo-like FineTunePlan with attributes "
-            f"trainable, labels, group_specs, and combine; missing {missing!r}."
+            "trainable, frozen, labels, group_specs, and identities; "
+            f"missing {missing!r}."
+        )
+
+
+def _require_combine(plan: Any) -> None:
+    if not hasattr(plan, "combine"):
+        raise TypeError(
+            "expected an Equimo-like FineTunePlan with a combine method for "
+            "plan-aware update steps."
         )
 
 
