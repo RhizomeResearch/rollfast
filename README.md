@@ -251,6 +251,10 @@ core only requires a structural plan with five fields: `trainable`, `frozen`,
 identity must provide a stable `logical_id`. Plan-aware step helpers additionally
 require a `combine(trainable)` method; compiler-only plans do not.
 
+The development integration supports Equimo `>=2.0.0a2,<3.0.0`. Equimo 1.x does
+not provide the `equimo.finetune` plan API, and a future 3.x API must be verified
+before widening this interval.
+
 ```python
 import rollfast.finetune as rfft
 

@@ -1,10 +1,46 @@
 from types import SimpleNamespace
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import optax
 import pytest
 
+import equimo.finetune as eqft
 from rollfast.integrations import equimo
 
 from tests.finetune.helpers import tiny_plan
+
+
+@pytest.mark.integration
+def test_real_equimo_plan_compiles_and_updates_finitely():
+    key = jax.random.PRNGKey(0)
+    model = eqx.nn.MLP(4, 2, 8, 2, key=key)
+    plan = eqft.prepare_finetune(
+        model,
+        trainable=eqft.TrainableSpec(mode="full"),
+    )
+    optimizer = equimo.adamw_from_equimo_plan(
+        plan,
+        total_steps=10,
+        base_lr=1e-3,
+        schedule="constant",
+        weight_decay=0.0,
+        clip_global_norm=None,
+    )
+    opt_state = optimizer.init(plan.trainable)
+    x = jnp.ones((4,), dtype=jnp.float32)
+
+    def loss_fn(trainable):
+        prediction = plan.combine(trainable)(x)
+        return jnp.mean(jnp.square(prediction))
+
+    loss, grads = jax.value_and_grad(loss_fn)(plan.trainable)
+    updates, _ = optimizer.update(grads, opt_state, plan.trainable)
+    updated = optax.apply_updates(plan.trainable, updates)
+
+    assert jnp.isfinite(loss)
+    assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(updated))
 
 
 def test_equimo_integration_accepts_structural_plan_without_importing_equimo():

@@ -48,7 +48,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "equimo>=0.5.0a17",
+    "equimo>=2.0.0a2,<3.0.0",
     "equinox>=0.13.6",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
@@ -58,9 +58,6 @@ dev = [
 
 [tool.ruff.lint]
 ignore = ["E731", "E741", "F722"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/test_equimo_integration.py" = ["F401"]
 
 [tool.ty.src]
 include = ["src/rollfast"]

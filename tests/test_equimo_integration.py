@@ -4,40 +4,30 @@ import jax.random as jr
 import optax
 import pytest
 
-try:
-    import equimo.models as em
-    import equinox as eqx
-
-    EQUINOX_EQUIMO_AVAILABLE = True
-except ImportError:
-    EQUINOX_EQUIMO_AVAILABLE = False
+import equimo.vision.models as em
+import equinox as eqx
+from rollfast.optim.adam import adamw
+from rollfast.optim.aurora import aurora, get_equinox_aurora_spec
+from rollfast.optim.hyperball import (
+    adamw_hyperball,
+    aurora_hyperball,
+    kron_hyperball,
+    prism_hyperball,
+    riemannian_aurora_hyperball,
+)
+from rollfast.optim.prism import get_equinox_prism_spec, prism
+from rollfast.optim.psgd import kron
+from rollfast.schedules.schedulefree import (
+    schedule_free_adam,
+    schedule_free_aurora,
+    schedule_free_kron,
+    schedule_free_prism,
+)
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.slow,
-    pytest.mark.skipif(
-        not EQUINOX_EQUIMO_AVAILABLE, reason="equinox or equimo not available"
-    ),
 ]
-
-if EQUINOX_EQUIMO_AVAILABLE:
-    from rollfast.optim.adam import adamw
-    from rollfast.optim.aurora import aurora, get_equinox_aurora_spec
-    from rollfast.optim.hyperball import (
-        adamw_hyperball,
-        aurora_hyperball,
-        kron_hyperball,
-        prism_hyperball,
-        riemannian_aurora_hyperball,
-    )
-    from rollfast.optim.prism import get_equinox_prism_spec, prism
-    from rollfast.optim.psgd import kron
-    from rollfast.schedules.schedulefree import (
-        schedule_free_adam,
-        schedule_free_aurora,
-        schedule_free_kron,
-        schedule_free_prism,
-    )
 
 
 @pytest.fixture(params=["vit"])
