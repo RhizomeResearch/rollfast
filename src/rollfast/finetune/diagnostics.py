@@ -10,16 +10,14 @@ import jax.numpy as jnp
 
 from rollfast.optim.adam8 import (
     QuantizedBlocks,
-    estimate_quantized_moment_bytes,
     quantized_nbytes,
 )
 
 from .config import (
-    CompiledGroup,
     OptimizerBundle,
     SCHEMA_VERSION,
-    StateQuantizationConfig,
 )
+from .state_estimation import estimate_adamw8_moment_leaves
 from .validation import validate_plan
 
 
@@ -195,7 +193,13 @@ def estimate_optimizer_state_memory(
     )
     leaves = []
     if bundle.optimizer_config.name == "adamw8":
-        leaves.extend(_estimate_adamw8_group_moment_leaves(bundle))
+        leaves.extend(
+            _estimate_adamw8_moment_leaves(
+                normalized.trainable,
+                normalized.labels,
+                bundle,
+            )
+        )
     for path, leaf, label in plan_leaves:
         if bundle.optimizer_config.name != "adamw8":
             leaves.extend(_estimate_moment_leaves(path, leaf, label, bundle))
@@ -347,57 +351,36 @@ def _plan_trainable_leaves(
     )
 
 
-def _estimate_adamw8_group_moment_leaves(
+def _estimate_adamw8_moment_leaves(
+    trainable: Any,
+    labels: Any,
     bundle: OptimizerBundle,
 ) -> tuple[StateLeafSummary, ...]:
     quantization = bundle.quantization_config
     leaves = []
-    for group in bundle.report.groups:
+    for estimate in estimate_adamw8_moment_leaves(
+        trainable,
+        labels,
+        bundle.report.groups,
+        quantization,
+    ):
+        path_text = _format_tokens(_path_tokens(estimate.path))
         for category, suffix in (
             ("first_moment", "mu"),
             ("second_moment", "nu"),
         ):
-            if _quantize_group_state(group, quantization):
-                bytes_ = estimate_quantized_moment_bytes(
-                    group.param_count,
-                    block_size=quantization.block_size,
-                    scale_dtype=quantization.scale_dtype,
-                )
-                dtype = (
-                    f"{jnp.dtype(jnp.uint8).name}"
-                    f"+scale:{jnp.dtype(quantization.scale_dtype).name}"
-                )
-                storage = "blockwise_int8"
-            else:
-                dtype = jnp.dtype(quantization.fallback_dtype).name
-                bytes_ = int(group.param_count * jnp.dtype(dtype).itemsize)
-                storage = "array"
             leaves.append(
                 StateLeafSummary(
-                    path=f"group:{group.source_label}/moment:{suffix}",
+                    path=f"{path_text}/moment:{suffix}",
                     category=category,
-                    shape=(group.param_count,),
-                    dtype=dtype,
-                    bytes=bytes_,
-                    group=group.source_label,
-                    storage=storage,
+                    shape=estimate.shape,
+                    dtype=estimate.dtype,
+                    bytes=estimate.bytes,
+                    group=estimate.group,
+                    storage=estimate.storage,
                 )
             )
     return tuple(leaves)
-
-
-def _quantize_group_state(
-    group: CompiledGroup,
-    state_quantization: StateQuantizationConfig,
-) -> bool:
-    if not state_quantization.enabled:
-        return False
-    if group.param_count < state_quantization.min_size:
-        return False
-    keep_tags = {tag.lower() for tag in state_quantization.keep_fp32_tags}
-    group_terms = {tag.lower() for tag in group.tags}
-    group_terms.update((group.source_label.lower(), group.role.lower()))
-    return not any(keep_tag in term for keep_tag in keep_tags for term in group_terms)
 
 
 def _estimate_moment_leaves(

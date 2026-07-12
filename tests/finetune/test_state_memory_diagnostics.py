@@ -2,7 +2,7 @@ import jax.numpy as jnp
 
 import rollfast.finetune as rfft
 
-from .test_adamw8_from_plan import large_plan
+from .test_adamw8_from_plan import large_plan, leaf_estimation_plan
 from .helpers import tiny_plan
 
 
@@ -220,3 +220,43 @@ def test_state_memory_summary_serializes_quantized_leaf_metadata():
     assert isinstance(first_quantized.bytes, int)
     assert first_quantized.shape == (128, 64)
     assert jnp.dtype("int8").name in first_quantized.dtype
+
+
+def test_adamw8_static_estimate_uses_real_leaf_shapes_and_storage():
+    plan = leaf_estimation_plan(mixed=True)
+    quantization = rfft.StateQuantizationConfig(
+        enabled=True,
+        block_size=512,
+        min_size=4096,
+        stochastic_rounding=False,
+    )
+    bundle = rfft.adamw8_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        state_quantization=quantization,
+    )
+
+    estimate = rfft.estimate_optimizer_state_memory(plan, bundle)
+    measured = rfft.optimizer_state_memory_summary(
+        bundle,
+        bundle.init(plan.trainable),
+    )
+    measured_moments = (
+        measured.by_category["first_moment"] + measured.by_category["second_moment"]
+    )
+    leaves_by_path = {leaf.path: leaf for leaf in estimate.leaves}
+    quantized_bytes = (9 * 512 + 9 * 4) * 2
+    fallback_bytes = (2048 + 33 + 5000) * 4 * 2
+
+    assert estimate.moment_bytes == quantized_bytes + fallback_bytes
+    assert estimate.moment_bytes == bundle.report.estimated_state_bytes
+    assert estimate.moment_bytes == measured_moments
+    assert leaves_by_path["key:large/moment:mu"].shape == (4097,)
+    assert leaves_by_path["key:large/moment:mu"].storage == "blockwise_int8"
+    assert leaves_by_path["key:small_a/moment:mu"].storage == "array"
+    assert leaves_by_path["key:small_b/moment:nu"].storage == "array"
+    assert leaves_by_path["key:sensitive/moment:nu"].storage == "array"
+    assert estimate.by_group["shared"] == quantized_bytes + (2048 + 33) * 4 * 2
+    assert estimate.by_group["sensitive"] == 5000 * 4 * 2

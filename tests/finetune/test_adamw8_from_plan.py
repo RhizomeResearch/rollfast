@@ -53,6 +53,37 @@ def large_plan() -> TinyPlan:
     return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
 
 
+def leaf_estimation_plan(*, mixed: bool) -> TinyPlan:
+    trainable = {
+        "large": jnp.ones((4097 if mixed else 2048,), dtype=jnp.float32),
+        "small_a": jnp.ones((2048,), dtype=jnp.float32),
+        "small_b": jnp.ones((33 if mixed else 2048,), dtype=jnp.float32),
+    }
+    labels = {name: "shared" for name in trainable}
+    groups = {
+        "shared": TinyGroup(
+            "shared",
+            role="backbone",
+            depth=0,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=("block",),
+        )
+    }
+    if mixed:
+        trainable["sensitive"] = jnp.ones((5000,), dtype=jnp.float32)
+        labels["sensitive"] = "sensitive"
+        groups["sensitive"] = TinyGroup(
+            "sensitive",
+            role="backbone",
+            depth=0,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=("bias",),
+        )
+    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
+
+
 def _ones_like_trainable(tree):
     return jax.tree.map(
         lambda x: jnp.ones_like(x) if x is not None else None,
@@ -156,6 +187,32 @@ def test_adamw8_keeps_sensitive_tagged_group_in_fp32_state():
 
     assert (128, 64) in quantized_shapes
     assert (4096,) in fp32_shapes
+
+
+def test_adamw8_report_estimates_subthreshold_leaves_individually():
+    plan = leaf_estimation_plan(mixed=False)
+    bundle = rfft.adamw8_from_plan(
+        plan,
+        total_steps=20,
+        schedule="constant",
+        clip_global_norm=None,
+        state_quantization=rfft.StateQuantizationConfig(
+            enabled=True,
+            block_size=512,
+            min_size=4096,
+            stochastic_rounding=False,
+        ),
+    )
+    state = bundle.init(plan.trainable)
+    summary = rfft.optimizer_state_memory_summary(bundle, state)
+    expected_moment_bytes = 3 * 2048 * 4 * 2
+
+    assert not _quantized_leaves(state)
+    assert bundle.report.estimated_state_bytes == expected_moment_bytes
+    assert (
+        summary.by_category["first_moment"] + summary.by_category["second_moment"]
+        == expected_moment_bytes
+    )
 
 
 def test_adamw8_from_plan_update_stays_close_to_fp32_after_quantized_storage():

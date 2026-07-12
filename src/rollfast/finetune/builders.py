@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import optax
 
 from rollfast.optim.adam import adamw, scale_by_adam
-from rollfast.optim.adam8 import adamw8, estimate_quantized_moment_bytes
+from rollfast.optim.adam8 import adamw8
 from rollfast.optim.apollo import apollo_adamw, apollo_state_nbytes
 from rollfast.optim.aurora import aurora
 from rollfast.optim.galore import galore_adamw, projected_state_nbytes
@@ -55,6 +55,7 @@ from .config import (
 )
 from .groups import compile_groups, unmatched_rule_warnings
 from .schedules import build_schedule, preview_schedule
+from .state_estimation import estimate_adamw8_moment_leaves, quantize_group_state
 from .transforms import always_skip_nonfinite, clip_by_global_norm
 from .validation import validate_plan
 
@@ -155,6 +156,8 @@ def compile_optimizer(
         schedule,
         accumulation,
         precision,
+        normalized.trainable,
+        normalized.labels,
         state_quantization=state_quantization,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
@@ -399,6 +402,8 @@ def galore_adamw_from_plan(
         schedule_config,
         accumulation,
         precision,
+        normalized.trainable,
+        normalized.labels,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
             *rule_warnings,
@@ -527,6 +532,8 @@ def apollo_adamw_from_plan(
         schedule_config,
         accumulation,
         precision,
+        normalized.trainable,
+        normalized.labels,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
             *rule_warnings,
@@ -693,6 +700,8 @@ def schedule_free_adam_from_plan(
         schedule_config,
         accumulation,
         precision,
+        normalized.trainable,
+        normalized.labels,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
             *rule_warnings,
@@ -1059,6 +1068,8 @@ def _hybrid_optimizer_from_plan(
         schedule_config,
         accumulation,
         precision,
+        normalized.trainable,
+        normalized.labels,
         warnings=(
             *_report_warnings(normalized.warnings, normalized.trainable, precision),
             *rule_warnings,
@@ -1088,6 +1099,9 @@ def estimate_optimizer_state(
     groups: tuple[CompiledGroup, ...],
     precision: PrecisionConfig | None = None,
     state_quantization: StateQuantizationConfig | None = None,
+    *,
+    trainable: Any | None = None,
+    labels: Any | None = None,
 ) -> int:
     """Estimate first- and second-moment state bytes for compiled groups."""
 
@@ -1100,18 +1114,19 @@ def estimate_optimizer_state(
         total_params = sum(group.param_count for group in groups)
         return int(total_params * itemsize * 2)
 
-    fallback_itemsize = jnp.dtype(state_quantization.fallback_dtype).itemsize
-    total = 0
-    for group in groups:
-        if _quantize_group_state(group, state_quantization):
-            total += 2 * estimate_quantized_moment_bytes(
-                group.param_count,
-                block_size=state_quantization.block_size,
-                scale_dtype=state_quantization.scale_dtype,
-            )
-        else:
-            total += int(group.param_count * fallback_itemsize * 2)
-    return total
+    if trainable is None or labels is None:
+        raise ValueError(
+            "trainable and labels are required for quantized state estimation."
+        )
+    return 2 * sum(
+        leaf.bytes
+        for leaf in estimate_adamw8_moment_leaves(
+            trainable,
+            labels,
+            groups,
+            state_quantization,
+        )
+    )
 
 
 def _build_grouped_hybrid_transform(
@@ -1583,7 +1598,7 @@ def _build_grouped_transform(
                 scale_dtype=state_quantization.scale_dtype,
                 fallback_dtype=state_quantization.fallback_dtype,
                 stochastic_rounding=state_quantization.stochastic_rounding,
-                quantize=_quantize_group_state(group, state_quantization),
+                quantize=quantize_group_state(group, state_quantization),
                 nesterov=optimizer.nesterov,
                 use_magma=optimizer.use_magma,
                 key=jax.random.fold_in(root_key, index),
@@ -1770,6 +1785,8 @@ def _make_report(
     schedule: ScheduleConfig,
     accumulation: AccumulationConfig,
     precision: PrecisionConfig,
+    trainable: Any,
+    labels: Any,
     state_quantization: StateQuantizationConfig | None = None,
     *,
     warnings: tuple[str, ...],
@@ -1792,6 +1809,8 @@ def _make_report(
             groups,
             precision,
             state_quantization,
+            trainable=trainable,
+            labels=labels,
         ),
         total_steps=schedule.total_steps,
         logical_id_table_hash=logical_id_table_hash,
@@ -1981,25 +2000,11 @@ def _state_policies(
     return {
         group.source_label: (
             "blockwise_int8_moments"
-            if _quantize_group_state(group, state_quantization)
+            if quantize_group_state(group, state_quantization)
             else f"{fallback_name}_fallback_moments"
         )
         for group in groups
     }
-
-
-def _quantize_group_state(
-    group: CompiledGroup,
-    state_quantization: StateQuantizationConfig,
-) -> bool:
-    if not state_quantization.enabled:
-        return False
-    if group.param_count < state_quantization.min_size:
-        return False
-    keep_tags = {tag.lower() for tag in state_quantization.keep_fp32_tags}
-    group_terms = {tag.lower() for tag in group.tags}
-    group_terms.update((group.source_label.lower(), group.role.lower()))
-    return not any(keep_tag in term for keep_tag in keep_tags for term in group_terms)
 
 
 def _can_use_factorized_adamw(
