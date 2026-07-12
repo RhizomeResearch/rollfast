@@ -861,7 +861,7 @@ def _partitioned_aurora(
     magma_p: float,
     magma_tau: float,
     guard_nonfinite: bool,
-    key: jax.Array,
+    key: jax.Array | None,
     adam_learning_rate: base.ScalarOrSchedule | None,
     adam_b1: float,
     adam_b2: float,

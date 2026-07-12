@@ -221,4 +221,4 @@ __all__ = [
     "wsd_schedule",
 ]
 
-__version__ = "0.5.0-a1"
+__version__ = "0.5.0a1"

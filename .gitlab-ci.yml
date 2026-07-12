@@ -1,6 +1,7 @@
 stages:
   - lint
   - test
+  - package
   - publish
 
 variables:
@@ -41,11 +42,29 @@ test:
     reports:
       junit: report.xml
 
+package:
+  stage: package
+  needs:
+    - lint
+    - minimal-import
+    - test
+  script:
+    - uv build
+    - uv venv --clear /tmp/rollfast-wheel-venv
+    - uv pip install --python /tmp/rollfast-wheel-venv/bin/python dist/*.whl
+    - (cd /tmp && /tmp/rollfast-wheel-venv/bin/python -c "import rollfast")
+  artifacts:
+    paths:
+      - dist/
+
 publish:
   stage: publish
   needs:
-    - minimal-import
-    - test
+    - job: lint
+    - job: minimal-import
+    - job: test
+    - job: package
+      artifacts: true
   rules:
     - if: $CI_COMMIT_TAG
   id_tokens:
@@ -67,5 +86,4 @@ publish:
         exit 1
       fi
 
-    - uv build
-    - uv publish
+    - uv publish dist/*
