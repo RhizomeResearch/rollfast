@@ -17,6 +17,86 @@ class GlobalNormClipState(NamedTuple):
     count: jax.Array
 
 
+class AlwaysSkipNonFiniteState(NamedTuple):
+    """State for a fail-closed nonfinite-update guard."""
+
+    inner_state: optax.OptState
+    consecutive_nonfinite: jax.Array
+    total_nonfinite: jax.Array
+    last_finite: jax.Array
+    threshold_reached: jax.Array
+
+
+def always_skip_nonfinite(
+    inner: optax.GradientTransformation,
+    *,
+    alert_threshold: int,
+) -> optax.GradientTransformationExtraArgs:
+    """Reject every nonfinite update without advancing the inner transform."""
+
+    if alert_threshold <= 0:
+        raise ValueError("alert_threshold must be positive.")
+    inner = optax.with_extra_args_support(inner)
+
+    def init_fn(params):
+        return AlwaysSkipNonFiniteState(
+            inner_state=inner.init(params),
+            consecutive_nonfinite=jnp.zeros([], dtype=jnp.int32),
+            total_nonfinite=jnp.zeros([], dtype=jnp.int32),
+            last_finite=jnp.ones([], dtype=jnp.bool_),
+            threshold_reached=jnp.zeros([], dtype=jnp.bool_),
+        )
+
+    def update_fn(updates, state, params=None, **extra_args):
+        finite = jnp.ones([], dtype=jnp.bool_)
+        for leaf in jax.tree.leaves(updates, is_leaf=lambda x: x is None):
+            if leaf is not None:
+                finite = jnp.logical_and(finite, jnp.all(jnp.isfinite(leaf)))
+
+        def accept(_):
+            return inner.update(
+                updates,
+                state.inner_state,
+                params,
+                **extra_args,
+            )
+
+        def reject(_):
+            zero_updates = jax.tree.map(
+                lambda leaf: None if leaf is None else jnp.zeros_like(leaf),
+                updates,
+                is_leaf=lambda x: x is None,
+            )
+            return zero_updates, state.inner_state
+
+        guarded_updates, inner_state = jax.lax.cond(
+            finite,
+            accept,
+            reject,
+            operand=None,
+        )
+        consecutive_nonfinite = jnp.where(
+            finite,
+            jnp.zeros_like(state.consecutive_nonfinite),
+            state.consecutive_nonfinite + 1,
+        )
+        total_nonfinite = state.total_nonfinite + jnp.logical_not(finite).astype(
+            jnp.int32
+        )
+        return guarded_updates, AlwaysSkipNonFiniteState(
+            inner_state=inner_state,
+            consecutive_nonfinite=consecutive_nonfinite,
+            total_nonfinite=total_nonfinite,
+            last_finite=finite,
+            threshold_reached=jnp.logical_and(
+                jnp.logical_not(finite),
+                consecutive_nonfinite >= alert_threshold,
+            ),
+        )
+
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
 def clip_by_global_norm(
     max_norm: float,
     *,
@@ -82,4 +162,8 @@ def _scale_leaf(leaf, scale):
     return leaf * scale.astype(leaf.dtype)
 
 
-__all__ = ("clip_by_global_norm",)
+__all__ = (
+    "AlwaysSkipNonFiniteState",
+    "always_skip_nonfinite",
+    "clip_by_global_norm",
+)

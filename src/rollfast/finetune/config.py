@@ -225,7 +225,11 @@ class OptimizerProfile:
 
 @dataclass(frozen=True)
 class GradientPolicy:
-    """Gradient preprocessing and finite-value behavior."""
+    """Gradient preprocessing and finite-value behavior.
+
+    ``max_consecutive_nonfinite`` is a diagnostic threshold. Under ``"skip"``,
+    every nonfinite update is rejected regardless of the threshold.
+    """
 
     clip_global_norm: float | None = 1.0
     nonfinite: NonFinitePolicy = "skip"

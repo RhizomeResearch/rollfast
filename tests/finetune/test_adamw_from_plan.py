@@ -6,6 +6,10 @@ import equinox as eqx
 from typing import Any
 
 import rollfast.finetune as rfft
+from rollfast.finetune.transforms import (
+    AlwaysSkipNonFiniteState,
+    always_skip_nonfinite,
+)
 
 from .helpers import TinyGroup, TinyPlan, tiny_lora_plan, tiny_plan
 
@@ -15,6 +19,167 @@ class CallableTree(eqx.Module):
 
     def __call__(self, x):
         return x
+
+
+def _one_leaf_plan():
+    return TinyPlan(
+        trainable={"w": jnp.ones((1,), dtype=jnp.float32)},
+        labels={"w": "w_decay"},
+        group_specs={
+            "w_decay": TinyGroup(
+                "w_decay",
+                role="head",
+                depth=None,
+                lr_multiplier=1.0,
+                weight_decay=True,
+            )
+        },
+    )
+
+
+def _one_leaf_adamw_bundle(nonfinite="skip", max_consecutive_nonfinite=2):
+    return rfft.compile_optimizer(
+        _one_leaf_plan(),
+        optimizer=rfft.OptimizerConfig(
+            base_lr=0.1,
+            weight_decay=0.0,
+            b1=0.0,
+            b2=0.0,
+        ),
+        schedule=rfft.ScheduleConfig(kind="constant", total_steps=8),
+        gradient_policy=rfft.GradientPolicy(
+            clip_global_norm=None,
+            nonfinite=nonfinite,
+            max_consecutive_nonfinite=max_consecutive_nonfinite,
+        ),
+    )
+
+
+def _assert_trees_equal(left, right):
+    assert jax.tree.structure(left) == jax.tree.structure(right)
+    for left_leaf, right_leaf in zip(
+        jax.tree.leaves(left),
+        jax.tree.leaves(right),
+        strict=True,
+    ):
+        assert jnp.array_equal(left_leaf, right_leaf)
+
+
+@pytest.mark.parametrize("use_jit", (False, True))
+def test_nonfinite_skip_rejects_every_bad_update_and_recovers(use_jit):
+    plan = _one_leaf_plan()
+    bundle = _one_leaf_adamw_bundle()
+    state = bundle.init(plan.trainable)
+    params = plan.trainable
+    update = jax.jit(bundle.update) if use_jit else bundle.update
+    nan_grads = {"w": jnp.full_like(params["w"], jnp.nan)}
+
+    for rejected_count in range(1, 4):
+        previous_inner_state = state.inner_state
+        updates, state = update(nan_grads, state, params)
+        next_params = optax.apply_updates(params, updates)
+
+        assert jnp.array_equal(updates["w"], jnp.zeros_like(updates["w"]))
+        assert jnp.array_equal(next_params["w"], params["w"])
+        _assert_trees_equal(state.inner_state, previous_inner_state)
+        assert int(state.consecutive_nonfinite) == rejected_count
+        assert int(state.total_nonfinite) == rejected_count
+        assert not bool(state.last_finite)
+        assert bool(state.threshold_reached) == (rejected_count >= 2)
+
+    updates, recovered_state = update({"w": jnp.ones_like(params["w"])}, state, params)
+
+    assert not jnp.array_equal(updates["w"], jnp.zeros_like(updates["w"]))
+    assert int(recovered_state.consecutive_nonfinite) == 0
+    assert int(recovered_state.total_nonfinite) == 3
+    assert bool(recovered_state.last_finite)
+    assert not bool(recovered_state.threshold_reached)
+
+
+def test_nonfinite_none_does_not_add_a_guard_or_reject_updates():
+    plan = _one_leaf_plan()
+    bundle = _one_leaf_adamw_bundle(nonfinite="none")
+    state = bundle.init(plan.trainable)
+
+    updates, _ = bundle.update(
+        {"w": jnp.full_like(plan.trainable["w"], jnp.nan)},
+        state,
+        plan.trainable,
+    )
+
+    assert not isinstance(state, AlwaysSkipNonFiniteState)
+    assert not bool(jnp.all(jnp.isfinite(updates["w"])))
+
+
+def test_nonfinite_raise_is_rejected_when_building():
+    with pytest.raises(ValueError, match="pure JIT Optax transformation"):
+        _one_leaf_adamw_bundle(nonfinite="raise")
+
+
+def test_nonfinite_guard_forwards_extra_arguments_on_finite_updates():
+    def init_fn(params):
+        del params
+        return jnp.zeros([], dtype=jnp.int32)
+
+    def update_fn(updates, state, params=None, *, multiplier):
+        del params
+        return jax.tree.map(lambda leaf: leaf * multiplier, updates), state + 1
+
+    inner = optax.GradientTransformationExtraArgs(init_fn, update_fn)
+    tx = always_skip_nonfinite(inner, alert_threshold=1)
+    state = tx.init({"w": jnp.ones((1,), dtype=jnp.float32)})
+
+    updates, state = tx.update(
+        {"w": jnp.ones((1,), dtype=jnp.float32)},
+        state,
+        multiplier=2.0,
+    )
+
+    assert jnp.array_equal(updates["w"], jnp.full((1,), 2.0))
+    assert int(state.inner_state) == 1
+
+
+@pytest.mark.parametrize(
+    "build_bundle",
+    (
+        lambda plan: rfft.adamw_from_plan(
+            plan,
+            total_steps=8,
+            schedule="constant",
+            clip_global_norm=None,
+        ),
+        lambda plan: rfft.schedule_free_adam_from_plan(
+            plan,
+            total_steps=8,
+            schedule="constant",
+            clip_global_norm=None,
+        ),
+        lambda plan: rfft.hybrid_aurora_adam_from_plan(
+            plan,
+            total_steps=8,
+            schedule="constant",
+            clip_global_norm=None,
+            polar_ns_iters=2,
+        ),
+    ),
+)
+def test_finetune_builders_share_fail_closed_nonfinite_dispatch(build_bundle):
+    plan = tiny_plan()
+    bundle = build_bundle(plan)
+    state = bundle.init(plan.trainable)
+    nan_grads = jax.tree.map(
+        lambda leaf: jnp.full_like(leaf, jnp.nan) if leaf is not None else None,
+        plan.trainable,
+        is_leaf=lambda leaf: leaf is None,
+    )
+
+    updates, next_state = bundle.update(nan_grads, state, plan.trainable)
+
+    assert isinstance(state, AlwaysSkipNonFiniteState)
+    assert all(
+        jnp.array_equal(leaf, jnp.zeros_like(leaf)) for leaf in jax.tree.leaves(updates)
+    )
+    _assert_trees_equal(next_state.inner_state, state.inner_state)
 
 
 def test_adamw_from_plan_reports_effective_group_lrs():

@@ -23,6 +23,11 @@ def test_config_round_trips_are_deterministic():
         replicated_axis_names=("data",),
     )
     assert rfft.GradientPolicy.from_dict(gradient_policy.to_dict()) == gradient_policy
+    raise_policy = rfft.GradientPolicy.from_dict(
+        {"nonfinite": "raise", "max_consecutive_nonfinite": 3}
+    )
+    assert raise_policy.nonfinite == "raise"
+    assert raise_policy.max_consecutive_nonfinite == 3
 
     asam = rfft.ASAMConfig(
         rho=0.5,

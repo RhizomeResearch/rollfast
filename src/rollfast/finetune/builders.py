@@ -55,7 +55,7 @@ from .config import (
 )
 from .groups import compile_groups, unmatched_rule_warnings
 from .schedules import build_schedule, preview_schedule
-from .transforms import clip_by_global_norm
+from .transforms import always_skip_nonfinite, clip_by_global_norm
 from .validation import validate_plan
 
 
@@ -215,6 +215,28 @@ def _clip_by_policy(gradient_policy: GradientPolicy) -> optax.GradientTransforma
         axis_name=gradient_policy.axis_name,
         partition_axis_names=gradient_policy.partition_axis_names,
         replicated_axis_names=gradient_policy.replicated_axis_names,
+    )
+
+
+def _apply_gradient_policy(
+    tx: optax.GradientTransformation,
+    gradient_policy: GradientPolicy,
+) -> optax.GradientTransformation:
+    if gradient_policy.nonfinite == "none":
+        return tx
+    if gradient_policy.nonfinite == "skip":
+        return always_skip_nonfinite(
+            tx,
+            alert_threshold=gradient_policy.max_consecutive_nonfinite,
+        )
+    if gradient_policy.nonfinite == "raise":
+        raise ValueError(
+            "GradientPolicy(nonfinite='raise') is unsupported because a pure JIT "
+            "Optax transformation cannot promise a Python exception. Use "
+            "nonfinite='skip' to reject nonfinite updates."
+        )
+    raise ValueError(
+        f"unknown nonfinite gradient policy: {gradient_policy.nonfinite!r}."
     )
 
 
@@ -1140,11 +1162,7 @@ def _build_grouped_hybrid_transform(
         chain_parts.append(_clip_by_policy(gradient_policy))
     chain_parts.append(_multi_transform(transforms, labels))
     tx = optax.chain(*chain_parts)
-    if gradient_policy.nonfinite == "skip":
-        tx = optax.apply_if_finite(
-            tx,
-            max_consecutive_errors=gradient_policy.max_consecutive_nonfinite,
-        )
+    tx = _apply_gradient_policy(tx, gradient_policy)
     if accumulation.steps > 1:
         tx = optax.MultiSteps(
             tx,
@@ -1330,11 +1348,7 @@ def _build_grouped_schedule_free_transform(
         adamc_weight_decay=adamc_weight_decay,
         adamc_weight_decay_mask=decay_mask,
     )
-    if gradient_policy.nonfinite == "skip":
-        tx = optax.apply_if_finite(
-            tx,
-            max_consecutive_errors=gradient_policy.max_consecutive_nonfinite,
-        )
+    tx = _apply_gradient_policy(tx, gradient_policy)
     if accumulation.steps > 1:
         tx = optax.MultiSteps(
             tx,
@@ -1406,11 +1420,7 @@ def _build_grouped_galore_transform(
         chain_parts.append(_clip_by_policy(gradient_policy))
     chain_parts.append(_multi_transform(transforms, labels))
     tx = optax.chain(*chain_parts)
-    if gradient_policy.nonfinite == "skip":
-        tx = optax.apply_if_finite(
-            tx,
-            max_consecutive_errors=gradient_policy.max_consecutive_nonfinite,
-        )
+    tx = _apply_gradient_policy(tx, gradient_policy)
     if accumulation.steps > 1:
         tx = optax.MultiSteps(
             tx,
@@ -1490,11 +1500,7 @@ def _build_factorized_adamw_transform(
         chain_parts.append(_clip_by_policy(gradient_policy))
     chain_parts.append(tx)
     tx = optax.chain(*chain_parts)
-    if gradient_policy.nonfinite == "skip":
-        tx = optax.apply_if_finite(
-            tx,
-            max_consecutive_errors=gradient_policy.max_consecutive_nonfinite,
-        )
+    tx = _apply_gradient_policy(tx, gradient_policy)
     if accumulation.steps > 1:
         tx = optax.MultiSteps(
             tx,
@@ -1602,15 +1608,7 @@ def _build_grouped_transform(
         chain_parts.append(_clip_by_policy(gradient_policy))
     chain_parts.append(_multi_transform(transforms, labels))
     tx = optax.chain(*chain_parts)
-    if gradient_policy.nonfinite == "skip":
-        tx = optax.apply_if_finite(
-            tx,
-            max_consecutive_errors=gradient_policy.max_consecutive_nonfinite,
-        )
-    elif gradient_policy.nonfinite == "raise":
-        # Optax transformations cannot raise dynamically inside JIT. Validation
-        # code accepts the policy so callers can enforce it outside this builder.
-        pass
+    tx = _apply_gradient_policy(tx, gradient_policy)
     if accumulation.steps > 1:
         tx = optax.MultiSteps(
             tx,
@@ -1683,11 +1681,7 @@ def _build_grouped_apollo_transform(
         chain_parts.append(_clip_by_policy(gradient_policy))
     chain_parts.append(_multi_transform(transforms, labels))
     tx = optax.chain(*chain_parts)
-    if gradient_policy.nonfinite == "skip":
-        tx = optax.apply_if_finite(
-            tx,
-            max_consecutive_errors=gradient_policy.max_consecutive_nonfinite,
-        )
+    tx = _apply_gradient_policy(tx, gradient_policy)
     if accumulation.steps > 1:
         tx = optax.MultiSteps(
             tx,
