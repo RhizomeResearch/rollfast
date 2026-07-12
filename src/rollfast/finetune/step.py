@@ -156,12 +156,16 @@ def init_accumulation_state(
             trainable,
             accumulation.accumulate_dtype,
         ),
+        loss_sum=jnp.asarray(0, dtype=accumulation.accumulate_dtype),
         normalizer=jnp.asarray(0, dtype=accumulation.accumulate_dtype),
         metric_sums={},
         metric_normalizers={},
+        aux_sums={},
+        aux_normalizers={},
         microsteps_in_window=zero,
         all_finite=jnp.asarray(True),
         pending_model_state=pending_model_state,
+        pending_model_state_valid=jnp.asarray(pending_model_state is not None),
     )
 
 
@@ -1055,11 +1059,17 @@ def _accumulate_loss_bundle_state(
 ) -> AccumulationState:
     return AccumulationState(
         grad_numerator=_tree_add(state.grad_numerator, grads),
+        loss_sum=state.loss_sum + bundle.loss_sum,
         normalizer=state.normalizer + bundle.normalizer,
         metric_sums=_add_mappings(state.metric_sums, bundle.metrics_sums),
         metric_normalizers=_add_mappings(
             state.metric_normalizers,
             bundle.metric_normalizers,
+        ),
+        aux_sums=_add_mappings(state.aux_sums, bundle.aux_sums),
+        aux_normalizers=_add_mappings(
+            state.aux_normalizers,
+            bundle.aux_normalizers,
         ),
         microsteps_in_window=state.microsteps_in_window
         + jnp.asarray(1, dtype=jnp.int32),
@@ -1068,17 +1078,25 @@ def _accumulate_loss_bundle_state(
             state.pending_model_state,
             bundle.new_model_state,
             model_state_aggregator,
+            current_state_valid=state.pending_model_state_valid,
+        ),
+        pending_model_state_valid=(
+            state.pending_model_state_valid
+            if bundle.new_model_state is None
+            else jnp.asarray(True)
         ),
     )
 
 
 def _loss_bundle_from_accumulation(state: AccumulationState) -> LossBundle:
     return LossBundle(
-        loss_sum=state.normalizer * jnp.asarray(0, dtype=state.normalizer.dtype),
+        loss_sum=state.loss_sum,
         normalizer=state.normalizer,
         metrics_sums=state.metric_sums,
         metric_normalizers=state.metric_normalizers,
         new_model_state=state.pending_model_state,
+        aux_sums=state.aux_sums,
+        aux_normalizers=state.aux_normalizers,
     )
 
 
@@ -1086,6 +1104,8 @@ def _merge_pending_model_state(
     current_state: Any | None,
     new_state: Any | None,
     model_state_aggregator: ModelStateAggregator | None,
+    *,
+    current_state_valid: Any,
 ) -> Any | None:
     if model_state_aggregator is None:
         return new_state
@@ -1093,7 +1113,8 @@ def _merge_pending_model_state(
         return current_state
     if current_state is None:
         return new_state
-    return model_state_aggregator(current_state, new_state)
+    merged_state = model_state_aggregator(current_state, new_state)
+    return _select_tree(current_state_valid, merged_state, new_state)
 
 
 def _select_accumulation_state(
@@ -1107,6 +1128,7 @@ def _select_accumulation_state(
             true_state.grad_numerator,
             false_state.grad_numerator,
         ),
+        loss_sum=jnp.where(condition, true_state.loss_sum, false_state.loss_sum),
         normalizer=jnp.where(condition, true_state.normalizer, false_state.normalizer),
         metric_sums=_select_mapping(
             condition,
@@ -1118,6 +1140,16 @@ def _select_accumulation_state(
             true_state.metric_normalizers,
             false_state.metric_normalizers,
         ),
+        aux_sums=_select_mapping(
+            condition,
+            true_state.aux_sums,
+            false_state.aux_sums,
+        ),
+        aux_normalizers=_select_mapping(
+            condition,
+            true_state.aux_normalizers,
+            false_state.aux_normalizers,
+        ),
         microsteps_in_window=jnp.where(
             condition,
             true_state.microsteps_in_window,
@@ -1125,6 +1157,11 @@ def _select_accumulation_state(
         ),
         all_finite=jnp.where(condition, true_state.all_finite, false_state.all_finite),
         pending_model_state=false_state.pending_model_state,
+        pending_model_state_valid=jnp.where(
+            condition,
+            true_state.pending_model_state_valid,
+            false_state.pending_model_state_valid,
+        ),
     )
 
 

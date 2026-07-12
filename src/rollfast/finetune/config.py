@@ -7,6 +7,7 @@ from importlib import metadata as importlib_metadata
 import math
 from typing import Any, Callable, Literal, Mapping, NamedTuple, cast
 
+import jax
 import jax.numpy as jnp
 import optax
 
@@ -808,6 +809,7 @@ class AdaLoRAControllerConfig:
         )
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class LossBundle:
     """Summed loss contract for exact accumulation."""
@@ -959,17 +961,22 @@ class StateOffloadPolicy:
         )
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class AccumulationState:
     """State accumulated across microbatches before an optimizer update."""
 
     grad_numerator: Any
+    loss_sum: Any
     normalizer: Any
     metric_sums: Any
     metric_normalizers: Any
+    aux_sums: Any
+    aux_normalizers: Any
     microsteps_in_window: Any
     all_finite: Any
     pending_model_state: Any | None
+    pending_model_state_valid: Any
 
 
 class LossScaleState(NamedTuple):

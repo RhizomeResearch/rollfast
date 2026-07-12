@@ -242,8 +242,12 @@ def test_finetune_step_state_initializes_master_loss_scale_accumulators_and_rng(
 
     assert state.master_params is not None
     assert state.loss_scale.loss_scale == 16.0
+    assert state.accumulation.loss_sum == 0.0
     assert state.accumulation.normalizer == 0.0
+    assert state.accumulation.aux_sums == {}
+    assert state.accumulation.aux_normalizers == {}
     assert state.accumulation.microsteps_in_window == 0
+    assert not bool(state.accumulation.pending_model_state_valid)
     assert state.counters.microstep == 0
     assert state.rng.forward.shape == (2,)
     assert state.optimizer_state is not None
