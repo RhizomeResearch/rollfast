@@ -118,8 +118,7 @@ def wsd_schedule(
 
     T_w = resolved_warmup_steps
     T_c = total_steps - resolved_decay_steps
-    T_final = total_steps - 1
-    decay_denominator = max(T_final - T_c, 1)
+    decay_denominator = max(resolved_decay_steps - 1, 1)
 
     def schedule(count):
         warmup_progress = (count + 1.0) / (T_w + 1.0)
@@ -135,7 +134,10 @@ def wsd_schedule(
 
         stable_val = peak_lr
 
-        decay_progress = (count - T_c) / decay_denominator
+        if resolved_decay_steps == 1:
+            decay_progress = jnp.asarray(1.0, dtype=jnp.float32)
+        else:
+            decay_progress = (count - T_c) / decay_denominator
         decay_fraction_done = _shaped_progress(
             decay_progress,
             decay_shape,
@@ -148,7 +150,7 @@ def wsd_schedule(
         decay_val = decay_factor * peak_lr
 
         is_warmup = count <= T_w
-        is_decay = count > T_c
+        is_decay = resolved_decay_steps > 0 and count >= T_c
 
         val = jnp.where(is_warmup, warmup_val, stable_val)
         val = jnp.where(is_decay, decay_val, val)

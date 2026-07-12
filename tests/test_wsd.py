@@ -57,6 +57,45 @@ def test_wsd_schedule_honors_explicit_step_counts():
     assert float(sched(9)) == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize(
+    ("decay_steps", "expected_tail"),
+    [
+        (0, (1.0, 1.0, 1.0)),
+        (1, (1.0, 1.0, 0.2)),
+        (2, (1.0, 1.0, 0.2)),
+        (3, (1.0, 0.6, 0.2)),
+    ],
+)
+def test_wsd_schedule_cooldown_boundary_truth_table(decay_steps, expected_tail):
+    sched = wsd_schedule(
+        peak_lr=1.0,
+        total_steps=6,
+        warmup_steps=0,
+        decay_steps=decay_steps,
+        final_lr_ratio=0.2,
+    )
+
+    assert tuple(float(sched(count)) for count in range(3, 6)) == pytest.approx(
+        expected_tail
+    )
+
+
+@pytest.mark.parametrize("decay_shape", ["linear", "cosine", "power", "exponential"])
+def test_wsd_schedule_one_step_fraction_reaches_final_ratio(decay_shape):
+    sched = wsd_schedule(
+        peak_lr=2.0,
+        total_steps=10,
+        warmup_steps=0,
+        decay_fraction=0.1,
+        decay_shape=decay_shape,
+        final_lr_ratio=0.25,
+    )
+
+    assert float(sched(8)) == pytest.approx(2.0)
+    assert float(sched(9)) == pytest.approx(0.5)
+    assert float(sched(10)) == pytest.approx(0.5)
+
+
 def test_wsd_schedule_accepts_end_lr_ratio_alias():
     sched = wsd_schedule(
         peak_lr=1.0,
