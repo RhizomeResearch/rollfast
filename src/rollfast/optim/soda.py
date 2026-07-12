@@ -24,7 +24,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import optax
 from optax._src import base
 
 from rollfast.optim.adam import adamw
@@ -73,13 +72,10 @@ def soda(
     base_optimizer = base.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
-        dtype = (
-            state_dtype
-            if state_dtype is not None
-            else optax.tree.dtype(params, "lowest")
-        )
         z0 = jax.tree.map(
-            lambda x: jnp.array(x, dtype=dtype, copy=True) if x is not None else None,
+            lambda x: (
+                jnp.array(x, dtype=state_dtype, copy=True) if x is not None else None
+            ),
             params,
             is_leaf=lambda x: x is None,
         )

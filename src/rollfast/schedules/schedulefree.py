@@ -5,7 +5,6 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-import optax
 from optax._src import base, combine, numerics, transform
 
 from rollfast.optim.adam import adamw
@@ -319,13 +318,10 @@ def schedule_free(
 
     def init_fn(params):
         state_key = _fresh_prng_key(key)
-        dtype = (
-            state_dtype
-            if state_dtype is not None
-            else optax.tree.dtype(params, "lowest")
-        )
         z = jax.tree.map(
-            lambda t: jnp.array(t, dtype=dtype, copy=True) if t is not None else None,
+            lambda t: (
+                jnp.array(t, dtype=state_dtype, copy=True) if t is not None else None
+            ),
             params,
             is_leaf=lambda x: x is None,
         )

@@ -55,6 +55,90 @@ def test_soda_adds_initialization_anchor():
     assert jnp.allclose(updates["w"], -0.001 + expected_anchor)
 
 
+@pytest.mark.parametrize("jit_update", [False, True])
+def test_soda_preserves_implicit_anchor_dtypes_and_zero_updates(jit_update):
+    params = {
+        "bf16": jnp.asarray([1.0], dtype=jnp.bfloat16),
+        "fp32": jnp.asarray([1.001], dtype=jnp.float32),
+        "none": None,
+    }
+    grads = jax.tree.map(
+        lambda x: jnp.zeros_like(x) if x is not None else None,
+        params,
+        is_leaf=lambda x: x is None,
+    )
+    tx = soda(optax.set_to_zero())
+    state = tx.init(params)
+
+    assert state.z0["bf16"].dtype == params["bf16"].dtype
+    assert state.z0["fp32"].dtype == params["fp32"].dtype
+    assert state.z0["none"] is None
+
+    update_fn = jax.jit(tx.update) if jit_update else tx.update
+    updates, _ = update_fn(grads, state, params)
+
+    assert updates["bf16"].dtype == params["bf16"].dtype
+    assert updates["fp32"].dtype == params["fp32"].dtype
+    assert jnp.array_equal(updates["bf16"], jnp.zeros_like(params["bf16"]))
+    assert jnp.array_equal(updates["fp32"], jnp.zeros_like(params["fp32"]))
+    assert updates["none"] is None
+
+
+def test_soda_explicit_state_dtype_applies_to_every_anchor_leaf():
+    params = {
+        "bf16": jnp.asarray([1.0], dtype=jnp.bfloat16),
+        "fp32": jnp.asarray([1.001], dtype=jnp.float32),
+        "none": None,
+    }
+    state = soda(optax.set_to_zero(), state_dtype=jnp.bfloat16).init(params)
+
+    assert state.z0["bf16"].dtype == jnp.bfloat16
+    assert state.z0["fp32"].dtype == jnp.bfloat16
+    assert state.z0["none"] is None
+
+
+def test_soda_mixed_dtypes_remain_finite_across_two_updates():
+    params = {
+        "bf16": jnp.asarray([1.0], dtype=jnp.bfloat16),
+        "fp32": jnp.asarray([1.0], dtype=jnp.float32),
+    }
+    grads = {
+        "bf16": jnp.asarray([0.125], dtype=jnp.bfloat16),
+        "fp32": jnp.asarray([0.125], dtype=jnp.float32),
+    }
+    tx = soda(optax.scale(-0.125))
+    state = tx.init(params)
+
+    for _ in range(2):
+        updates, state = tx.update(grads, state, params)
+        for name in params:
+            assert updates[name].dtype == params[name].dtype
+            assert jnp.all(jnp.isfinite(updates[name]))
+        params = optax.apply_updates(params, updates)
+
+
+def test_soda_implicit_fp32_state_matches_explicit_fp32_reference():
+    params = {"w": jnp.asarray([1.001], dtype=jnp.float32)}
+    grads = {"w": jnp.asarray([0.125], dtype=jnp.float32)}
+    implicit_tx = soda(optax.scale(-0.125))
+    explicit_tx = soda(optax.scale(-0.125), state_dtype=jnp.float32)
+    implicit_state = implicit_tx.init(params)
+    explicit_state = explicit_tx.init(params)
+    implicit_params = params
+    explicit_params = params
+
+    for _ in range(2):
+        implicit_updates, implicit_state = implicit_tx.update(
+            grads, implicit_state, implicit_params
+        )
+        explicit_updates, explicit_state = explicit_tx.update(
+            grads, explicit_state, explicit_params
+        )
+        assert jnp.array_equal(implicit_updates["w"], explicit_updates["w"])
+        implicit_params = optax.apply_updates(implicit_params, implicit_updates)
+        explicit_params = optax.apply_updates(explicit_params, explicit_updates)
+
+
 def test_soda_requires_params():
     tx = soda(optax.sgd(0.01))
     state = tx.init({"w": jnp.ones((2, 2))})
