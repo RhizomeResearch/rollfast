@@ -1,7 +1,7 @@
 [project]
 name = "rollfast"
 version = "1.0.0"
-description = "JAX implementation of experimental optimizers and schedulers."
+description = "JAX optimization primitives for experimental optimizers and schedulers."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -19,7 +19,7 @@ keywords = [
     "preconditioning"
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
@@ -38,9 +38,9 @@ equinox = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/clementpoiret/rollfast"
-Repository = "https://github.com/clementpoiret/rollfast"
-Issues = "https://github.com/clementpoiret/rollfast/issues"
+Homepage = "https://gitlab.com/rhizome-labs/public/rollfast"
+Repository = "https://gitlab.com/rhizome-labs/public/rollfast"
+Issues = "https://gitlab.com/rhizome-labs/public/rollfast/-/issues"
 
 [build-system]
 requires = ["uv_build>=0.9.7,<0.12.0"]

@@ -157,12 +157,14 @@ def test_schedule_free_ema_defaults_to_schedule_free_eval_source():
         ema=rfft.EMAConfig(enabled=True, decay=0.0),
     )
     state = bundle.init(plan.trainable)
-    updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
-        state,
-        plan.trainable,
-    )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = plan.trainable
+    for _ in range(2):
+        updates, state = bundle.update(
+            _ones_like_trainable(params),
+            state,
+            params,
+        )
+        params = optax.apply_updates(params, updates)
     schedule_free_params = bundle.eval_params(params, state, view="schedule_free")
     ema_params = bundle.eval_params(params, state, view="ema")
 

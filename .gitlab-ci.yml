@@ -6,6 +6,8 @@ stages:
 
 variables:
   UV_CACHE_DIR: .cache/uv
+  MIN_JAX_VERSION: "0.6.2"
+  MIN_OPTAX_VERSION: "0.2.8"
 
 default:
   image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim  # uv pre-installed
@@ -42,12 +44,47 @@ test:
     reports:
       junit: report.xml
 
+test-minimum:
+  stage: test
+  before_script:
+    - uv sync --no-dev
+    - uv pip install "jax==$MIN_JAX_VERSION" "jaxlib==$MIN_JAX_VERSION" "optax==$MIN_OPTAX_VERSION" "equinox==0.13.6" "pytest>=9.0.2"
+  script:
+    - uv run --no-sync pytest --ignore=tests/test_equimo_integration.py --ignore=tests/integrations --junitxml=report-minimum.xml
+  artifacts:
+    reports:
+      junit: report-minimum.xml
+
+test-multidevice-cpu:
+  stage: test
+  variables:
+    XLA_FLAGS: "--xla_force_host_platform_device_count=4"
+  script:
+    - uv run python -c "import jax; assert jax.local_device_count() >= 4, jax.devices()"
+    - uv run pytest tests/test_multidevice_cpu.py --junitxml=report-multidevice.xml
+  artifacts:
+    reports:
+      junit: report-multidevice.xml
+
+smoke:
+  stage: test
+  script:
+    - uv run python examples/adamw_quickstart.py
+    - uv run python examples/schedule_free_eval.py
+    - uv run python examples/finetuning/state_memory_report.py
+    - uv run python benchmarks/finetuning/memory.py
+    - uv run python benchmarks/finetuning/throughput.py
+    - uv run python benchmarks/finetuning/convergence.py
+
 package:
   stage: package
   needs:
     - lint
     - minimal-import
     - test
+    - test-minimum
+    - test-multidevice-cpu
+    - smoke
   script:
     - uv build
     - uv venv --clear /tmp/rollfast-wheel-venv
@@ -59,6 +96,8 @@ package:
 
 publish:
   stage: publish
+  variables:
+    GIT_DEPTH: "0"
   needs:
     - job: lint
     - job: minimal-import
@@ -74,6 +113,12 @@ publish:
     name: release
     url: https://pypi.org/project/rollfast/
   script:
+    - git fetch origin "$CI_DEFAULT_BRANCH"
+    - |
+      if ! git merge-base --is-ancestor "$CI_COMMIT_SHA" FETCH_HEAD; then
+        echo "Error: release commit is not on the default branch ($CI_DEFAULT_BRANCH)"
+        exit 1
+      fi
     - |
       TAG_VERSION=${CI_COMMIT_TAG#v}
       PROJECT_VERSION=$(grep -m 1 '^version = ' pyproject.toml | awk -F'"' '{print $2}')

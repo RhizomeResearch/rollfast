@@ -1,8 +1,8 @@
 # rollfast: Advanced Optimization Primitives in JAX
 
-`rollfast` is a high-performance optimization library for JAX, designed to
-implement cutting-edge optimizers that go beyond standard Euclidean gradient
-descent. It provides experimental implementations of optimizers like
+`rollfast` is an optimization library for JAX, designed to implement
+cutting-edge optimizers that go beyond standard Euclidean gradient descent. It
+provides experimental algorithm implementations such as
 **Muon** (orthogonalized momentum), **PSGD** (Preconditioned Stochastic Gradient Descent), **PRISM** (Anisotropic
 Spectral Shaping), **Aurora** (leverage-aware rectangular matrix optimization),
 and **Pion** (spectrum-preserving orthogonal equivalence updates), plus
@@ -12,9 +12,9 @@ norm-preserving weight decay, **SODA**, and a robust
 **Schedule-Free** wrapper.
 
 Built on top of the [Optax](https://github.com/google-deepmind/optax) ecosystem,
-`rollfast` prioritizes memory efficiency (via scanned layers and Kronecker
-factorizations), multi-gpu compatibility, mixed-precision trainings and
-scalability for large models.
+`rollfast` supports JAX PyTrees, JIT-compiled updates, mixed precision, and
+partition-aware reductions. Accelerator performance and sharding behavior are
+workload-dependent and should be verified on the target hardware.
 
 ## Algorithms
 
@@ -211,8 +211,8 @@ effective.
   regularization that smooths the optimization trajectory.
 - **Alignment**: Momentum-aligned gradient masking (Magma) modulates the masked
   updates using momentum-gradient alignment.
-- **Integration**: It acts as a simple drop-in replacement for adaptive
-  optimizers with consistent gains and negligible computational overhead.
+- **Integration**: It acts as an intervention layer for compatible adaptive
+  optimizers.
 
 ______________________________________________________________________
 
@@ -228,6 +228,16 @@ Equinox integration helpers such as `get_equinox_prism_spec` and
 ```bash
 pip install "rollfast[equinox]"
 ```
+
+Rollfast 1.x follows a documented API and checkpoint compatibility policy. The
+word “experimental” describes the maturity of the research algorithms and
+reference profiles, not the stability of the supported Python API. See:
+
+- [`docs/stability.md`](./docs/stability.md) for the v1 compatibility contract;
+- [`docs/migrating-to-1.0.md`](./docs/migrating-to-1.0.md) when upgrading from
+  0.x;
+- [`docs/releases/1.0.0.md`](./docs/releases/1.0.0.md) and
+  [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Examples and Fine-Tuning
 
@@ -790,7 +800,9 @@ Training models in **pure BF16** (where parameters, moments, and gradients are a
 
 Stochastic Rounding (SR) solves this by mapping the update's fractional part to a probability of rounding up, ensuring that even small updates contribute to the training trajectory on average.
 
-`rollfast` provides a high-performance SR implementation using an **integer-only bit manipulation pipeline** that is fully fusible by XLA, avoiding HBM spills and slow float conversions.
+`rollfast` provides an SR implementation using an **integer-only bit
+manipulation pipeline** designed to remain fusible by XLA and avoid additional
+floating-point conversions.
 
 #### 1. Pure BF16 Training Step
 
@@ -1001,11 +1013,15 @@ ______________________________________________________________________
 Before release, run the same validation surfaces used by CI:
 
 ```bash
-uv run ruff format --check src tests
-uv run ruff check src tests
+uv run ruff format --check .
+uv run ruff check .
 uv run ty check
 uv run pytest -q
 ```
+
+The full stable-release procedure, including minimum-dependency, multi-device
+CPU, artifact-install, and optional accelerator gates, is in
+[`docs/release-checklist.md`](./docs/release-checklist.md).
 
 ## Citations
 

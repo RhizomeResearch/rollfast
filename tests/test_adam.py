@@ -66,11 +66,11 @@ def test_adamw_reinit_after_donated_state_uses_fresh_key(explicit_key):
     tx = adamw(learning_rate=1e-3, **kwargs)
     state1 = tx.init(params)
 
-    @jax.jit(donate_argnums=(1,))
     def step(params, state):
         _, new_state = tx.update(grads, state, params)
         return new_state
 
+    step = jax.jit(step, donate_argnums=(1,))
     state1_after = step(params, state1)
     jax.tree.map(
         lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else None,

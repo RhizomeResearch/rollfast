@@ -78,6 +78,7 @@ Implemented:
 - runnable benchmark smoke harnesses for state memory, tiny-step throughput, and
   toy AdamW/AdamW8 convergence with environment metadata.
 
-Release validation should still rerun the benchmark harnesses on target
-hardware, target Equimo models, real batch shapes, and production sharding before
-making task-quality performance claims.
+Stable-release gates run the benchmark harnesses as CPU smoke tests. Target
+hardware, target Equimo models, real batch shapes, and production sharding must
+still be measured before making task-quality or accelerator-specific performance
+claims; they are not prerequisites for the CPU-validated API release.
