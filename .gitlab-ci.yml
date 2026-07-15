@@ -96,6 +96,10 @@ package:
 
 publish:
   stage: publish
+  before_script:
+    - apt-get update
+    - apt-get install --yes --no-install-recommends git
+    - uv sync --group dev
   variables:
     GIT_DEPTH: "0"
   needs:
