@@ -169,13 +169,16 @@ class AdaLoRAController:
         else:
             should_allocate = jnp.logical_and(applied, periodic_allocate)
         scores = sensitivity * (uncertainty + self.config.score_eps)
-        new_mask = allocate_rank_mask(
-            scores,
-            max_ranks=self.max_ranks,
-            budget=budget,
-            min_rank=self.config.min_rank,
+        support = jax.lax.cond(
+            should_allocate,
+            lambda: allocate_rank_mask(
+                scores,
+                max_ranks=self.max_ranks,
+                budget=budget,
+                min_rank=self.config.min_rank,
+            ),
+            lambda: state.current_support,
         )
-        support = jnp.where(should_allocate, new_mask, state.current_support)
         current_budget = jnp.where(should_allocate, budget, state.current_budget)
         return AdaLoRAState(
             sensitivity_ema=jnp.where(applied, sensitivity, state.sensitivity_ema),
@@ -302,10 +305,6 @@ def allocate_rank_mask(
 
 def _valid_mask(max_ranks: tuple[int, ...], max_rank: int) -> jax.Array:
     ranks = jnp.asarray(max_ranks, dtype=jnp.int32)
-    return jnp.arange(max_rank)[None, :] < ranks[:, None]
-
-
-def _mask_from_ranks(ranks: jax.Array, max_rank: int) -> jax.Array:
     return jnp.arange(max_rank)[None, :] < ranks[:, None]
 
 

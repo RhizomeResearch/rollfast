@@ -4,8 +4,32 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from rollfast.optim.psgd import KronState, kron, scale_by_kron
+from rollfast.optim.psgd import (
+    KronState,
+    _norm_lower_bound_skh,
+    _norm_lower_bound_spd,
+    kron,
+    scale_by_kron,
+)
 from tests._typing import as_array_dict
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.complex64])
+@pytest.mark.parametrize("kind", ["spd", "skh"])
+def test_subspace_norm_estimates_match_spectral_reference(dtype, kind):
+    matrix = jax.random.normal(jax.random.PRNGKey(7), (4, 4), dtype=dtype)
+    matrix = matrix @ matrix.conj().T if kind == "spd" else matrix - matrix.conj().T
+    estimate = _norm_lower_bound_spd if kind == "spd" else _norm_lower_bound_skh
+    reference = float(jnp.linalg.norm(matrix, ord=2))
+
+    def evaluate(matrix, key):
+        return estimate(matrix, key, k=4, half_iters=3)
+
+    for fn in (evaluate, jax.jit(evaluate)):
+        actual = float(fn(matrix, jax.random.PRNGKey(2)))
+        assert actual <= reference * (1 + 1e-6)
+        assert actual == pytest.approx(reference, rel=1e-3)
+        assert float(fn(jnp.zeros_like(matrix), jax.random.PRNGKey(2))) == 0.0
 
 
 def _assert_tree_exactly_equal(actual, expected):

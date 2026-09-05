@@ -19,7 +19,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, transform, utils
+import optax
+from optax._src import utils
 
 from rollfast.optim._matrix_runtime import (
     apply_matrix_post_shape_lookahead,
@@ -75,7 +76,7 @@ _SIMPLE_QUINTIC_COEFFS = (2.0, -1.5, 0.5)
 def get_equinox_aurora_spec(
     model: Any,
     skip_depthwise_conv: bool = True,
-) -> base.Params:
+) -> optax.Params:
     """Generates an Aurora dimension spec tree for an Equinox model.
 
     This is the Aurora analogue of `get_equinox_prism_spec`.
@@ -118,7 +119,7 @@ class ScaleByAuroraState(NamedTuple):
     """State for Aurora-style gradient transformations."""
 
     count: jax.Array
-    mu: base.Updates
+    mu: optax.Updates
     magma_s: Any
     key: jax.Array | None
 
@@ -267,7 +268,7 @@ def _solve_row_norm_multipliers(
     b_norm = jnp.maximum(jnp.linalg.norm(b), 1e-12)
     done0 = jnp.array(False, dtype=jnp.bool_)
 
-    def body_fn(_, state):
+    def active_body(state):
         x, res, p, rs_old, done = state
         Ap = matvec(p)
         denom = jnp.sum(p * Ap)
@@ -289,6 +290,9 @@ def _solve_row_norm_multipliers(
         p = jnp.where(active & finite_rs & (~converged), p_new, p)
         rs_old = jnp.where(active & finite_rs, rs_new, rs_old)
         return x, res, p, rs_old, done_new
+
+    def body_fn(_, state):
+        return jax.lax.cond(state[4], lambda: state, lambda: active_body(state))
 
     x, _, _, _, _ = jax.lax.fori_loop(
         0, max_iter, body_fn, (x0, res0, p0, rs0, done0), unroll=True
@@ -465,12 +469,12 @@ def _scale_by_aurora_impl(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     if not (0.0 <= b1 < 1.0):
         raise ValueError(f"b1 must be in [0, 1), got {b1}")
     if pp_iterations < 1:
@@ -597,7 +601,7 @@ def _scale_by_aurora_impl(
             key=runtime.next_key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def scale_by_aurora(
@@ -621,12 +625,12 @@ def scale_by_aurora(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Core practical Aurora transform.
 
     Returns unscaled, positive updates. Chain with
@@ -685,12 +689,12 @@ def scale_by_riemannian_aurora(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Core Riemannian-Aurora transform.
 
     This is much more expensive than practical Aurora and is mostly useful as a
@@ -732,8 +736,8 @@ def _build_unscaled_aurora_branch(
     *,
     riemannian: bool,
     b1: float,
-    weight_decay: base.ScalarOrSchedule,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
+    weight_decay: optax.ScalarOrSchedule,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None,
     pp_iterations: int,
     pp_beta: float,
     outer_steps: int,
@@ -760,7 +764,7 @@ def _build_unscaled_aurora_branch(
     guard_nonfinite: bool,
     key: jax.Array | None,
     weight_dimension_numbers: AuroraWeightDimNumOrFn | None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Build the unscaled Aurora direction branch shared by wrappers."""
     if riemannian:
         aurora_scale = scale_by_riemannian_aurora(
@@ -823,20 +827,18 @@ def _build_unscaled_aurora_branch(
 
     components = [aurora_scale]
     if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
-        components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
+        components.append(optax.add_decayed_weights(weight_decay, weight_decay_mask))
 
-    return combine.chain(*components)
+    return optax.chain(*components)
 
 
 def _partitioned_aurora(
     *,
     riemannian: bool,
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float,
-    weight_decay: base.ScalarOrSchedule,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
+    weight_decay: optax.ScalarOrSchedule,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None,
     pp_iterations: int,
     pp_beta: float,
     outer_steps: int,
@@ -862,12 +864,12 @@ def _partitioned_aurora(
     magma_tau: float,
     guard_nonfinite: bool,
     key: jax.Array | None,
-    adam_learning_rate: base.ScalarOrSchedule | None,
+    adam_learning_rate: optax.ScalarOrSchedule | None,
     adam_b1: float,
     adam_b2: float,
     adam_eps: float,
     aurora_weight_dimension_numbers: AuroraWeightDimNumOrFn | None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     key_aurora, key_adam = jax.random.split(_fresh_prng_key(key), 2)
 
     if adam_learning_rate is None:
@@ -911,11 +913,11 @@ def _partitioned_aurora(
         weight_dimension_numbers=partition.masked_specs,
     )
 
-    return combine.partition(
+    return optax.partition(
         transforms={
-            "aurora": combine.chain(
+            "aurora": optax.chain(
                 aurora_branch,
-                transform.scale_by_learning_rate(learning_rate),
+                optax.scale_by_learning_rate(learning_rate),
             ),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
@@ -938,10 +940,10 @@ def _partitioned_aurora(
 
 
 def aurora(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.95,
-    weight_decay: base.ScalarOrSchedule = 0.025,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.025,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     pp_iterations: int = 2,
     pp_beta: float = 0.5,
     polar_ns_iters: int = 12,
@@ -963,12 +965,12 @@ def aurora(
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     aurora_weight_dimension_numbers: AuroraWeightDimNumOrFn | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Aurora optimizer with automatic matrix/Adam partitioning.
 
     Matrix leaves are optimized by Aurora. Non-matrix leaves are optimized by
@@ -1016,10 +1018,10 @@ def aurora(
 
 
 def riemannian_aurora(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.95,
-    weight_decay: base.ScalarOrSchedule = 0.025,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.025,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     outer_steps: int = 3,
     cg_steps: int = 20,
     riemannian_eta: float = 0.1,
@@ -1043,12 +1045,12 @@ def riemannian_aurora(
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     aurora_weight_dimension_numbers: AuroraWeightDimNumOrFn | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Riemannian-Aurora optimizer with automatic matrix/Adam partitioning."""
     return _partitioned_aurora(
         riemannian=True,

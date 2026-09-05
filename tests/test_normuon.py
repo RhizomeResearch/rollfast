@@ -16,54 +16,27 @@ from rollfast.optim.normuon import (
 )
 
 
-def test_scale_by_normuon_tracks_row_second_moment_for_tall_matrix():
-    params = {"w": jnp.ones((4, 2), dtype=jnp.float32)}
-    grads = {"w": jnp.arange(8, dtype=jnp.float32).reshape(4, 2) + 1.0}
-    tx = scale_by_normuon(beta1=0.0, beta2=0.0, nesterov=False, ns_iters=2)
+@pytest.mark.parametrize(
+    "matrix_shape, kwargs, moment_shape",
+    [
+        pytest.param((4, 2), {}, (1, 4, 1), id="default_rows_tall"),
+        pytest.param((2, 4), {}, (1, 2, 1), id="default_rows_wide"),
+        pytest.param(
+            (2, 4), {"normalization_axis": "auto"}, (1, 1, 4), id="auto_columns_wide"
+        ),
+    ],
+)
+def test_scale_by_normuon_second_moment_shape(matrix_shape, kwargs, moment_shape):
+    params = {"w": jnp.ones(matrix_shape, dtype=jnp.float32)}
+    grads = {"w": jnp.arange(8, dtype=jnp.float32).reshape(*matrix_shape) + 1.0}
+    tx = scale_by_normuon(beta1=0.0, beta2=0.0, nesterov=False, ns_iters=2, **kwargs)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
     state = cast(ScaleByNorMuonState, state)
     updates = cast(dict[str, jax.Array], updates)
     nu = cast(dict[str, jax.Array], state.nu)
-
     assert updates["w"].shape == params["w"].shape
-    assert nu["w"].shape == (1, 4, 1)
-    assert jnp.all(jnp.isfinite(updates["w"]))
-
-
-def test_scale_by_normuon_defaults_to_row_second_moment_for_wide_matrix():
-    params = {"w": jnp.ones((2, 4), dtype=jnp.float32)}
-    grads = {"w": jnp.arange(8, dtype=jnp.float32).reshape(2, 4) + 1.0}
-    tx = scale_by_normuon(beta1=0.0, beta2=0.0, nesterov=False, ns_iters=2)
-    state = tx.init(params)
-    updates, state = tx.update(grads, state, params)
-    state = cast(ScaleByNorMuonState, state)
-    updates = cast(dict[str, jax.Array], updates)
-    nu = cast(dict[str, jax.Array], state.nu)
-
-    assert updates["w"].shape == params["w"].shape
-    assert nu["w"].shape == (1, 2, 1)
-    assert jnp.all(jnp.isfinite(updates["w"]))
-
-
-def test_scale_by_normuon_auto_tracks_column_second_moment_for_wide_matrix():
-    params = {"w": jnp.ones((2, 4), dtype=jnp.float32)}
-    grads = {"w": jnp.arange(8, dtype=jnp.float32).reshape(2, 4) + 1.0}
-    tx = scale_by_normuon(
-        beta1=0.0,
-        beta2=0.0,
-        nesterov=False,
-        ns_iters=2,
-        normalization_axis="auto",
-    )
-    state = tx.init(params)
-    updates, state = tx.update(grads, state, params)
-    state = cast(ScaleByNorMuonState, state)
-    updates = cast(dict[str, jax.Array], updates)
-    nu = cast(dict[str, jax.Array], state.nu)
-
-    assert updates["w"].shape == params["w"].shape
-    assert nu["w"].shape == (1, 1, 4)
+    assert nu["w"].shape == moment_shape
     assert jnp.all(jnp.isfinite(updates["w"]))
 
 

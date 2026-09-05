@@ -25,8 +25,8 @@ def build_schedule(
         return _constant_schedule(peak_lr)
     if config.total_steps is None:
         raise ValueError(f"{config.kind!r} schedule requires total_steps.")
-    if config.kind == "warmup_cosine":
-        return _warmup_cosine_schedule(config, peak_lr)
+    if config.kind in {"warmup_cosine", "linear", "polynomial"}:
+        return _warmup_decay_schedule(config, peak_lr)
     if config.kind == "wsd":
         return wsd_schedule(
             peak_lr=peak_lr,
@@ -37,10 +37,6 @@ def build_schedule(
             decay_steps=config.decay_steps,
             end_lr_ratio=config.end_lr_ratio,
         )
-    if config.kind == "linear":
-        return _linear_schedule(config, peak_lr)
-    if config.kind == "polynomial":
-        return _polynomial_schedule(config, peak_lr)
     raise ValueError(f"Unsupported schedule kind: {config.kind!r}.")
 
 
@@ -99,7 +95,7 @@ def _constant_schedule(peak_lr: float) -> optax.Schedule:
     return schedule
 
 
-def _warmup_cosine_schedule(config: ScheduleConfig, peak_lr: float) -> optax.Schedule:
+def _warmup_decay_schedule(config: ScheduleConfig, peak_lr: float) -> optax.Schedule:
     total_steps = int(config.total_steps or 1)
     if total_steps <= 1:
         return _constant_schedule(peak_lr)
@@ -116,52 +112,13 @@ def _warmup_cosine_schedule(config: ScheduleConfig, peak_lr: float) -> optax.Sch
         decay_start = float(warmup_steps)
         decay_span = max(total_steps - warmup_steps - 1, 1)
         progress = jnp.clip((count - decay_start) / float(decay_span), 0.0, 1.0)
-        cosine = 0.5 * (1.0 + jnp.cos(jnp.pi * progress))
-        decayed = end_lr + (peak_lr - end_lr) * cosine
-        return jnp.where(count < warmup_steps, warmup, decayed)
-
-    return schedule
-
-
-def _linear_schedule(config: ScheduleConfig, peak_lr: float) -> optax.Schedule:
-    total_steps = int(config.total_steps or 1)
-    if total_steps <= 1:
-        return _constant_schedule(peak_lr)
-    warmup_steps = _resolve_warmup_steps(config, total_steps)
-    end_lr = peak_lr * config.end_lr_ratio
-
-    def schedule(count):
-        count = jnp.asarray(count, dtype=jnp.float32)
-        if warmup_steps > 0:
-            warmup = peak_lr * (count + 1.0) / float(warmup_steps)
+        if config.kind == "warmup_cosine":
+            cosine = 0.5 * (1.0 + jnp.cos(jnp.pi * progress))
+            decayed = end_lr + (peak_lr - end_lr) * cosine
+        elif config.kind == "linear":
+            decayed = peak_lr + (end_lr - peak_lr) * progress
         else:
-            warmup = jnp.asarray(peak_lr, dtype=jnp.float32)
-
-        decay_span = max(total_steps - warmup_steps - 1, 1)
-        progress = jnp.clip((count - float(warmup_steps)) / float(decay_span), 0.0, 1.0)
-        decayed = peak_lr + (end_lr - peak_lr) * progress
-        return jnp.where(count < warmup_steps, warmup, decayed)
-
-    return schedule
-
-
-def _polynomial_schedule(config: ScheduleConfig, peak_lr: float) -> optax.Schedule:
-    total_steps = int(config.total_steps or 1)
-    if total_steps <= 1:
-        return _constant_schedule(peak_lr)
-    warmup_steps = _resolve_warmup_steps(config, total_steps)
-    end_lr = peak_lr * config.end_lr_ratio
-
-    def schedule(count):
-        count = jnp.asarray(count, dtype=jnp.float32)
-        if warmup_steps > 0:
-            warmup = peak_lr * (count + 1.0) / float(warmup_steps)
-        else:
-            warmup = jnp.asarray(peak_lr, dtype=jnp.float32)
-
-        decay_span = max(total_steps - warmup_steps - 1, 1)
-        progress = jnp.clip((count - float(warmup_steps)) / float(decay_span), 0.0, 1.0)
-        decayed = end_lr + (peak_lr - end_lr) * (1.0 - progress) ** config.power
+            decayed = end_lr + (peak_lr - end_lr) * (1.0 - progress) ** config.power
         return jnp.where(count < warmup_steps, warmup, decayed)
 
     return schedule

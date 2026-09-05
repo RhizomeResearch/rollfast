@@ -142,12 +142,8 @@ def test_soda_implicit_fp32_state_matches_explicit_fp32_reference():
 def test_soda_requires_params():
     tx = soda(optax.sgd(0.01))
     state = tx.init({"w": jnp.ones((2, 2))})
-    try:
+    with pytest.raises(ValueError, match="`params` must be provided"):
         tx.update({"w": jnp.ones((2, 2))}, state)
-    except ValueError as err:
-        assert "`params` must be provided" in str(err)
-    else:
-        raise AssertionError("soda update should require params")
 
 
 def test_soda_plain_base_optimizer_ignores_extra_args():
@@ -245,10 +241,17 @@ def test_soda_kron():
     assert updates["w"].shape == (4, 4)
 
 
-def test_soda_muon():
+@pytest.mark.parametrize(
+    "optimizer_fn, kwargs",
+    [
+        pytest.param(soda_muon, {"ns_steps": 2}, id="muon"),
+        pytest.param(soda_rmnp, {}, id="rmnp"),
+    ],
+)
+def test_soda_matrix_wrapper(optimizer_fn, kwargs):
     params = {"w": jnp.ones((4, 4)), "b": jnp.ones((4,))}
     grads = jax.tree.map(lambda x: jnp.ones_like(x) * 0.1, params)
-    tx = soda_muon(learning_rate=0.01, total_steps=100, ns_steps=2)
+    tx = optimizer_fn(**kwargs, learning_rate=0.01, total_steps=100)
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
     updates = as_array_dict(updates)
@@ -258,13 +261,22 @@ def test_soda_muon():
     assert jnp.all(jnp.isfinite(updates["b"]))
 
 
-def test_soda_muon_accepts_heavy_ball_momentum_accumulator():
+@pytest.mark.parametrize(
+    "optimizer_fn, kwargs",
+    [
+        pytest.param(soda_muon, {"ns_steps": 2}, id="muon"),
+        pytest.param(soda_rmnp, {}, id="rmnp"),
+    ],
+)
+def test_soda_matrix_wrapper_accepts_heavy_ball_momentum_accumulator(
+    optimizer_fn, kwargs
+):
     params = {"w": jnp.ones((4, 4)), "b": jnp.ones((4,))}
     grads = jax.tree.map(lambda x: jnp.ones_like(x) * 0.1, params)
-    tx = soda_muon(
+    tx = optimizer_fn(
+        **kwargs,
         learning_rate=0.01,
         total_steps=100,
-        ns_steps=2,
         momentum_accumulator="heavy_ball",
     )
     updates, _ = tx.update(grads, tx.init(params), params)
@@ -288,34 +300,6 @@ def test_soda_muon_forwards_key(monkeypatch):
     tx.init(params)
 
     assert jnp.array_equal(captured["key"], key)
-
-
-def test_soda_rmnp():
-    params = {"w": jnp.ones((4, 4)), "b": jnp.ones((4,))}
-    grads = jax.tree.map(lambda x: jnp.ones_like(x) * 0.1, params)
-    tx = soda_rmnp(learning_rate=0.01, total_steps=100)
-    state = tx.init(params)
-    updates, state = tx.update(grads, state, params)
-    updates = as_array_dict(updates)
-    assert updates["w"].shape == (4, 4)
-    assert updates["b"].shape == (4,)
-    assert jnp.all(jnp.isfinite(updates["w"]))
-    assert jnp.all(jnp.isfinite(updates["b"]))
-
-
-def test_soda_rmnp_accepts_heavy_ball_momentum_accumulator():
-    params = {"w": jnp.ones((4, 4)), "b": jnp.ones((4,))}
-    grads = jax.tree.map(lambda x: jnp.ones_like(x) * 0.1, params)
-    tx = soda_rmnp(
-        learning_rate=0.01,
-        total_steps=100,
-        momentum_accumulator="heavy_ball",
-    )
-    updates, _ = tx.update(grads, tx.init(params), params)
-    updates = as_array_dict(updates)
-
-    assert updates["w"].shape == (4, 4)
-    assert jnp.all(jnp.isfinite(updates["w"]))
 
 
 @pytest.mark.parametrize(

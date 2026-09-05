@@ -1,6 +1,46 @@
+import math
+
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import rollfast.finetune as rfft
+
+
+@pytest.mark.parametrize("kind", ["warmup_cosine", "linear", "polynomial"])
+@pytest.mark.parametrize(("total", "warmup"), [(1, 0), (2, 0), (7, 2), (4, 9)])
+def test_decay_schedules_match_reference_at_and_beyond_boundaries(kind, total, warmup):
+    peak, end, power = 0.3, 0.06, 1.7
+    schedule = rfft.build_schedule(
+        rfft.ScheduleConfig(
+            kind=kind,
+            total_steps=total,
+            warmup_steps=warmup,
+            end_lr_ratio=end / peak,
+            power=power,
+        ),
+        peak_lr=peak,
+    )
+    steps = list(range(-1, total + 3))
+    expected = []
+    warmup = min(warmup, total)
+    for count in steps:
+        if total <= 1:
+            value = peak
+        elif count < warmup:
+            value = peak * (count + 1) / warmup if warmup else peak
+        else:
+            progress = min(max((count - warmup) / max(total - warmup - 1, 1), 0), 1)
+            remaining = {
+                "warmup_cosine": (1 + math.cos(math.pi * progress)) / 2,
+                "linear": 1 - progress,
+                "polynomial": (1 - progress) ** power,
+            }[kind]
+            value = end + (peak - end) * remaining
+        expected.append(value)
+    for evaluate in (jax.vmap(schedule), jax.jit(jax.vmap(schedule))):
+        np.testing.assert_allclose(evaluate(jnp.asarray(steps)), expected, rtol=2e-6)
 
 
 def test_warmup_cosine_schedule_boundaries():

@@ -5,7 +5,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
+import optax
+from optax._src import utils
 
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
@@ -29,8 +30,8 @@ class ScaleByAdamState(NamedTuple):
     """State for the Adam algorithm."""
 
     count: jax.Array  # shape=(), dtype=jnp.int32.
-    mu: base.Updates
-    nu: base.Updates
+    mu: optax.Updates
+    nu: optax.Updates
     magma_s: Any
     key: jax.Array | None
 
@@ -42,15 +43,15 @@ def scale_by_adam(
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike | None = None,
     *,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     nesterov: bool = False,
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     r"""Rescale updates according to the Adam algorithm.
 
     See :func:`optax.adam` for more details.
@@ -132,13 +133,13 @@ def scale_by_adam(
 
         mu_f32 = _tree_update_moment_f32(updates, state.mu, b1)
         nu_f32 = _tree_update_moment_sq_f32(updates, state.nu, b2)
-        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
+        count_inc = cast(jax.Array, optax.safe_increment(state.count))
 
         mu_bc_factor = 1.0 - b1**count_inc
         nu_bc_factor = 1.0 - b2**count_inc
 
         if nesterov:
-            mu_bc_factor_next = 1.0 - b1 ** numerics.safe_increment(count_inc)
+            mu_bc_factor_next = 1.0 - b1 ** optax.safe_increment(count_inc)
             mu_bc = _safe_bias_correction(mu_f32, mu_bc_factor_next)
 
             # Explicitly bypass MaskedNodes. Attempting .astype() on a MaskedNode
@@ -232,18 +233,18 @@ def scale_by_adam(
             key=next_state_key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def adamw(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: jax.typing.ArrayLike = 0.9,
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike | None = None,
-    weight_decay: base.ScalarOrSchedule = 1e-4,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 1e-4,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     *,
     nesterov: bool = False,
     use_magma: bool = False,
@@ -251,7 +252,7 @@ def adamw(
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     r"""Adam with weight decay regularization.
 
     AdamW uses weight decay to regularize learning towards small weights, as
@@ -396,9 +397,7 @@ def adamw(
     ]
 
     if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
-        components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
+        components.append(optax.add_decayed_weights(weight_decay, weight_decay_mask))
 
-    components.append(transform.scale_by_learning_rate(learning_rate))
-    return combine.chain(*components)
+    components.append(optax.scale_by_learning_rate(learning_rate))
+    return optax.chain(*components)

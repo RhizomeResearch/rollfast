@@ -7,13 +7,11 @@ from typing import Any, NamedTuple, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 from jax import vmap
 from optax import tree_utils as otu
-from optax._src import base, numerics, transform
-from optax._src.combine import chain
-from optax._src.numerics import safe_int32_increment
+from optax._src import numerics
 from optax._src.utils import canonicalize_dtype
-from optax.transforms import _masking
 
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
@@ -91,7 +89,7 @@ def _compute_global_norm(
     grads: Any,
     axis_name: str | None = None,
 ) -> jax.Array:
-    _is_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+    _is_leaf = lambda x: isinstance(x, optax.MaskedNode) or x is None
     leaves = [x for x in jax.tree.leaves(grads, is_leaf=_is_leaf) if not _is_leaf(x)]
 
     if not leaves:
@@ -149,7 +147,7 @@ def _compute_global_rms_scale(
 
 
 def _first_non_aux_dtype(leaves: list[Any]) -> jnp.dtype:
-    _is_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+    _is_leaf = lambda x: isinstance(x, optax.MaskedNode) or x is None
     for leaf in leaves:
         if not _is_leaf(leaf):
             return leaf.dtype
@@ -251,6 +249,32 @@ def _norm_lower_bound_spd(
     normalizing_factor = jnp.max(jnp.real(jnp.diag(A))) + smallest_normal
     A = A / normalizing_factor
 
+    return normalizing_factor * _subspace_norm_lower_bound(
+        A, key, k, half_iters, smallest_normal
+    )
+
+
+def _norm_lower_bound_skh(
+    A: jax.Array, key: jax.Array, k: int = 32, half_iters: int = 2
+) -> jax.Array:
+    """Returns a cheap lower bound for spectral norm of Skew-Hermitian matrix A."""
+    smallest_normal = jnp.finfo(A.dtype).smallest_normal
+    normalizing_factor = jnp.max(jnp.abs(A)) + smallest_normal
+    A = A / normalizing_factor
+
+    return normalizing_factor * _subspace_norm_lower_bound(
+        A, key, k, half_iters, smallest_normal
+    )
+
+
+def _subspace_norm_lower_bound(
+    A: jax.Array,
+    key: jax.Array,
+    k: int,
+    half_iters: int,
+    smallest_normal: jax.typing.ArrayLike,
+) -> jax.Array:
+    """Estimate the spectral norm of a normalized matrix by seeded iteration."""
     # Heuristic initialization: pick row with max norm
     row_norms = jnp.linalg.norm(A, axis=1)
     j = jnp.argmax(row_norms)
@@ -269,35 +293,7 @@ def _norm_lower_bound_spd(
 
     V, _ = jax.lax.scan(iteration_body, V, None, length=half_iters)
 
-    return normalizing_factor * jnp.max(jnp.linalg.norm(V, axis=1))
-
-
-def _norm_lower_bound_skh(
-    A: jax.Array, key: jax.Array, k: int = 32, half_iters: int = 2
-) -> jax.Array:
-    """Returns a cheap lower bound for spectral norm of Skew-Hermitian matrix A."""
-    smallest_normal = jnp.finfo(A.dtype).smallest_normal
-    normalizing_factor = jnp.max(jnp.abs(A)) + smallest_normal
-    A = A / normalizing_factor
-
-    row_norms = jnp.linalg.norm(A, axis=1)
-    j = jnp.argmax(row_norms)
-    Aj = A[j]
-
-    V = jax.random.normal(key, shape=(k, A.shape[1]), dtype=A.dtype)
-
-    dots = jnp.sum(Aj * jnp.conj(V), axis=1, keepdims=True)
-    V = Aj + jnp.sign(jnp.real(dots)) * V
-
-    def iteration_body(V, _):
-        V = V @ A
-        V = V / (jnp.linalg.norm(V, axis=1, keepdims=True) + smallest_normal)
-        V = V @ A
-        return V, None
-
-    V, _ = jax.lax.scan(iteration_body, V, None, length=half_iters)
-
-    return normalizing_factor * jnp.max(jnp.linalg.norm(V, axis=1))
+    return jnp.max(jnp.linalg.norm(V, axis=1))
 
 
 def _procrustes_step2(
@@ -748,7 +744,7 @@ def _balance_Q(Q: list[jax.Array], axis_name: str | None = None) -> list[jax.Arr
 
 def scale_by_kron(
     b1: float = 0.9,
-    preconditioner_update_probability: base.ScalarOrSchedule = (
+    preconditioner_update_probability: optax.ScalarOrSchedule = (
         precond_update_prob_schedule()
     ),
     max_size_triangular: int = 8192,
@@ -763,7 +759,7 @@ def scale_by_kron(
     precond_dtype: jax.typing.DTypeLike | None = None,
     precond_update_precision: str | None = "tensorfloat32",
     precond_grads_precision: str | None = None,
-    scanned_layers: base.Params | None = None,
+    scanned_layers: optax.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
     preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
@@ -778,12 +774,12 @@ def scale_by_kron(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     axis_name: str | None = None,
     verbose: bool = False,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Implements PSGD Kron (Preconditioned SGD with Kronecker factorization).
 
     Args:
@@ -907,7 +903,7 @@ def scale_by_kron(
 
     def init_fn(params):
         state_key = _fresh_prng_key(key)
-        _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+        _is_psgd_leaf = lambda x: isinstance(x, optax.MaskedNode) or x is None
 
         scanned_layers_ = scanned_layers
         if scanned_layers is None:
@@ -1013,14 +1009,14 @@ def scale_by_kron(
             def _init_s(x):
                 if x is None:
                     return None
-                if isinstance(x, _masking.MaskedNode):
-                    return _masking.MaskedNode()
+                if isinstance(x, optax.MaskedNode):
+                    return optax.MaskedNode()
                 return jnp.array(0.5, dtype=jnp.float32)
 
             magma_s = jax.tree.map(
                 _init_s,
                 params,
-                is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+                is_leaf=lambda x: isinstance(x, optax.MaskedNode) or x is None,
             )
         else:
             magma_s = ()
@@ -1038,7 +1034,7 @@ def scale_by_kron(
     def update_fn(updates, state, params=None):
         raw_gradients = updates
 
-        count_inc = cast(jax.Array, safe_int32_increment(state.count))
+        count_inc = cast(jax.Array, optax.safe_int32_increment(state.count))
 
         if use_magma:
             key, key_next, magma_key = jax.random.split(state.key, 3)
@@ -1088,14 +1084,14 @@ def scale_by_kron(
                 mu_to_save = otu.tree_cast(mu_f32, mu_dtype)
         else:
             # Defensive fallback: use raw grads as surrogate first moment
-            _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+            _is_psgd_leaf = lambda x: isinstance(x, optax.MaskedNode) or x is None
             mu_f32 = jax.tree.map(
                 lambda g: g.astype(jnp.float32) if not _is_psgd_leaf(g) else g,
                 updates,
                 is_leaf=_is_psgd_leaf,
             )
 
-        _is_psgd_leaf = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+        _is_psgd_leaf = lambda x: isinstance(x, optax.MaskedNode) or x is None
 
         updates_flat, grads_structure = jax.tree.flatten(updates, is_leaf=_is_psgd_leaf)
         momentum_updates_flat = grads_structure.flatten_up_to(momentum_updates)
@@ -1336,10 +1332,8 @@ def scale_by_kron(
             Ls_flat,
         )
 
-        use_new_Q = jnp.logical_and(do_update, update_preconditioner_first)
-        Qs_for_grad = jax.tree.map(
-            lambda n, o: jax.lax.select(use_new_Q, n, o), Qs_next, Qs_flat
-        )
+        # The conditional already returns Qs_flat when no update is performed.
+        Qs_for_grad = Qs_next if update_preconditioner_first else Qs_flat
 
         with jax.default_matmul_precision(precond_grads_precision):
 
@@ -1408,7 +1402,7 @@ def scale_by_kron(
             )
 
         if _has_nonzero_or_scheduled(weight_decay):
-            params = cast(base.Params, params)
+            params = cast(optax.Params, params)
             wd_step = _resolve_scalar(weight_decay, state.count)
             updates = _apply_weight_decay_tree(
                 updates,
@@ -1466,15 +1460,15 @@ def scale_by_kron(
 
         return final_updates, new_state
 
-    return base.GradientTransformationExtraArgs(init_fn, update_fn)
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
 def kron(
-    learning_rate: base.ScalarOrSchedule = 0.001,
+    learning_rate: optax.ScalarOrSchedule = 0.001,
     b1: float = 0.9,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
-    preconditioner_update_probability: base.ScalarOrSchedule = (
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
+    preconditioner_update_probability: optax.ScalarOrSchedule = (
         precond_update_prob_schedule()
     ),
     max_size_triangular: int = 8192,
@@ -1489,7 +1483,7 @@ def kron(
     precond_dtype: str | jnp.dtype | None = None,
     precond_update_precision: str | None = "tensorfloat32",
     precond_grads_precision: str | None = None,
-    scanned_layers: base.Params | None = None,
+    scanned_layers: optax.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
     preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
@@ -1507,7 +1501,7 @@ def kron(
     axis_name: str | None = None,
     verbose: bool = False,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Implements PSGD Kron from https://github.com/lixilinx/psgd_torch.
 
     See `scale_by_kron` for detailed argument descriptions.
@@ -1561,7 +1555,7 @@ def kron(
     ]
 
     if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
-        optimizer.append(transform.add_decayed_weights(weight_decay, weight_decay_mask))
+        optimizer.append(optax.add_decayed_weights(weight_decay, weight_decay_mask))
 
-    optimizer.append(transform.scale_by_learning_rate(learning_rate))
-    return chain(*optimizer)
+    optimizer.append(optax.scale_by_learning_rate(learning_rate))
+    return optax.chain(*optimizer)

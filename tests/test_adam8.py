@@ -1,6 +1,10 @@
+import hashlib
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
+import pytest
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.adam8 import (
@@ -8,11 +12,26 @@ from rollfast.optim.adam8 import (
     DYNAMIC_UNSIGNED_CODEBOOK_ID,
     QuantizedBlocks,
     SYMMETRIC_INT8_CODEBOOK_ID,
+    _dynamic_codebook_values,
     adamw8,
     dequantize_blocks,
     quantize_blocks,
     scale_by_adam8,
 )
+
+
+@pytest.mark.parametrize(
+    ("signed", "digest"),
+    [
+        (False, "02a9b523750e21348029626da435f2adadb851b687d86349cd20752f9255de26"),
+        (True, "035c4114538df2a03bbcb4d8a39b9325d26d84a00cf6cf29018d1a6608ab14c4"),
+    ],
+)
+def test_dynamic_v1_codebook_values_are_checkpoint_stable(signed, digest):
+    # Stored indices and v1 codebook IDs must continue decoding to these values.
+    values = np.asarray(_dynamic_codebook_values(signed=signed), dtype="<f4")
+    assert values.shape == (256,)
+    assert hashlib.sha256(values.tobytes()).hexdigest() == digest
 
 
 def test_legacy_symmetric_int8_quantize_dequantize_error_is_bounded_by_half_scale():

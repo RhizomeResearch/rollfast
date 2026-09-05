@@ -26,12 +26,7 @@ from rollfast.schedules.schedulefree import (
 from rollfast.utils import _fresh_prng_key
 
 from ._protocols import FineTunePlanProtocol
-from .averaging import (
-    default_eval_view,
-    eval_views,
-    make_averaging_eval_fn,
-    wrap_with_averaging,
-)
+from .averaging import _build_averaging
 from .config import (
     AccumulationConfig,
     APOLLOConfig,
@@ -171,7 +166,7 @@ def compile_optimizer(
         precision=precision,
         state_quantization=state_quantization,
     )
-    tx = wrap_with_averaging(
+    tx, eval_fn, views, default_view = _build_averaging(
         tx,
         ema=ema,
         swa=swa,
@@ -179,9 +174,6 @@ def compile_optimizer(
         labels=normalized.labels,
         groups=compiled_groups,
     )
-    eval_fn = make_averaging_eval_fn(ema=ema, swa=swa)
-    views = eval_views(ema=ema, swa=swa)
-    default_view = default_eval_view(ema=ema, swa=swa)
     report = _make_report(
         normalized.fingerprint,
         normalized.logical_id_table_hash,
@@ -275,6 +267,37 @@ def _apply_gradient_policy(
     raise ValueError(
         f"unknown nonfinite gradient policy: {gradient_policy.nonfinite!r}."
     )
+
+
+def _chain_with_clipping(
+    tx: optax.GradientTransformation,
+    gradient_policy: GradientPolicy,
+) -> optax.GradientTransformation:
+    parts = []
+    if gradient_policy.clip_global_norm is not None:
+        parts.append(_clip_by_policy(gradient_policy))
+    parts.append(tx)
+    # Keep the chain even without clipping: its tuple is part of checkpoint state.
+    return optax.chain(*parts)
+
+
+def _with_guard_and_accumulation(
+    tx: optax.GradientTransformation,
+    gradient_policy: GradientPolicy,
+    accumulation: AccumulationConfig,
+) -> optax.GradientTransformation:
+    tx = _apply_gradient_policy(tx, gradient_policy)
+    if accumulation.steps > 1:
+        return cast(
+            optax.GradientTransformation,
+            optax.MultiSteps(
+                tx,
+                every_k_schedule=accumulation.steps,
+                use_grad_mean=_multisteps_use_grad_mean(accumulation),
+                accumulator_dtype=accumulation.accumulate_dtype,
+            ),
+        )
+    return tx
 
 
 def _schedule_config(
@@ -422,7 +445,7 @@ def galore_adamw_from_plan(
         precision=precision,
         galore=galore,
     )
-    tx = wrap_with_averaging(
+    tx, eval_fn, views, default_view = _build_averaging(
         tx,
         ema=ema,
         swa=swa,
@@ -430,9 +453,6 @@ def galore_adamw_from_plan(
         labels=normalized.labels,
         groups=compiled_groups,
     )
-    eval_fn = make_averaging_eval_fn(ema=ema, swa=swa)
-    views = eval_views(ema=ema, swa=swa)
-    default_view = default_eval_view(ema=ema, swa=swa)
     report = _make_report(
         normalized.fingerprint,
         normalized.logical_id_table_hash,
@@ -557,7 +577,7 @@ def apollo_adamw_from_plan(
         precision=precision,
         apollo=apollo,
     )
-    tx = wrap_with_averaging(
+    tx, eval_fn, views, default_view = _build_averaging(
         tx,
         ema=ema,
         swa=swa,
@@ -565,9 +585,6 @@ def apollo_adamw_from_plan(
         labels=normalized.labels,
         groups=compiled_groups,
     )
-    eval_fn = make_averaging_eval_fn(ema=ema, swa=swa)
-    views = eval_views(ema=ema, swa=swa)
-    default_view = default_eval_view(ema=ema, swa=swa)
     report = _make_report(
         normalized.fingerprint,
         normalized.logical_id_table_hash,
@@ -717,24 +734,15 @@ def schedule_free_adam_from_plan(
         polyak_f_star=polyak_f_star,
         polyak_axis_name=polyak_axis_name,
     )
-    tx = wrap_with_averaging(
+    tx, eval_fn, views, default_view = _build_averaging(
         tx,
         ema=ema,
         swa=swa,
         total_steps=schedule_config.total_steps,
         labels=normalized.labels,
         groups=compiled_groups,
-        source_eval_fn=_schedule_free_eval_params,
-    )
-    eval_fn = make_averaging_eval_fn(
-        ema=ema,
-        swa=swa,
         inner_eval_fn=_schedule_free_eval_params,
-    )
-    views = eval_views(ema=ema, swa=swa, inner_views=("optimizer", "schedule_free"))
-    default_view = default_eval_view(
-        ema=ema,
-        swa=swa,
+        inner_views=("optimizer", "schedule_free"),
         inner_default="schedule_free",
     )
     report = _make_report(
@@ -1094,7 +1102,7 @@ def _hybrid_optimizer_from_plan(
         key=key,
         family_kwargs=family_kwargs,
     )
-    tx = wrap_with_averaging(
+    tx, eval_fn, views, default_view = _build_averaging(
         tx,
         ema=ema,
         swa=swa,
@@ -1102,9 +1110,6 @@ def _hybrid_optimizer_from_plan(
         labels=normalized.labels,
         groups=compiled_groups,
     )
-    eval_fn = make_averaging_eval_fn(ema=ema, swa=swa)
-    views = eval_views(ema=ema, swa=swa)
-    default_view = default_eval_view(ema=ema, swa=swa)
     report = _make_report(
         normalized.fingerprint,
         normalized.logical_id_table_hash,
@@ -1217,20 +1222,8 @@ def _build_grouped_hybrid_transform(
             family_kwargs=family_kwargs,
         )
 
-    chain_parts: list[optax.GradientTransformation] = []
-    if gradient_policy.clip_global_norm is not None:
-        chain_parts.append(_clip_by_policy(gradient_policy))
-    chain_parts.append(_multi_transform(transforms, labels))
-    tx = optax.chain(*chain_parts)
-    tx = _apply_gradient_policy(tx, gradient_policy)
-    if accumulation.steps > 1:
-        tx = optax.MultiSteps(
-            tx,
-            every_k_schedule=accumulation.steps,
-            use_grad_mean=_multisteps_use_grad_mean(accumulation),
-            accumulator_dtype=accumulation.accumulate_dtype,
-        )
-    return cast(optax.GradientTransformation, tx)
+    tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
 
 
 def _hybrid_group_transform(
@@ -1370,11 +1363,9 @@ def _build_grouped_schedule_free_transform(
             key=group_key,
         )
 
-    base_parts: list[optax.GradientTransformation] = []
-    if gradient_policy.clip_global_norm is not None:
-        base_parts.append(_clip_by_policy(gradient_policy))
-    base_parts.append(_multi_transform(transforms, labels))
-    base_optimizer = optax.chain(*base_parts)
+    base_optimizer = _chain_with_clipping(
+        _multi_transform(transforms, labels), gradient_policy
+    )
     adamc_weight_decay = (
         _single_adamc_weight_decay(groups) if use_adamc_enabled else 0.0
     )
@@ -1408,15 +1399,7 @@ def _build_grouped_schedule_free_transform(
         adamc_weight_decay=adamc_weight_decay,
         adamc_weight_decay_mask=decay_mask,
     )
-    tx = _apply_gradient_policy(tx, gradient_policy)
-    if accumulation.steps > 1:
-        tx = optax.MultiSteps(
-            tx,
-            every_k_schedule=accumulation.steps,
-            use_grad_mean=_multisteps_use_grad_mean(accumulation),
-            accumulator_dtype=accumulation.accumulate_dtype,
-        )
-    return cast(optax.GradientTransformation, tx)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
 
 
 def _build_grouped_galore_transform(
@@ -1475,20 +1458,8 @@ def _build_grouped_galore_transform(
                 f"Unsupported optimizer for GaLore builder: {group.optimizer!r}."
             )
 
-    chain_parts: list[optax.GradientTransformation] = []
-    if gradient_policy.clip_global_norm is not None:
-        chain_parts.append(_clip_by_policy(gradient_policy))
-    chain_parts.append(_multi_transform(transforms, labels))
-    tx = optax.chain(*chain_parts)
-    tx = _apply_gradient_policy(tx, gradient_policy)
-    if accumulation.steps > 1:
-        tx = optax.MultiSteps(
-            tx,
-            every_k_schedule=accumulation.steps,
-            use_grad_mean=_multisteps_use_grad_mean(accumulation),
-            accumulator_dtype=accumulation.accumulate_dtype,
-        )
-    return cast(optax.GradientTransformation, tx)
+    tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
 
 
 def _build_factorized_adamw_transform(
@@ -1536,13 +1507,13 @@ def _build_factorized_adamw_transform(
             state.inner_state,
             params,
         )
+        learning_rates = {label: fn(state.count) for label, fn in lr_schedules.items()}
         scaled = jax.tree.map(
             lambda update, param, label: _scale_factorized_adamw_leaf(
                 update,
                 param,
                 label,
-                count=state.count,
-                lr_schedules=lr_schedules,
+                learning_rates=learning_rates,
                 weight_decays=weight_decays,
             ),
             adam_updates,
@@ -1556,20 +1527,8 @@ def _build_factorized_adamw_transform(
         )
 
     tx = optax.GradientTransformation(init_fn, update_fn)
-    chain_parts: list[optax.GradientTransformation] = []
-    if gradient_policy.clip_global_norm is not None:
-        chain_parts.append(_clip_by_policy(gradient_policy))
-    chain_parts.append(tx)
-    tx = optax.chain(*chain_parts)
-    tx = _apply_gradient_policy(tx, gradient_policy)
-    if accumulation.steps > 1:
-        tx = optax.MultiSteps(
-            tx,
-            every_k_schedule=accumulation.steps,
-            use_grad_mean=_multisteps_use_grad_mean(accumulation),
-            accumulator_dtype=accumulation.accumulate_dtype,
-        )
-    return cast(optax.GradientTransformation, tx)
+    tx = _chain_with_clipping(tx, gradient_policy)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
 
 
 def _scale_factorized_adamw_leaf(
@@ -1577,8 +1536,7 @@ def _scale_factorized_adamw_leaf(
     param: Any,
     label: Any,
     *,
-    count: jax.Array,
-    lr_schedules: Mapping[str, Any],
+    learning_rates: Mapping[str, Any],
     weight_decays: Mapping[str, float],
 ) -> Any:
     if update is None:
@@ -1590,7 +1548,7 @@ def _scale_factorized_adamw_leaf(
     weight_decay = weight_decays[label]
     if weight_decay != 0.0 and param is not None:
         scaled = scaled + weight_decay * param.astype(update.dtype)
-    return (-lr_schedules[label](count) * scaled).astype(update.dtype)
+    return (-learning_rates[label] * scaled).astype(update.dtype)
 
 
 def _build_grouped_transform(
@@ -1664,20 +1622,8 @@ def _build_grouped_transform(
                 axis_name=_optimizer_axis_name(gradient_policy.axis_name),
             )
 
-    chain_parts: list[optax.GradientTransformation] = []
-    if gradient_policy.clip_global_norm is not None:
-        chain_parts.append(_clip_by_policy(gradient_policy))
-    chain_parts.append(_multi_transform(transforms, labels))
-    tx = optax.chain(*chain_parts)
-    tx = _apply_gradient_policy(tx, gradient_policy)
-    if accumulation.steps > 1:
-        tx = optax.MultiSteps(
-            tx,
-            every_k_schedule=accumulation.steps,
-            use_grad_mean=_multisteps_use_grad_mean(accumulation),
-            accumulator_dtype=accumulation.accumulate_dtype,
-        )
-    return cast(optax.GradientTransformation, tx)
+    tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
 
 
 def _build_grouped_apollo_transform(
@@ -1737,20 +1683,8 @@ def _build_grouped_apollo_transform(
                 f"Unsupported optimizer for APOLLO builder: {group.optimizer!r}."
             )
 
-    chain_parts: list[optax.GradientTransformation] = []
-    if gradient_policy.clip_global_norm is not None:
-        chain_parts.append(_clip_by_policy(gradient_policy))
-    chain_parts.append(_multi_transform(transforms, labels))
-    tx = optax.chain(*chain_parts)
-    tx = _apply_gradient_policy(tx, gradient_policy)
-    if accumulation.steps > 1:
-        tx = optax.MultiSteps(
-            tx,
-            every_k_schedule=accumulation.steps,
-            use_grad_mean=_multisteps_use_grad_mean(accumulation),
-            accumulator_dtype=accumulation.accumulate_dtype,
-        )
-    return cast(optax.GradientTransformation, tx)
+    tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
 
 
 def _schedule_free_eval_params(

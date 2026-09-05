@@ -8,8 +8,7 @@ from typing import Any, NamedTuple, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base
-from optax.transforms import _masking
+import optax
 
 
 class MatrixDimensionNumbers(NamedTuple):
@@ -24,29 +23,29 @@ class MatrixDimensionNumbers(NamedTuple):
     output_axis: Sequence[int] | int = 1
 
 
-DimNumsTree = base.Params
+DimNumsTree = optax.Params
 WeightDimNumOrFn = (
-    MatrixDimensionNumbers | DimNumsTree | Callable[[base.Params], DimNumsTree]
+    MatrixDimensionNumbers | DimNumsTree | Callable[[optax.Params], DimNumsTree]
 )
 # A bare MatrixDimensionNumbers is intentionally single-leaf only. It is useful
 # for direct transforms over one array, but it is not broadcast over PyTrees:
 # structured params must use a matching spec tree or callable so routing remains
 # explicit for biases, embeddings, convolution kernels, and fallback leaves.
-MaskOrFn: TypeAlias = Any | Callable[[base.Params], Any] | None
+MaskOrFn: TypeAlias = Any | Callable[[optax.Params], Any] | None
 ReshapeFn = Callable[[jax.Array], jax.Array]
 
 
 class _MatrixPartitionFns(NamedTuple):
     """Resolved matrix optimizer routing helpers for one branch label."""
 
-    resolve: Callable[[base.Params], base.Params]
-    labels: Callable[[base.Params], base.Params]
-    masked_specs: Callable[[base.Params], base.Params]
-    default_mask: Callable[[base.Params], base.Params]
+    resolve: Callable[[optax.Params], optax.Params]
+    labels: Callable[[optax.Params], optax.Params]
+    masked_specs: Callable[[optax.Params], optax.Params]
+    default_mask: Callable[[optax.Params], optax.Params]
 
 
 def _is_dimension_numbers_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, (MatrixDimensionNumbers, _masking.MaskedNode))
+    return x is None or isinstance(x, (MatrixDimensionNumbers, optax.MaskedNode))
 
 
 def _is_array_like_leaf(x: Any) -> bool:
@@ -54,7 +53,7 @@ def _is_array_like_leaf(x: Any) -> bool:
 
 
 def _has_matrix_spec(dim_nums: Any) -> bool:
-    return dim_nums is not None and not isinstance(dim_nums, _masking.MaskedNode)
+    return dim_nums is not None and not isinstance(dim_nums, optax.MaskedNode)
 
 
 def _is_real_array(x: Any) -> bool:
@@ -69,9 +68,9 @@ def _validate_matrix_operand(
     transform_name: str,
 ) -> None:
     """Reject leaves that a direct matrix transform cannot safely handle."""
-    if x is None or isinstance(x, _masking.MaskedNode):
+    if x is None or isinstance(x, optax.MaskedNode):
         return
-    if dim_nums is None or isinstance(dim_nums, _masking.MaskedNode):
+    if dim_nums is None or isinstance(dim_nums, optax.MaskedNode):
         raise ValueError(
             f"`{transform_name}` only supports leaves with matrix dimension specs. "
             "Use the public wrapper for Adam fallback leaves, or pass a "
@@ -86,13 +85,13 @@ def _validate_matrix_operand(
 
 
 def _get_dimension_numbers(
-    weight_dimension_numbers: WeightDimNumOrFn | None, params: base.Params
-) -> base.Params:
+    weight_dimension_numbers: WeightDimNumOrFn | None, params: optax.Params
+) -> optax.Params:
     """Resolve a dimension-number argument into a PyTree aligned with params."""
     if weight_dimension_numbers is None:
 
         def _get_default_spec(x):
-            if isinstance(x, _masking.MaskedNode) or x is None:
+            if isinstance(x, optax.MaskedNode) or x is None:
                 return None
             return (
                 MatrixDimensionNumbers() if hasattr(x, "ndim") and x.ndim == 2 else None
@@ -101,12 +100,12 @@ def _get_dimension_numbers(
         return jax.tree.map(
             _get_default_spec,
             params,
-            is_leaf=lambda x: isinstance(x, _masking.MaskedNode) or x is None,
+            is_leaf=lambda x: isinstance(x, optax.MaskedNode) or x is None,
         )
 
     if callable(weight_dimension_numbers):
         dim_num_fn = cast(
-            Callable[[base.Params], DimNumsTree], weight_dimension_numbers
+            Callable[[optax.Params], DimNumsTree], weight_dimension_numbers
         )
         return dim_num_fn(params)
 
@@ -125,10 +124,10 @@ def _get_dimension_numbers(
 def _resolve_update_dimension_numbers(
     weight_dimension_numbers: WeightDimNumOrFn | None,
     *,
-    params: base.Params | None,
-    updates: base.Updates,
+    params: optax.Params | None,
+    updates: optax.Updates,
     transform_name: str,
-) -> base.Params:
+) -> optax.Params:
     """Resolve update-time dimension specs with consistent params requirements."""
     if params is None:
         if callable(weight_dimension_numbers):
@@ -140,21 +139,21 @@ def _resolve_update_dimension_numbers(
     return _get_dimension_numbers(weight_dimension_numbers, params)
 
 
-def _mask_dimension_numbers(dim_nums_tree: base.Params) -> base.Params:
+def _mask_dimension_numbers(dim_nums_tree: optax.Params) -> optax.Params:
     """Replace ``None`` entries with ``MaskedNode`` for partition compatibility."""
     return jax.tree.map(
-        lambda d: d if d is not None else _masking.MaskedNode(),
+        lambda d: d if d is not None else optax.MaskedNode(),
         dim_nums_tree,
         is_leaf=_is_dimension_numbers_leaf,
     )
 
 
 def _make_matrix_labels(
-    dim_nums_tree: base.Params,
-    params: base.Params,
+    dim_nums_tree: optax.Params,
+    params: optax.Params,
     matrix_label: str,
     fallback_label: str = "adam",
-) -> base.Params:
+) -> optax.Params:
     """Create optimizer branch labels from a resolved dimension-number tree."""
     return jax.tree.map(
         lambda d, p: (
@@ -173,14 +172,14 @@ def _make_matrix_labels(
 
 
 def _make_dimension_numbers_mask(
-    dim_nums_tree: base.Params,
-    params: base.Params,
-) -> base.Params:
+    dim_nums_tree: optax.Params,
+    params: optax.Params,
+) -> optax.Params:
     """Create a bool mask selecting leaves with real matrix dimension specs."""
     return jax.tree.map(
         lambda d, p: (
             False
-            if p is None or isinstance(p, _masking.MaskedNode)
+            if p is None or isinstance(p, optax.MaskedNode)
             else _has_matrix_spec(d) and _is_real_array(p)
         ),
         dim_nums_tree,
@@ -200,10 +199,10 @@ def _make_matrix_partition_fns(
     to the matrix branch; all other leaves route to the fallback branch.
     """
 
-    def resolve(params: base.Params) -> base.Params:
+    def resolve(params: optax.Params) -> optax.Params:
         return _get_dimension_numbers(weight_dimension_numbers, params)
 
-    def labels(params: base.Params) -> base.Params:
+    def labels(params: optax.Params) -> optax.Params:
         return _make_matrix_labels(
             resolve(params),
             params,
@@ -211,10 +210,10 @@ def _make_matrix_partition_fns(
             fallback_label=fallback_label,
         )
 
-    def masked_specs(params: base.Params) -> base.Params:
+    def masked_specs(params: optax.Params) -> optax.Params:
         return _mask_dimension_numbers(resolve(params))
 
-    def default_mask(params: base.Params) -> base.Params:
+    def default_mask(params: optax.Params) -> optax.Params:
         return _make_dimension_numbers_mask(resolve(params), params)
 
     return _MatrixPartitionFns(

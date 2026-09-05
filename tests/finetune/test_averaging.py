@@ -5,15 +5,69 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_plan
+from .helpers import ones_like_trainable, tiny_plan
 
 
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
+@pytest.mark.parametrize(
+    "family",
+    [
+        "adamw",
+        "adamw8",
+        "galore_adamw",
+        "apollo_adamw",
+        "schedule_free_adam",
+        "hybrid_aurora_adam",
+        "hybrid_prism_adam",
+        "hybrid_kron_adam",
+        "muon_adam",
+    ],
+)
+@pytest.mark.parametrize("clip", [None, 0.5])
+def test_compilers_preserve_accumulation_guards_and_eval_views(family, clip):
+    plan = tiny_plan()
+    kwargs = {}
+    if family == "galore_adamw":
+        kwargs["galore"] = rfft.GaLoreConfig(rank=1, min_matrix_size=0)
+    if family == "apollo_adamw":
+        kwargs["apollo"] = rfft.APOLLOConfig(rank=1)
+    bundle = getattr(rfft, f"{family}_from_plan")(
+        plan,
+        total_steps=8,
+        clip_global_norm=clip,
+        accumulation_steps=2,
+        ema=rfft.EMAConfig(enabled=True, decay=0.5),
+        swa=rfft.SWAConfig(enabled=True, start_step=1),
+        **kwargs,
     )
+    params = plan.trainable
+    state = bundle.init(params)
+    update = jax.jit(bundle.update)
+    grads = ones_like_trainable(params)
+    expected_count = 0
+    for _ in range(2):
+        for microstep in range(2):
+            updates, state = update(grads, state, params)
+            params = optax.apply_updates(params, updates)
+            if microstep == 1:
+                expected_count += 1
+            assert state.ema_count == expected_count
+            assert state.swa_count == expected_count
+    assert bundle.default_eval_view == "ema"
+    assert bundle.eval_views[-2:] == ("ema", "swa")
+    for view in bundle.eval_views:
+        assert all(
+            jnp.all(jnp.isfinite(a))
+            for a in jax.tree.leaves(bundle.eval_params(params, state, view=view))
+        )
+    before = params
+    nonfinite_grads = jax.tree.map(lambda a: a * jnp.inf, grads)
+    for _ in range(2):
+        updates, state = update(nonfinite_grads, state, params)
+        params = optax.apply_updates(params, updates)
+    for actual, previous in zip(
+        jax.tree.leaves(params), jax.tree.leaves(before), strict=True
+    ):
+        assert jnp.array_equal(actual, previous)
 
 
 def test_adamw_eval_params_identity_without_averaging():
@@ -41,7 +95,7 @@ def test_ema_view_updates_after_optimizer_step():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -66,7 +120,7 @@ def test_swa_view_starts_at_resolved_fraction():
     )
     state = bundle.init(plan.trainable)
     params = plan.trainable
-    grads = _ones_like_trainable(params)
+    grads = ones_like_trainable(params)
 
     updates, state = bundle.update(grads, state, params)
     params = optax.apply_updates(params, updates)
@@ -98,7 +152,7 @@ def test_averaging_does_not_advance_on_withheld_accumulation_microstep():
         ema=rfft.EMAConfig(enabled=True, decay=0.5),
     )
     state = bundle.init(plan.trainable)
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
 
     updates, state = bundle.update(grads, state, plan.trainable)
     params = optax.apply_updates(plan.trainable, updates)
@@ -128,7 +182,7 @@ def test_schedule_free_keeps_named_eval_views_with_ema():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -160,7 +214,7 @@ def test_schedule_free_ema_defaults_to_schedule_free_eval_source():
     params = plan.trainable
     for _ in range(2):
         updates, state = bundle.update(
-            _ones_like_trainable(params),
+            ones_like_trainable(params),
             state,
             params,
         )
@@ -183,7 +237,7 @@ def test_schedule_free_ema_can_use_optimizer_source_explicitly():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -218,7 +272,7 @@ def test_ema_tag_filters_average_included_groups_only():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )

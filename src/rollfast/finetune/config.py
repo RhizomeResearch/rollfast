@@ -11,12 +11,14 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from rollfast.optim.adam8 import (
+    DYNAMIC_SIGNED_CODEBOOK_ID as ADAM8_FIRST_MOMENT_CODEBOOK_ID,
+    DYNAMIC_UNSIGNED_CODEBOOK_ID as ADAM8_SECOND_MOMENT_CODEBOOK_ID,
+)
 from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
 
 SCHEMA_VERSION = 1
-ADAM8_FIRST_MOMENT_CODEBOOK_ID = "bitsandbytes.dynamic.signed.8bit.v1"
-ADAM8_SECOND_MOMENT_CODEBOOK_ID = "bitsandbytes.dynamic.unsigned.8bit.v1"
 
 ScheduleKind = Literal[
     "constant",

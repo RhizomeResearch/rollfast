@@ -150,12 +150,3 @@ def test_config_validation_rejects_invalid_values():
             partition_axis_names=("model",),
             replicated_axis_names=("model",),
         )
-
-
-def test_public_import_surface_contains_core_builders():
-    assert hasattr(rfft, "FineTunePlanProtocol")
-    assert hasattr(rfft, "compile_optimizer")
-    assert hasattr(rfft, "adamw_from_plan")
-    assert hasattr(rfft, "make_update_step")
-    assert hasattr(rfft, "make_sam_step")
-    assert hasattr(rfft, "ASAMConfig")

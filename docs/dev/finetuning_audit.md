@@ -37,17 +37,17 @@ optimizer defaults:
 
 ## Private Optax Internals
 
-Existing production modules still use private Optax internals:
+Production modules use public Optax types, transformation constructors,
+composition, counters, and `MaskedNode`. These are the same objects as the
+former private imports in the supported Optax 0.2.8 runtime.
 
-- `src/rollfast/optim/adam.py`: `optax._src.base`, `combine`, `numerics`,
-  `transform`, `utils`; `optax.transforms._masking`.
-- `src/rollfast/optim/psgd.py`: `optax._src.base`, `numerics`, `transform`,
-  `combine`, `utils`; `optax.transforms._masking`.
-- `src/rollfast/optim/prism.py`, `aurora.py`, `hyperball.py`, `magma.py`,
-  and schedule wrappers also use selected private helpers.
+Two private helpers remain because Optax has no public equivalents:
 
-The new `rollfast.finetune` modules prefer public Optax entry points except
-where they delegate to existing Rollfast primitives.
+- `optax._src.numerics.abs_sq`, used for real and complex squared magnitudes.
+- `optax._src.utils.canonicalize_dtype`, used by optimizer dtype policies.
+
+The `rollfast.finetune` modules use public Optax entry points and delegate
+optimizer-specific behavior to Rollfast primitives.
 
 ## Fine-Tuning Compiler Baseline
 
@@ -64,7 +64,7 @@ Implemented:
 - LoRA+ `lora_B` LR ratio;
 - global-norm clipping with optional named-axis reduction;
 - Optax finite guard and `MultiSteps` accumulation;
-- EMA and SWA evaluation views that advance only on applied optimizer steps;
+- EMA and SWA evaluation views, with the accumulation caveat recorded below;
 - SAM/ASAM two-pass step helpers with exact microbatch accumulation;
 - AdaLoRA fixed-shape budget/rank-mask controller utilities with Equimo
   rank-pattern application;
@@ -82,3 +82,52 @@ Stable-release gates run the benchmark harnesses as CPU smoke tests. Target
 hardware, target Equimo models, real batch shapes, and production sharding must
 still be measured before making task-quality or accelerator-specific performance
 claims; they are not prerequisites for the CPU-validated API release.
+
+## Simplification audit (2026-09-05)
+
+Shared compiler helpers now own clipping, finite guards, accumulation, and
+averaging assembly. Diagnostics and migration share state traversal and path
+encoding; their classification policies remain separate. Loss-scaled master
+steps share the parameter/optimizer-state commit, while their callers retain
+model-state, RNG, and loss-scale ownership.
+
+GaLore and APOLLO each share moment updates and finalization between projected
+and full-state leaves. PRISM's private inverse-root iteration is specialized to
+the fourth root used by bidirectional PRISM. PSGD shares its seeded norm
+iteration while keeping the SPD and skew-Hermitian normalization distinct.
+Dynamic 8-bit codebooks retain their exact v1 values and identifiers.
+
+Against the untouched `2c50003d` baseline, 861 comparison records matched
+exactly: updates, full state trees, dtypes, counters, PRNG keys, compiler
+manifests, evaluation views, schedules, and codebooks. Representative lowered
+JAX programs for GaLore, APOLLO, PRISM, and both PSGD norm estimates also matched
+exactly on CPU. Public exports, state classes, checkpoint schemas, defaults,
+and dependency versions are unchanged.
+
+Two existing behavior gaps were reproduced in both versions with JAX 0.10.2
+and Optax 0.2.8 and left for separate fixes:
+
+- With `accumulation_steps=2` and EMA/SWA enabled, two finite microsteps followed
+  by two nonfinite microsteps leave parameters unchanged during the rejected
+  update, but advance both averaging counts from 1 to 2. `_update_applied`
+  observes the outer `MultiSteps.gradient_step` before the inner finite guard.
+  Averaging therefore includes a duplicate iterate on rejected accumulated
+  updates.
+- A Schedule-Free plan compiled with `key=jax.random.key(0)` fails on its first
+  update: the finite guard calls `astype` on a typed PRNG key and raises
+  `NotImplementedError`. Legacy `jax.random.PRNGKey(0)` works. The preservation
+comparisons use legacy keys for these compiler paths.
+
+Final validation on Python 3.12 / CPU:
+
+- `uv run --frozen --no-sync pytest -q --tb=short`: 692 passed, 2 skipped.
+- An isolated JAX 0.6.2 / Optax 0.2.8 / Equinox 0.13.6 environment ran the CI
+  minimum-version suite, excluding the optional Equimo integrations:
+  674 passed, 2 skipped. The base import also passed before installing Equinox.
+- `XLA_FLAGS=--xla_force_host_platform_device_count=4 uv run --frozen --no-sync
+  pytest tests/test_multidevice_cpu.py -q`: 2 passed.
+- Ruff lint, Ruff format checks, Ty, version consistency, and all six CI
+  example/benchmark smoke commands passed. Existing test functions were kept
+  unchanged; 45 additional parameterized cases cover the refactored contracts.
+
+GPU execution and accelerator throughput were not verified; no GPU was available.

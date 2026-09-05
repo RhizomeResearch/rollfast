@@ -9,7 +9,7 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_plan
+from .helpers import assert_rng_equal, assert_tree_allclose, tiny_plan
 
 
 def _bundle(plan, precision):
@@ -61,22 +61,6 @@ def _nonfinite_loss_with_aggregate_state(model, model_state, key):
 
 def _aggregate_updates(old_state, proposed_state):
     return {"updates": old_state["updates"] + proposed_state["updates"]}
-
-
-def _assert_tree_allclose(left, right):
-    for lhs, rhs in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True):
-        np.testing.assert_allclose(lhs, rhs)
-
-
-def _assert_rng_equal(left, right):
-    for name in (
-        "forward",
-        "sam",
-        "stochastic_rounding",
-        "quantization",
-        "controller",
-    ):
-        np.testing.assert_allclose(getattr(left, name), getattr(right, name))
 
 
 def test_stateful_step_commits_model_state_and_advances_rng_on_success():
@@ -145,10 +129,10 @@ def test_stateful_step_skips_state_and_rng_on_nonfinite_update():
     assert model_state["updates"] == 0
     assert info.proposed_model_state["updates"] == 1
     np.testing.assert_allclose(scale_state.loss_scale, 4.0)
-    _assert_tree_allclose(visible, plan.trainable)
-    _assert_tree_allclose(new_master, master)
-    _assert_tree_allclose(new_state, state)
-    _assert_rng_equal(rng_after, rng)
+    assert_tree_allclose(visible, plan.trainable)
+    assert_tree_allclose(new_master, master)
+    assert_tree_allclose(new_state, state)
+    assert_rng_equal(rng_after, rng)
 
 
 def test_stateful_step_rejects_aggregate_policy_without_hook():
@@ -326,10 +310,10 @@ def test_finetune_update_step_skips_success_counters_on_nonfinite_update():
     assert step_state.counters.average_step == 0
     assert step_state.counters.loss_scale_growth_step == 0
     np.testing.assert_allclose(step_state.loss_scale.loss_scale, 4.0)
-    _assert_tree_allclose(visible, plan.trainable)
-    _assert_tree_allclose(step_state.master_params, old_master)
-    _assert_tree_allclose(step_state.optimizer_state, old_optimizer_state)
-    _assert_rng_equal(step_state.rng, old_rng)
+    assert_tree_allclose(visible, plan.trainable)
+    assert_tree_allclose(step_state.master_params, old_master)
+    assert_tree_allclose(step_state.optimizer_state, old_optimizer_state)
+    assert_rng_equal(step_state.rng, old_rng)
 
 
 def test_finetune_update_step_rejects_internal_accumulation_until_stateful_path_exists():

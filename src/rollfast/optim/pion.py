@@ -26,8 +26,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, utils
-from optax.transforms import _masking
+import optax
+from optax._src import utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -55,10 +55,10 @@ class ScaleByPionState(NamedTuple):
     """State for Pion's Lie-algebra moment estimates."""
 
     count: jax.Array
-    m_in: base.Updates
-    v_in: base.Updates
-    m_out: base.Updates
-    v_out: base.Updates
+    m_in: optax.Updates
+    v_in: optax.Updates
+    m_out: optax.Updates
+    v_out: optax.Updates
     key: jax.Array | None
 
 
@@ -67,8 +67,8 @@ def _zeros_for_pion(
     dim_nums: MatrixDimensionNumbers | None,
     dtype: jax.typing.DTypeLike,
 ) -> tuple[Any, Any, Any, Any]:
-    if isinstance(param, _masking.MaskedNode):
-        node = _masking.MaskedNode()
+    if isinstance(param, optax.MaskedNode):
+        node = optax.MaskedNode()
         return node, node, node, node
     if param is None or dim_nums is None:
         return None, None, None, None
@@ -106,7 +106,7 @@ def _pion_matrix_update(
     m_out_prev: Any,
     v_out_prev: Any,
     dim_nums: MatrixDimensionNumbers | None,
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float,
     b2: float,
     rms_constant: float,
@@ -116,8 +116,8 @@ def _pion_matrix_update(
     precision: jax.lax.PrecisionLike,
     momentum_accumulator: MomentumAccumulator,
 ) -> tuple[Any, Any, Any, Any, Any]:
-    if isinstance(param, _masking.MaskedNode) or isinstance(grad, _masking.MaskedNode):
-        node = _masking.MaskedNode()
+    if isinstance(param, optax.MaskedNode) or isinstance(grad, optax.MaskedNode):
+        node = optax.MaskedNode()
         return node, node, node, node, node
     if grad is None or param is None or dim_nums is None:
         return grad, m_in_prev, v_in_prev, m_out_prev, v_out_prev
@@ -177,7 +177,7 @@ def _pion_matrix_update(
 
 
 def scale_by_pion(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.9,
     b2: float = 0.999,
     rms_constant: float = 1.0,
@@ -188,7 +188,7 @@ def scale_by_pion(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     r"""Pion's spectrum-preserving matrix update as an Optax transform.
 
     For a matrix parameter ``W`` and gradient ``G``, Pion forms skew-symmetric
@@ -229,15 +229,13 @@ def scale_by_pion(
         if params is None:
             raise ValueError("`params` must be provided to `scale_by_pion`.")
 
-        count_inc = numerics.safe_increment(state.count)
+        count_inc = optax.safe_increment(state.count)
         dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
         unsupported = jax.tree.leaves(
             jax.tree.map(
                 lambda p, d: (
-                    p is not None
-                    and not isinstance(p, _masking.MaskedNode)
-                    and d is None
+                    p is not None and not isinstance(p, optax.MaskedNode) and d is None
                 ),
                 params,
                 dim_nums,
@@ -306,11 +304,11 @@ def scale_by_pion(
             key=key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def pion(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.9,
     b2: float = 0.999,
     rms_constant: float = 1.0,
@@ -318,16 +316,16 @@ def pion(
     alternating: bool = True,
     mu_dtype: jax.typing.DTypeLike | None = None,
     momentum_accumulator: MomentumAccumulator = "ema",
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     pion_weight_dimension_numbers: WeightDimNumOrFn | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Pion optimizer with AdamW fallback for non-matrix parameters.
 
     Matrix leaves are optimized by Pion's orthogonal-equivalence update. Leaves
@@ -343,7 +341,7 @@ def pion(
 
     partition = _make_matrix_partition_fns(pion_weight_dimension_numbers, "pion")
 
-    return combine.partition(
+    return optax.partition(
         transforms={
             "pion": scale_by_pion(
                 learning_rate=learning_rate,

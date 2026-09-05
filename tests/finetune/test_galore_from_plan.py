@@ -10,15 +10,7 @@ import pytest
 import rollfast.finetune as rfft
 from rollfast.optim.galore import GaLoreLeafState, galore_adamw
 
-from .helpers import tiny_plan
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import ones_like_trainable, tiny_plan
 
 
 def _galore_leaf_states(state):
@@ -42,7 +34,7 @@ def test_galore_from_plan_updates_and_reports_projected_state():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -124,7 +116,7 @@ def test_galore_basis_refresh_canonicalizes_svd_signs():
         clip_global_norm=None,
     )
     state = bundle.init(plan.trainable)
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     _, state = bundle.update(grads, state, plan.trainable)
 
     for leaf in _galore_leaf_states(state):
@@ -150,7 +142,7 @@ def test_galore_transport_refresh_is_experimental_and_preserves_shapes():
         schedule="constant",
         clip_global_norm=None,
     )
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     state = bundle.init(plan.trainable)
     _, state = bundle.update(grads, state, plan.trainable)
     first_shapes = tuple(

@@ -1,9 +1,42 @@
+from typing import Any, NamedTuple
+
 import jax.numpy as jnp
 
 import rollfast.finetune as rfft
+from rollfast.optim.adam8 import quantize_blocks
 
-from .test_adamw8_from_plan import large_plan, leaf_estimation_plan
-from .helpers import tiny_plan
+from .helpers import large_plan, leaf_estimation_plan, tiny_plan
+
+
+def test_state_paths_keep_quantized_blocks_atomic_and_ignore_masked_nodes():
+    class State(NamedTuple):
+        mu: Any
+        count: Any
+
+    # Compatible masked nodes are identified by name in state inspection.
+    class MaskedNode:
+        pass
+
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=8)
+    blocks = quantize_blocks(
+        jnp.arange(4, dtype=jnp.float32),
+        block_size=4,
+        stochastic_rounding=False,
+    )
+    summary = rfft.optimizer_state_memory_summary(
+        bundle,
+        State({"head_decay": (blocks, None, MaskedNode())}, jnp.asarray(3, jnp.int32)),
+    )
+    assert [leaf.path for leaf in summary.leaves] == [
+        "attr:mu/key:head_decay/idx:0",
+        "attr:count",
+    ]
+    assert summary.leaves[0].storage == "blockwise_int8"
+    assert summary.by_group == {
+        "head_decay": blocks.values.nbytes + blocks.scales.nbytes
+    }
+    assert summary.total_bytes == sum(summary.by_category.values())
 
 
 def test_state_memory_summary_measures_adamw_state_categories():

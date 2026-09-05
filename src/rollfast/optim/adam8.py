@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 from typing import Any, Callable, Literal, NamedTuple, Optional, Union, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
-from optax.transforms import _masking
+import optax
+from optax._src import utils
 
 from rollfast.utils import (
+    _reject_complex_tree,
     _fresh_prng_key,
     _safe_bias_correction,
     zeros_like_preserving_sharding,
@@ -23,17 +25,6 @@ DYNAMIC_SIGNED_CODEBOOK_ID = "bitsandbytes.dynamic.signed.8bit.v1"
 DYNAMIC_UNSIGNED_CODEBOOK_ID = "bitsandbytes.dynamic.unsigned.8bit.v1"
 BlockLayout = Literal["shard_local", "logical_global"]
 CodebookQuantizer = Literal["dynamic_signed", "dynamic_unsigned", "symmetric_int8"]
-
-
-def _reject_complex_tree(tree: Any, family: str) -> None:
-    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
-        if hasattr(leaf, "dtype") and jnp.issubdtype(
-            jnp.dtype(leaf.dtype), jnp.complexfloating
-        ):
-            raise ValueError(
-                f"{family} does not support complex leaves; found one at "
-                f"{jax.tree_util.keystr(path)}."
-            )
 
 
 @jax.tree_util.register_pytree_node_class
@@ -116,8 +107,8 @@ class ScaleByAdam8State(NamedTuple):
     """State for Adam with quantized first and second moments."""
 
     count: jax.Array
-    mu: base.Updates
-    nu: base.Updates
+    mu: optax.Updates
+    nu: optax.Updates
     key: jax.Array
 
 
@@ -266,7 +257,7 @@ def scale_by_adam8(
     quantize: bool = True,
     nesterov: bool = False,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Rescale gradients by Adam while storing eligible moments as 8-bit blocks."""
 
     scale_dtype = cast(jax.typing.DTypeLike, utils.canonicalize_dtype(scale_dtype))
@@ -283,7 +274,7 @@ def scale_by_adam8(
 
     def init_fn(params):
         _reject_complex_tree(params, "AdamW8")
-        key_mu, key_nu, next_key = jax.random.split(_fresh_prng_key(key), 3)
+        next_key = jax.random.split(_fresh_prng_key(key), 3)[2]
         mu = _init_moment_tree(
             params,
             block_size=block_size,
@@ -293,7 +284,6 @@ def scale_by_adam8(
             block_layout=block_layout,
             quantize=quantize,
             quantizer="dynamic_signed",
-            key=key_mu,
         )
         nu = _init_moment_tree(
             params,
@@ -304,7 +294,6 @@ def scale_by_adam8(
             block_layout=block_layout,
             quantize=quantize,
             quantizer="dynamic_unsigned",
-            key=key_nu,
         )
         return ScaleByAdam8State(
             count=jnp.zeros([], jnp.int32),
@@ -348,13 +337,13 @@ def scale_by_adam8(
             nu_prev,
             is_leaf=_is_passthrough_leaf,
         )
-        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
+        count_inc = cast(jax.Array, optax.safe_increment(state.count))
 
         mu_bc_factor = 1.0 - b1**count_inc
         nu_bc_factor = 1.0 - b2**count_inc
 
         if nesterov:
-            mu_bc_factor_next = 1.0 - b1 ** numerics.safe_increment(count_inc)
+            mu_bc_factor_next = 1.0 - b1 ** optax.safe_increment(count_inc)
             mu_bc = _safe_bias_correction(mu_f32, mu_bc_factor_next)
             g_bc = _safe_bias_correction(updates_f32, mu_bc_factor)
             mu_hat = jax.tree.map(
@@ -403,17 +392,17 @@ def scale_by_adam8(
             key=next_key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def adamw8(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: jax.typing.ArrayLike = 0.9,
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
-    weight_decay: base.ScalarOrSchedule = 1e-4,
-    weight_decay_mask: Optional[Union[Any, Callable[[base.Params], Any]]] = None,
+    weight_decay: optax.ScalarOrSchedule = 1e-4,
+    weight_decay_mask: Optional[Union[Any, Callable[[optax.Params], Any]]] = None,
     *,
     block_size: int = 2048,
     min_size: int = 4096,
@@ -425,7 +414,7 @@ def adamw8(
     nesterov: bool = False,
     use_magma: bool = False,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """AdamW whose eligible moment leaves use blockwise 8-bit codebook state."""
 
     if use_magma:
@@ -451,11 +440,9 @@ def adamw8(
         weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
     )
     if weight_decay_is_nonzero:
-        components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
-    components.append(transform.scale_by_learning_rate(learning_rate))
-    return combine.chain(*components)
+        components.append(optax.add_decayed_weights(weight_decay, weight_decay_mask))
+    components.append(optax.scale_by_learning_rate(learning_rate))
+    return optax.chain(*components)
 
 
 def _round_scaled(
@@ -477,12 +464,12 @@ def _dynamic_codebook(*, signed: bool) -> jax.Array:
     return jnp.asarray(_dynamic_codebook_values(signed=signed), dtype=jnp.float32)
 
 
+@lru_cache(maxsize=2)
 def _dynamic_codebook_values(*, signed: bool) -> tuple[float, ...]:
     data: list[float] = []
     total_bits = 8
     max_exponent_bits = 7
     non_sign_bits = total_bits - 1
-    additional_items = 2 ** (non_sign_bits - max_exponent_bits) - 1
     for index in range(max_exponent_bits):
         exponent_scale = 10 ** (-(max_exponent_bits - 1) + index)
         fraction_items = (
@@ -491,12 +478,6 @@ def _dynamic_codebook_values(*, signed: bool) -> tuple[float, ...]:
             else 2 ** (index + non_sign_bits - max_exponent_bits + 1) + 1
         )
         means = _linspace_bin_means(0.1, 1.0, fraction_items)
-        data.extend((exponent_scale * value for value in means))
-        if signed:
-            data.extend((-exponent_scale * value for value in means))
-    if additional_items > 0:
-        exponent_scale = 10 ** (-(max_exponent_bits - 1) + max_exponent_bits - 1)
-        means = _linspace_bin_means(0.1, 1.0, additional_items + 1)
         data.extend((exponent_scale * value for value in means))
         if signed:
             data.extend((-exponent_scale * value for value in means))
@@ -544,6 +525,7 @@ def _codebook_for_id(codebook_id: str) -> jax.Array:
     raise ValueError(f"Unknown codebook_id: {codebook_id!r}.")
 
 
+@lru_cache(maxsize=3)
 def _zero_code_for_quantizer(quantizer: CodebookQuantizer) -> int:
     if quantizer == "dynamic_signed":
         codebook = _dynamic_codebook_values(signed=True)
@@ -594,13 +576,9 @@ def _init_moment_tree(
     block_layout: BlockLayout,
     quantize: bool,
     quantizer: CodebookQuantizer,
-    key: jax.Array,
 ) -> Any:
-    leaves, treedef = jax.tree.flatten(params, is_leaf=_is_passthrough_leaf)
-    keys = tuple(jax.random.split(key, len(leaves))) if leaves else ()
-    key_tree = treedef.unflatten(keys)
     return jax.tree.map(
-        lambda p, k: _init_moment_leaf(
+        lambda p: _init_moment_leaf(
             p,
             block_size=block_size,
             min_size=min_size,
@@ -609,10 +587,8 @@ def _init_moment_tree(
             block_layout=block_layout,
             quantize=quantize,
             quantizer=quantizer,
-            key=k,
         ),
         params,
-        key_tree,
         is_leaf=_is_passthrough_leaf,
     )
 
@@ -627,22 +603,43 @@ def _init_moment_leaf(
     block_layout: BlockLayout,
     quantize: bool,
     quantizer: CodebookQuantizer,
-    key: jax.Array,
 ) -> Any:
     if _is_passthrough_leaf(param):
         return param
-    zeros = zeros_like_preserving_sharding(param, fallback_dtype)
     if quantize and param.size >= min_size and jnp.issubdtype(param.dtype, jnp.inexact):
-        return quantize_blocks(
-            zeros,
-            block_size=block_size,
-            scale_dtype=scale_dtype,
-            stochastic_rounding=False,
-            key=key,
-            block_layout=block_layout,
-            quantizer=quantizer,
+        zero_code = _zero_code_for_quantizer(quantizer)
+        symmetric = quantizer == "symmetric_int8"
+        values_dtype = jnp.int8 if symmetric else jnp.uint8
+        # Use the same logical reshape/padding as quantization so block and
+        # scale shardings follow the parameter, without a full floating buffer.
+        codes = zeros_like_preserving_sharding(param, values_dtype) + jnp.asarray(
+            zero_code, dtype=values_dtype
         )
-    return zeros
+        blocks_count = max(1, math.ceil(param.size / block_size))
+        padded = jnp.pad(
+            codes.reshape(-1),
+            (0, blocks_count * block_size - param.size),
+            constant_values=zero_code,
+        )
+        values = padded.reshape(blocks_count, block_size)
+        return QuantizedBlocks(
+            values=values,
+            scales=jnp.ones_like(values[:, 0], dtype=scale_dtype),
+            shape=tuple(param.shape),
+            size=int(param.size),
+            block_size=block_size,
+            quantizer=(
+                "blockwise_symmetric_int8"
+                if symmetric
+                else f"blockwise_{quantizer}_8bit"
+            ),
+            codebook_id=_codebook_id_for_quantizer(quantizer),
+            qmin=-127 if symmetric else 0,
+            qmax=127 if symmetric else 255,
+            zero_point=zero_code,
+            block_layout=block_layout,
+        )
+    return zeros_like_preserving_sharding(param, fallback_dtype)
 
 
 def _store_moment_tree(
@@ -657,7 +654,11 @@ def _store_moment_tree(
     key: jax.Array,
 ) -> Any:
     leaves, treedef = jax.tree.flatten(template, is_leaf=_is_state_leaf)
-    keys = tuple(jax.random.split(key, len(leaves))) if leaves else ()
+    keys = (
+        tuple(jax.random.split(key, len(leaves)))
+        if stochastic_rounding and leaves
+        else (None,) * len(leaves)
+    )
     key_tree = treedef.unflatten(keys)
     return jax.tree.map(
         lambda m, t, k: _store_moment_leaf(
@@ -686,7 +687,7 @@ def _store_moment_leaf(
     fallback_dtype: jax.typing.DTypeLike,
     block_layout: BlockLayout,
     stochastic_rounding: bool,
-    key: jax.Array,
+    key: jax.Array | None,
 ) -> Any:
     if isinstance(template, QuantizedBlocks):
         return quantize_blocks(
@@ -718,7 +719,7 @@ def _to_f32_leaf(leaf: Any) -> Any:
 
 
 def _is_passthrough_leaf(x: Any) -> bool:
-    return isinstance(x, _masking.MaskedNode) or x is None
+    return isinstance(x, optax.MaskedNode) or x is None
 
 
 def _is_state_leaf(x: Any) -> bool:

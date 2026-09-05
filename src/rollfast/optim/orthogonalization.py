@@ -147,9 +147,6 @@ def resolve_ns_coeffs(
     return coeffs_array
 
 
-_resolve_ns_coeffs = resolve_ns_coeffs
-
-
 def _aol_first_newton_schulz_iteration(
     x: jax.Array,
     coeffs: jax.Array,
@@ -180,9 +177,6 @@ def _base_newton_schulz_iteration(x: jax.Array, coeffs: jax.Array) -> jax.Array:
     a = x @ jnp.swapaxes(x, -1, -2).conj()
     b = coeffs[1] * a + coeffs[2] * a @ a
     return coeffs[0] * x + b @ x
-
-
-_newton_schulz_iterator = _base_newton_schulz_iteration
 
 
 def _aol_ns_iterator(i, x, coeffs):

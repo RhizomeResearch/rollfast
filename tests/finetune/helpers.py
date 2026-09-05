@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import jax
+import numpy as np
 import jax.tree_util as jtu
 import jax.numpy as jnp
 
@@ -189,4 +191,107 @@ def tiny_lora_plan() -> TinyPlan:
             tags=("lora", "lora.factor_B"),
         ),
     }
+    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
+
+
+def ones_like_trainable(tree):
+    return jax.tree.map(
+        lambda x: jnp.ones_like(x) if x is not None else None,
+        tree,
+        is_leaf=lambda x: x is None,
+    )
+
+
+def zeros_like_trainable(tree):
+    return jax.tree.map(
+        lambda x: jnp.zeros_like(x) if x is not None else None,
+        tree,
+        is_leaf=lambda x: x is None,
+    )
+
+
+def assert_tree_allclose(left, right):
+    for lhs, rhs in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True):
+        np.testing.assert_allclose(lhs, rhs)
+
+
+def assert_rng_equal(left, right):
+    for name in (
+        "forward",
+        "sam",
+        "stochastic_rounding",
+        "quantization",
+        "controller",
+    ):
+        np.testing.assert_allclose(getattr(left, name), getattr(right, name))
+
+
+def large_plan() -> TinyPlan:
+    trainable = {
+        "w": jnp.linspace(-1.0, 1.0, 8192, dtype=jnp.float32).reshape(128, 64),
+        "embed": jnp.ones((4096,), dtype=jnp.float32) * 0.5,
+        "bias": jnp.ones((4096,), dtype=jnp.float32),
+    }
+    labels = {
+        "w": "large_decay",
+        "embed": "embed_decay",
+        "bias": "bias_no_decay",
+    }
+    groups = {
+        "large_decay": TinyGroup(
+            "large_decay",
+            role="backbone",
+            depth=0,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=("block",),
+        ),
+        "embed_decay": TinyGroup(
+            "embed_decay",
+            role="embedding.patch",
+            depth=None,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=(),
+        ),
+        "bias_no_decay": TinyGroup(
+            "bias_no_decay",
+            role="head",
+            depth=None,
+            lr_multiplier=1.0,
+            weight_decay=False,
+            tags=("bias",),
+        ),
+    }
+    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
+
+
+def leaf_estimation_plan(*, mixed: bool) -> TinyPlan:
+    trainable = {
+        "large": jnp.ones((4097 if mixed else 2048,), dtype=jnp.float32),
+        "small_a": jnp.ones((2048,), dtype=jnp.float32),
+        "small_b": jnp.ones((33 if mixed else 2048,), dtype=jnp.float32),
+    }
+    labels = {name: "shared" for name in trainable}
+    groups = {
+        "shared": TinyGroup(
+            "shared",
+            role="backbone",
+            depth=0,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=("block",),
+        )
+    }
+    if mixed:
+        trainable["sensitive"] = jnp.ones((5000,), dtype=jnp.float32)
+        labels["sensitive"] = "sensitive"
+        groups["sensitive"] = TinyGroup(
+            "sensitive",
+            role="backbone",
+            depth=0,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=("bias",),
+        )
     return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)

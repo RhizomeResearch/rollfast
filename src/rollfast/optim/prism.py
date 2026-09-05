@@ -11,8 +11,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, transform, utils
-from optax.transforms import _masking
+import optax
+from optax._src import utils
 
 from rollfast.optim._matrix_runtime import (
     apply_matrix_post_shape_lookahead,
@@ -67,14 +67,12 @@ except ImportError:
     _CONV_TYPES = ()
 
 _DEFAULT_NS_COEFFS = MUON_NS_COEFFS
-_INVROOT_COEFFS: dict[int, list[tuple[float, float, float]]] = {
-    4: [  # P^{-1/4}  (used by Bidirectional-PRISM)
-        (3.85003, -10.8539, 8.61893),
-        (1.80992, -0.587778, 0.0647852),
-        (1.50394, -0.594516, 0.121161),
-        (45 / 32, -9 / 16, 5 / 32),
-    ],
-}
+_INV_FOURTH_ROOT_COEFFS = (
+    (3.85003, -10.8539, 8.61893),
+    (1.80992, -0.587778, 0.0647852),
+    (1.50394, -0.594516, 0.121161),
+    (45 / 32, -9 / 16, 5 / 32),
+)
 
 
 PrismDimensionNumbers = MatrixDimensionNumbers
@@ -194,24 +192,13 @@ def _apply_prism_math(
     return augmented_O[..., : m_raw.shape[-2], :]
 
 
-def _invroot_coeffs_iter(r: int, steps: int | None = None, scale: float = 1.0):
-    """Yields (a, b, c) scaled for degree-r inverse root: a/s, b/s^{r+1}, c/s^{2r+1}.
-
-    Cycles the final steady-state entry when `steps` > table length.
-    """
-    if r not in _INVROOT_COEFFS:
-        raise ValueError(
-            f"Inverse root degree r={r} unsupported. Choose from {set(_INVROOT_COEFFS)}."
-        )
-    w = _INVROOT_COEFFS[r]
+def _inv_fourth_root_coeffs(steps: int | None = None, scale: float = 1.0):
+    """Yield scaled inverse-fourth-root coefficients, repeating the final entry."""
+    w = _INV_FOURTH_ROOT_COEFFS
     steps = steps or len(w)
     entries = list(w[:steps]) + [w[-1]] * max(steps - len(w), 0)
     for a, b, c in entries:
-        yield (
-            a / scale,
-            b / scale ** (r + 1),
-            c / scale ** (2 * r + 1),
-        )
+        yield a / scale, b / scale**5, c / scale**9
 
 
 def _sym(M: jax.Array) -> jax.Array:
@@ -235,18 +222,16 @@ def _safe_mm(
     return jnp.matmul(A, B, precision=precision)
 
 
-def _double_sided_matmul_invroot(
+def _double_sided_inv_fourth_root(
     Q: jax.Array,
     G: jax.Array,
     P: jax.Array,
-    r: int,
-    s: int = 1,
     steps: int | None = None,
     eps: float = 1e-5,
     scale: float = 1.001,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
 ) -> jax.Array:
-    r"""Compute $Q^{-s/r} \, G \, P^{-s/r}$ via iterative polynomial approximation.
+    r"""Compute $Q^{-1/4} \, G \, P^{-1/4}$ via iterative polynomial approximation.
 
     Time:  O(steps * (m^3 + n^3 + m^2 n + m n^2))
     Space: O(m^2 + n^2) working memory beyond inputs.
@@ -276,38 +261,23 @@ def _double_sided_matmul_invroot(
     Q = Q / tQ_safe + eps * I_m
     P = P / tP_safe + eps * I_n
 
-    for a, b, c in _invroot_coeffs_iter(r, steps, scale=scale):
+    for a, b, c in _inv_fourth_root_coeffs(steps, scale=scale):
         WQ = _sym(a * I_m + b * Q + c * _sym(_safe_mm(Q, Q, precision)))
         WP = _sym(a * I_n + b * P + c * _sym(_safe_mm(P, P, precision)))
-        WQ1 = WQ if s == 1 else jnp.linalg.matrix_power(WQ, s)
-        WP1 = WP if s == 1 else jnp.linalg.matrix_power(WP, s)
-        # r=4 is the common path for bidirectional; explicit chain avoids
-        # XLA's general eigendecomposition-based power lowering.
-        if r == 1:
-            WQ2, WP2 = WQ, WP
-        elif r == 2:
-            WQ2, WP2 = (
-                _sym(_safe_mm(WQ, WQ, precision)),
-                _sym(_safe_mm(WP, WP, precision)),
-            )
-        elif r == 4:
-            WQ2_sq, WP2_sq = (
-                _sym(_safe_mm(WQ, WQ, precision)),
-                _sym(_safe_mm(WP, WP, precision)),
-            )
-            WQ2, WP2 = (
-                _sym(_safe_mm(WQ2_sq, WQ2_sq, precision)),
-                _sym(_safe_mm(WP2_sq, WP2_sq, precision)),
-            )
-        else:
-            WQ2 = jnp.linalg.matrix_power(WQ, r)
-            WP2 = jnp.linalg.matrix_power(WP, r)
+        WQ2_sq, WP2_sq = (
+            _sym(_safe_mm(WQ, WQ, precision)),
+            _sym(_safe_mm(WP, WP, precision)),
+        )
+        WQ2, WP2 = (
+            _sym(_safe_mm(WQ2_sq, WQ2_sq, precision)),
+            _sym(_safe_mm(WP2_sq, WP2_sq, precision)),
+        )
 
         Q = _sym(_safe_mm(Q, WQ2, precision))
-        G = _safe_mm(_safe_mm(WQ1, G, precision), WP1, precision)
+        G = _safe_mm(_safe_mm(WQ, G, precision), WP, precision)
         P = _sym(_safe_mm(P, WP2, precision))
 
-    return G * tQ_safe ** (-s / r) * tP_safe ** (-s / r)
+    return G * tQ_safe ** (-1 / 4) * tP_safe ** (-1 / 4)
 
 
 def _shampoo_prism_math(
@@ -364,12 +334,10 @@ def _shampoo_prism_math(
         + gamma_r**2 * _safe_mm(D_norm.mT, D_norm, precision)
     ) + eps_gram * jnp.eye(n, dtype=jnp.float32)
 
-    return _double_sided_matmul_invroot(
+    return _double_sided_inv_fourth_root(
         H_L,
         m_target_norm,
         H_R,
-        r=4,
-        s=1,
         steps=inv_steps,
         eps=inv_eps,
         scale=inv_scale,
@@ -403,7 +371,7 @@ def _prism_ortho_step(
                          Shapes both left and right singular-vector spaces.
     """
     # Passthrough (partitioned-away or non-matrix leaves)
-    if dim_nums is None or isinstance(dim_nums, _masking.MaskedNode):
+    if dim_nums is None or isinstance(dim_nums, optax.MaskedNode):
         return mu_nest if mu_nest is not None else mu_raw
     _validate_matrix_operand(updates, dim_nums, "scale_by_prism")
 
@@ -472,7 +440,7 @@ class ScaleByPrismState(NamedTuple):
     """State for the PRISM gradient transformation."""
 
     count: jax.Array
-    mu: base.Updates
+    mu: optax.Updates
     magma_s: Any
     key: jax.Array | None
 
@@ -503,11 +471,11 @@ def scale_by_prism(
     use_magma: bool = False,
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable | None = None,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """The core PRISM gradient transformation.
 
     Implements the core logic of momentum accumulation, innovation computation,
@@ -675,7 +643,7 @@ def scale_by_prism(
             key=runtime.next_key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def _build_unscaled_prism_branch(
@@ -705,11 +673,11 @@ def _build_unscaled_prism_branch(
     use_magma: bool,
     magma_p: float,
     magma_tau: float,
-    weight_decay: base.ScalarOrSchedule,
+    weight_decay: optax.ScalarOrSchedule,
     weight_decay_mask: Any | Callable | None,
     axis_name: str | None,
     key: jax.Array,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Build the unscaled PRISM direction branch shared by wrappers."""
     components = [
         scale_by_prism(
@@ -746,19 +714,17 @@ def _build_unscaled_prism_branch(
     ]
 
     if _has_nonzero_or_scheduled(weight_decay) and not use_magma:
-        components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
+        components.append(optax.add_decayed_weights(weight_decay, weight_decay_mask))
 
-    return combine.chain(*components)
+    return optax.chain(*components)
 
 
 def prism(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.95,
     gamma: float = 1.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     ns_iters: int = 5,
     ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     mode: str = "original",
@@ -784,12 +750,12 @@ def prism(
     magma_tau: float = 2.0,
     key: jax.Array | None = None,
     # Partitioning Arguments
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     prism_weight_dimension_numbers: WeightDimNumOrFn | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """PRISM optimizer with automatic matrix/AdamW partitioning.
 
     This function creates a composite optimizer that partitions parameters into two groups:
@@ -902,11 +868,11 @@ def prism(
         key=key_prism,
     )
 
-    return combine.partition(
+    return optax.partition(
         transforms={
-            "prism": combine.chain(
+            "prism": optax.chain(
                 prism_branch,
-                transform.scale_by_learning_rate(learning_rate),
+                optax.scale_by_learning_rate(learning_rate),
             ),
             "adam": adamw(
                 learning_rate=adam_learning_rate,

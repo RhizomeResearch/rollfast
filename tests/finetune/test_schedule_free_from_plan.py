@@ -1,27 +1,15 @@
-import jax
 import jax.numpy as jnp
 import optax
 import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_lora_plan, tiny_plan
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
-
-
-def _zeros_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.zeros_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import (
+    zeros_like_trainable,
+    ones_like_trainable,
+    tiny_lora_plan,
+    tiny_plan,
+)
 
 
 def test_schedule_free_adam_from_plan_defaults_to_wsd():
@@ -101,13 +89,13 @@ def test_schedule_free_adam_updates_and_returns_eval_params():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
     params = optax.apply_updates(plan.trainable, updates)
     updates, state = bundle.update(
-        _ones_like_trainable(params),
+        ones_like_trainable(params),
         state,
         params,
     )
@@ -129,7 +117,7 @@ def test_schedule_free_eval_params_unwraps_accumulation_and_finite_guard_state()
         accumulation_steps=2,
     )
     state = bundle.init(plan.trainable)
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     updates, state = bundle.update(grads, state, plan.trainable)
     params = optax.apply_updates(plan.trainable, updates)
     updates, state = bundle.update(grads, state, params)
@@ -151,7 +139,7 @@ def test_schedule_free_no_decay_leaf_unchanged_under_zero_gradients():
     )
     state = bundle.init(plan.trainable)
     updates, _ = bundle.update(
-        _zeros_like_trainable(plan.trainable),
+        zeros_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )

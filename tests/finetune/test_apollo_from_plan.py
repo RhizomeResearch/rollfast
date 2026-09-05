@@ -10,15 +10,7 @@ import pytest
 import rollfast.finetune as rfft
 from rollfast.optim.apollo import APOLLOLeafState, apollo_adamw
 
-from .helpers import TinyGroup, TinyPlan, tiny_plan
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import ones_like_trainable, TinyGroup, TinyPlan, tiny_plan
 
 
 def _apollo_leaf_states(state):
@@ -58,7 +50,7 @@ def test_apollo_from_plan_updates_and_reports_projected_state():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -165,7 +157,7 @@ def test_apollo_projection_refresh_changes_projection_matrix():
         schedule="constant",
         clip_global_norm=None,
     )
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     state = bundle.init(plan.trainable)
     _, state = bundle.update(grads, state, plan.trainable)
     first_projection = _apollo_leaf_states(state)[0].projection
@@ -193,7 +185,7 @@ def test_apollo_mini_builder_default_scale_matches_reference_profile():
         schedule="constant",
         clip_global_norm=None,
     )
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
 
     reference_updates, _ = reference_scaled.update(
         grads,
@@ -212,7 +204,7 @@ def test_apollo_mini_builder_default_scale_matches_reference_profile():
 
 def test_apollo_direct_scale_controls_first_update_norm():
     params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
-    grads = _ones_like_trainable(params)
+    grads = ones_like_trainable(params)
     scaled = apollo_adamw(
         learning_rate=1.0,
         rank=1,

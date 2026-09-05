@@ -5,7 +5,7 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform
+import optax
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import (
@@ -33,25 +33,15 @@ from rollfast.optim.psgd import (
 )
 from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
 from rollfast.utils import (
+    _reject_complex_tree,
     _fresh_prng_key,
     _stochastic_round_bf16,
     _validate_nonnegative_static_scalar,
 )
 
 ScheduleFreeLearningRate = (
-    base.ScalarOrSchedule | Callable[[jax.typing.ArrayLike, base.Params | None], Any]
+    optax.ScalarOrSchedule | Callable[[jax.typing.ArrayLike, optax.Params | None], Any]
 )
-
-
-def _reject_complex_tree(tree: Any) -> None:
-    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
-        if hasattr(leaf, "dtype") and jnp.issubdtype(
-            jnp.dtype(leaf.dtype), jnp.complexfloating
-        ):
-            raise ValueError(
-                "Schedule-Free does not support complex leaves; found one at "
-                f"{jax.tree_util.keystr(path)}."
-            )
 
 
 class WeightingMode(str, Enum):
@@ -78,13 +68,13 @@ class ScheduleFreeState(NamedTuple):
     """
 
     b1: jax.Array
-    weight_sum: base.Params
+    weight_sum: optax.Params
     step_count: jax.Array
-    base_state: base.OptState
-    z: base.Params
+    base_state: optax.OptState
+    z: optax.Params
     key: jax.Array
-    lr_max: base.Params | None = None
-    scheduled_lr: base.Params | None = None
+    lr_max: optax.Params | None = None
+    scheduled_lr: optax.Params | None = None
     grad_l1_ema: jax.Array | None = None
     grad_l1_ema_corr: jax.Array | None = None
     polyak_lr: jax.Array | None = None
@@ -95,7 +85,7 @@ class ScheduleFreeState(NamedTuple):
 def _call_learning_rate(
     learning_rate: Callable[..., Any],
     count: jax.Array,
-    params: base.Params | None,
+    params: optax.Params | None,
 ) -> Any:
     try:
         signature = inspect.signature(learning_rate)
@@ -127,9 +117,9 @@ def _call_learning_rate(
 def _make_dual_schedule_fn(
     partition: Any,
     matrix_label: str,
-    matrix_schedule: base.Schedule,
-    adam_schedule: base.Schedule,
-) -> Callable[[jax.typing.ArrayLike, base.Params | None], Any]:
+    matrix_schedule: optax.Schedule,
+    adam_schedule: optax.Schedule,
+) -> Callable[[jax.typing.ArrayLike, optax.Params | None], Any]:
     def dual_schedule_fn(count, params):
         if params is None:
             raise ValueError("dual schedule functions require `params`.")
@@ -153,23 +143,21 @@ def _append_decayed_weights_and_lr(
     components: list[Any],
     *,
     weight_decay: float,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
-    learning_rate: base.ScalarOrSchedule,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None,
+    learning_rate: optax.ScalarOrSchedule,
 ) -> list[Any]:
     _validate_nonnegative_static_scalar("weight_decay", weight_decay)
     _wd_is_nonzero = (
         weight_decay > 0.0 if isinstance(weight_decay, (int, float)) else True
     )
     if _wd_is_nonzero:
-        components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
-        )
-    components.append(transform.scale_by_learning_rate(learning_rate))
+        components.append(optax.add_decayed_weights(weight_decay, weight_decay_mask))
+    components.append(optax.scale_by_learning_rate(learning_rate))
     return components
 
 
 def schedule_free(
-    base_optimizer: base.GradientTransformation,
+    base_optimizer: optax.GradientTransformation,
     learning_rate: ScheduleFreeLearningRate,
     b1: float = 0.9,
     weighting_mode: str | WeightingMode = WeightingMode.SCHEDULET,
@@ -189,8 +177,8 @@ def schedule_free(
     polyak_axis_name: str | tuple[str, ...] | None = None,
     lr_max_init: float = 1e-8,
     adamc_weight_decay: float = 0.0,
-    adamc_weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
-) -> base.GradientTransformationExtraArgs:
+    adamc_weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
+) -> optax.GradientTransformationExtraArgs:
     """Schedule-Free wrapper with optional ScheduleFree+ components.
 
     The default arguments preserve the original wrapper behavior: the inner
@@ -325,10 +313,10 @@ def schedule_free(
         )
         return _broadcast_to_params(mask, params)
 
-    base_optimizer = base.with_extra_args_support(base_optimizer)
+    base_optimizer = optax.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
-        _reject_complex_tree(params)
+        _reject_complex_tree(params, "Schedule-Free")
         state_key = _fresh_prng_key(key)
         z = jax.tree.map(
             lambda t: (
@@ -355,9 +343,9 @@ def schedule_free(
         )
 
     def update_fn(updates, state, params=None, **extra_args):
-        _reject_complex_tree(updates)
+        _reject_complex_tree(updates, "Schedule-Free")
         if params is not None:
-            _reject_complex_tree(params)
+            _reject_complex_tree(params, "Schedule-Free")
         if params is None:
             raise ValueError(
                 "`params` must be provided to `schedule_free.update`; "
@@ -616,7 +604,7 @@ def schedule_free(
         new_state = ScheduleFreeState(
             b1=b1_next,
             weight_sum=new_weight_sum,
-            step_count=cast(jax.Array, numerics.safe_increment(state.step_count)),
+            step_count=cast(jax.Array, optax.safe_increment(state.step_count)),
             base_state=new_base_state,
             z=z_next,
             key=next_state_key,
@@ -631,7 +619,7 @@ def schedule_free(
 
         return final_updates, new_state
 
-    return base.GradientTransformationExtraArgs(init_fn, update_fn)
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
 def _resolve_sf_plus_bool(schedule_free_plus: bool, override: bool | None) -> bool:
@@ -664,7 +652,7 @@ def schedule_free_prism(
     precision: jax.lax.PrecisionLike = jax.lax.Precision.HIGHEST,
     shape_nesterov: bool = True,
     weight_decay: float = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
     raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
@@ -690,7 +678,7 @@ def schedule_free_prism(
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
     polyak_axis_name: str | tuple[str, ...] | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Schedule-Free PRISM Optimizer with Partitioning, optionally using SF+."""
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
@@ -752,9 +740,9 @@ def schedule_free_prism(
         learning_rate=prism_schedule,
     )
 
-    base_opt = combine.partition(
+    base_opt = optax.partition(
         transforms={
-            "prism": combine.chain(*prism_components),
+            "prism": optax.chain(*prism_components),
             "adam": adamw(
                 learning_rate=adam_schedule,
                 b1=adam_b1_value,
@@ -810,9 +798,9 @@ def schedule_free_kron(
     state_dtype: jax.typing.DTypeLike | None = None,
     # Standard Optimizer Args
     weight_decay: float = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     # PSGD Kron parameters
-    preconditioner_update_probability: base.ScalarOrSchedule = (
+    preconditioner_update_probability: optax.ScalarOrSchedule = (
         precond_update_prob_schedule()
     ),
     max_size_triangular: int = 8192,
@@ -825,7 +813,7 @@ def schedule_free_kron(
     precond_dtype: str | jnp.dtype | None = None,
     precond_update_precision: str | None = "tensorfloat32",
     precond_grads_precision: str | None = None,
-    scanned_layers: base.Params | None = None,
+    scanned_layers: optax.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
     preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
@@ -852,7 +840,7 @@ def schedule_free_kron(
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
     polyak_axis_name: str | tuple[str, ...] | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Schedule-Free PSGD Kron optimizer, optionally using SF+.
 
     Uses the shared `rollfast.schedules.schedulefree` wrapper.
@@ -963,7 +951,7 @@ def schedule_free_kron(
         weight_decay_mask=inner_weight_decay_mask,
         learning_rate=lr_schedule,
     )
-    base_optimizer = combine.chain(*base_opt_components)
+    base_optimizer = optax.chain(*base_opt_components)
 
     return schedule_free(
         base_optimizer=base_optimizer,
@@ -1002,7 +990,7 @@ def schedule_free_adam(
     b2: float | None = None,
     eps: float = 1e-8,
     weight_decay: float = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     mu_dtype: jax.typing.DTypeLike | None = None,
     axis_name: str | None = None,
     key: jax.Array | None = None,
@@ -1019,7 +1007,7 @@ def schedule_free_adam(
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
     polyak_axis_name: str | tuple[str, ...] | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Schedule-Free Adam optimizer, optionally using ScheduleFree+.
 
     ``schedule_free_plus=True`` keeps this as the existing Adam wrapper but
@@ -1109,7 +1097,7 @@ def schedule_free_aurora(
     eps: float = 1e-7,
     shape_nesterov: bool = True,
     weight_decay: float = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     grad_clip_max_amps: float | tuple[float, float] | None = (2.0, 10.0),
     raw_global_grad_clip: float | None = None,
     permissive_spike_protection: bool = True,
@@ -1135,7 +1123,7 @@ def schedule_free_aurora(
     polyak_beta: float = 0.0,
     polyak_f_star: float = 0.0,
     polyak_axis_name: str | tuple[str, ...] | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Schedule-Free Aurora with Adam fallback for non-matrix leaves, optionally using SF+."""
     polyak_enabled = _resolve_sf_plus_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_plus_bool(schedule_free_plus, use_adamc)
@@ -1222,9 +1210,9 @@ def schedule_free_aurora(
         learning_rate=aurora_schedule,
     )
 
-    base_opt = combine.partition(
+    base_opt = optax.partition(
         transforms={
-            "aurora": combine.chain(*aurora_components),
+            "aurora": optax.chain(*aurora_components),
             "adam": adamw(
                 learning_rate=adam_schedule,
                 b1=adam_b1_value,
@@ -1268,7 +1256,7 @@ def schedule_free_aurora(
     )
 
 
-def schedule_free_eval_params(state: base.OptState, params: base.Params):
+def schedule_free_eval_params(state: optax.OptState, params: optax.Params):
     """Params for evaluation from Rollfast's Schedule-Free state.
 
     Args:

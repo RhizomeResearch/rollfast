@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +13,7 @@ from rollfast.optim.adam8 import (
     quantized_nbytes,
 )
 
+from ._state_tree import _format_tokens, _is_masked_node, _path_leaves, _path_tokens
 from .config import (
     OptimizerBundle,
     SCHEMA_VERSION,
@@ -127,17 +128,15 @@ class OptimizerStateMemoryEstimate:
         }
 
 
-def optimizer_state_memory_summary(
-    bundle: OptimizerBundle,
-    state: Any,
-) -> OptimizerStateMemorySummary:
-    """Measure optimizer-state storage from an initialized state PyTree."""
+class _StateMemoryTotals(NamedTuple):
+    total_bytes: int
+    by_category: dict[str, int]
+    by_group: dict[str, int]
+    by_placement: dict[str, int]
+    preconditioner_factors: tuple[StateLeafSummary, ...]
 
-    leaves = tuple(
-        summary
-        for path, leaf in _path_leaves(state)
-        if (summary := _summarize_leaf(path, leaf)) is not None
-    )
+
+def _state_memory_totals(leaves: tuple[StateLeafSummary, ...]) -> _StateMemoryTotals:
     by_category: dict[str, int] = {}
     by_group: dict[str, int] = {}
     by_placement: dict[str, int] = {}
@@ -149,20 +148,40 @@ def optimizer_state_memory_summary(
     preconditioner_factors = tuple(
         leaf for leaf in leaves if leaf.category == "preconditioner"
     )
-    preconditioner_bytes = sum(leaf.bytes for leaf in preconditioner_factors)
-    return OptimizerStateMemorySummary(
-        schema_version=SCHEMA_VERSION,
-        optimizer=bundle.optimizer_config.name,
+    return _StateMemoryTotals(
         total_bytes=sum(leaf.bytes for leaf in leaves),
-        estimated_state_bytes=bundle.report.estimated_state_bytes,
         by_category=dict(sorted(by_category.items())),
         by_group=dict(sorted(by_group.items())),
         by_placement=dict(sorted(by_placement.items())),
-        replicated_bytes=by_placement.get("replicated", 0),
-        globally_sharded_bytes=by_placement.get("globally_sharded", 0),
-        unsharded_bytes=by_placement.get("unsharded", 0),
-        preconditioner_bytes=preconditioner_bytes,
         preconditioner_factors=preconditioner_factors,
+    )
+
+
+def optimizer_state_memory_summary(
+    bundle: OptimizerBundle,
+    state: Any,
+) -> OptimizerStateMemorySummary:
+    """Measure optimizer-state storage from an initialized state PyTree."""
+
+    leaves = tuple(
+        summary
+        for path, leaf in _path_leaves(state)
+        if (summary := _summarize_leaf(path, leaf)) is not None
+    )
+    totals = _state_memory_totals(leaves)
+    return OptimizerStateMemorySummary(
+        schema_version=SCHEMA_VERSION,
+        optimizer=bundle.optimizer_config.name,
+        total_bytes=totals.total_bytes,
+        estimated_state_bytes=bundle.report.estimated_state_bytes,
+        by_category=totals.by_category,
+        by_group=totals.by_group,
+        by_placement=totals.by_placement,
+        replicated_bytes=totals.by_placement.get("replicated", 0),
+        globally_sharded_bytes=totals.by_placement.get("globally_sharded", 0),
+        unsharded_bytes=totals.by_placement.get("unsharded", 0),
+        preconditioner_bytes=totals.by_category.get("preconditioner", 0),
+        preconditioner_factors=totals.preconditioner_factors,
         leaves=leaves,
     )
 
@@ -213,25 +232,13 @@ def estimate_optimizer_state_memory(
                 )
             )
 
-    by_category: dict[str, int] = {}
-    by_group: dict[str, int] = {}
-    by_placement: dict[str, int] = {}
     leaves = [_with_estimated_placement(leaf, bundle) for leaf in leaves]
-    for leaf in leaves:
-        by_category[leaf.category] = by_category.get(leaf.category, 0) + leaf.bytes
-        by_placement[leaf.placement] = by_placement.get(leaf.placement, 0) + leaf.bytes
-        if leaf.group is not None:
-            by_group[leaf.group] = by_group.get(leaf.group, 0) + leaf.bytes
-
-    preconditioner_factors = tuple(
-        leaf for leaf in leaves if leaf.category == "preconditioner"
-    )
-    preconditioner_bytes = sum(leaf.bytes for leaf in preconditioner_factors)
-    preconditioner_aux_bytes = by_category.get("preconditioner_aux", 0)
+    totals = _state_memory_totals(tuple(leaves))
+    preconditioner_aux_bytes = totals.by_category.get("preconditioner_aux", 0)
     moment_bytes = (
-        by_category.get("first_moment", 0)
-        + by_category.get("second_moment", 0)
-        + by_category.get("moments", 0)
+        totals.by_category.get("first_moment", 0)
+        + totals.by_category.get("second_moment", 0)
+        + totals.by_category.get("moments", 0)
     )
     warnings = [
         "static estimates exclude wrapper counters, finite guards, RNG keys, "
@@ -249,17 +256,17 @@ def estimate_optimizer_state_memory(
     return OptimizerStateMemoryEstimate(
         schema_version=SCHEMA_VERSION,
         optimizer=bundle.optimizer_config.name,
-        total_bytes=sum(leaf.bytes for leaf in leaves),
+        total_bytes=totals.total_bytes,
         moment_bytes=moment_bytes,
-        preconditioner_bytes=preconditioner_bytes,
+        preconditioner_bytes=totals.by_category.get("preconditioner", 0),
         preconditioner_aux_bytes=preconditioner_aux_bytes,
-        by_category=dict(sorted(by_category.items())),
-        by_group=dict(sorted(by_group.items())),
-        by_placement=dict(sorted(by_placement.items())),
-        replicated_bytes=by_placement.get("replicated", 0),
-        globally_sharded_bytes=by_placement.get("globally_sharded", 0),
-        unsharded_bytes=by_placement.get("unsharded", 0),
-        preconditioner_factors=preconditioner_factors,
+        by_category=totals.by_category,
+        by_group=totals.by_group,
+        by_placement=totals.by_placement,
+        replicated_bytes=totals.by_placement.get("replicated", 0),
+        globally_sharded_bytes=totals.by_placement.get("globally_sharded", 0),
+        unsharded_bytes=totals.by_placement.get("unsharded", 0),
+        preconditioner_factors=totals.preconditioner_factors,
         leaves=tuple(leaves),
         warnings=tuple(warnings),
     )
@@ -577,36 +584,6 @@ def _group_from_tokens(tokens: tuple[str, ...]) -> str | None:
             }:
                 return group
     return None
-
-
-def _path_leaves(tree: Any) -> list[tuple[Any, Any]]:
-    return jax.tree_util.tree_flatten_with_path(tree, is_leaf=_is_leaf)[0]
-
-
-def _is_leaf(leaf: Any) -> bool:
-    return leaf is None or isinstance(leaf, QuantizedBlocks) or _is_masked_node(leaf)
-
-
-def _is_masked_node(leaf: Any) -> bool:
-    return leaf.__class__.__name__ == "MaskedNode"
-
-
-def _path_tokens(path: tuple[Any, ...]) -> tuple[str, ...]:
-    return tuple(_path_token(part) for part in path)
-
-
-def _path_token(part: Any) -> str:
-    if hasattr(part, "name"):
-        return f"attr:{part.name}"
-    if hasattr(part, "key"):
-        return f"key:{part.key}"
-    if hasattr(part, "idx"):
-        return f"idx:{part.idx}"
-    return repr(part)
-
-
-def _format_tokens(tokens: tuple[str, ...]) -> str:
-    return "/".join(tokens)
 
 
 def _is_counter_path(tokens: tuple[str, ...]) -> bool:

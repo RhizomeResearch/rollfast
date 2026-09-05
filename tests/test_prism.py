@@ -2,11 +2,45 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
-from rollfast.optim.prism import ScaleByPrismState, prism, scale_by_prism
+from rollfast.optim.prism import (
+    ScaleByPrismState,
+    _shampoo_prism_math,
+    prism,
+    scale_by_prism,
+)
 from tests._typing import as_array_dict
+
+
+@pytest.mark.parametrize("shape", [(3, 5), (5, 3)])
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+def test_bidirectional_prism_without_innovation_matches_polar_factor(shape, dtype):
+    matrix = jax.random.normal(jax.random.PRNGKey(21), shape).astype(dtype)
+    u, _, vh = np.linalg.svd(
+        np.asarray(matrix.astype(jnp.float32)), full_matrices=False
+    )
+
+    def shape_matrix(matrix):
+        return _shampoo_prism_math(
+            matrix,
+            matrix,
+            matrix,
+            gamma_l=1.0,
+            gamma_r=1.0,
+            inv_steps=8,
+            inv_eps=0.0,
+            inv_scale=1.001,
+            eps_gram=1e-8,
+        )
+
+    for evaluate in (shape_matrix, jax.jit(shape_matrix)):
+        actual = evaluate(matrix)
+        assert actual.dtype == jnp.float32
+        assert jnp.all(jnp.isfinite(actual))
+        np.testing.assert_allclose(actual, u @ vh, atol=5e-4, rtol=5e-4)
 
 
 def test_scale_by_prism():

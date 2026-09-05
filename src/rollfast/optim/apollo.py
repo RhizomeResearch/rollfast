@@ -9,25 +9,16 @@ from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, numerics, utils
-from optax.transforms import _masking
+import optax
+from optax._src import utils
+
+from rollfast.utils import _reject_complex_tree
 
 
 Scaling = Literal["channel", "tensor"]
 Orientation = Literal["left", "right", "full"]
 REFERENCE_EPS = 1e-6
 SCALING_FACTOR_EPS = 1e-8
-
-
-def _reject_complex_tree(tree: Any) -> None:
-    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
-        if hasattr(leaf, "dtype") and jnp.issubdtype(
-            jnp.dtype(leaf.dtype), jnp.complexfloating
-        ):
-            raise ValueError(
-                "APOLLO does not support complex leaves; found one at "
-                f"{jax.tree_util.keystr(path)}."
-            )
 
 
 @jax.tree_util.register_pytree_node_class
@@ -82,7 +73,7 @@ class _LeafUpdateResult:
 
 
 def apollo_adamw(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     *,
     rank: int = 256,
     projection_seed: int = 0,
@@ -98,8 +89,8 @@ def apollo_adamw(
     eps: jax.typing.ArrayLike = REFERENCE_EPS,
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike = jnp.float32,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-) -> base.GradientTransformation:
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+) -> optax.GradientTransformation:
     """AdamW using APOLLO low-rank projected gradient-scaling factors."""
 
     if rank < 1:
@@ -119,7 +110,7 @@ def apollo_adamw(
     decay_requires_params = callable(weight_decay) or weight_decay != 0.0
 
     def init_fn(params):
-        _reject_complex_tree(params)
+        _reject_complex_tree(params, "APOLLO")
         leaves = _tree_map_with_index(
             lambda index, param: _init_leaf_state(
                 index,
@@ -133,9 +124,9 @@ def apollo_adamw(
         return ScaleByAPOLLOState(count=jnp.zeros([], jnp.int32), leaves=leaves)
 
     def update_fn(updates, state, params=None):
-        _reject_complex_tree(updates)
+        _reject_complex_tree(updates, "APOLLO")
         if params is not None:
-            _reject_complex_tree(params)
+            _reject_complex_tree(params, "APOLLO")
         if params is None:
             if decay_requires_params:
                 raise ValueError(
@@ -143,7 +134,7 @@ def apollo_adamw(
                     "is nonzero or scheduled."
                 )
             params = jax.tree.map(lambda _: None, updates)
-        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
+        count_inc = cast(jax.Array, optax.safe_increment(state.count))
         wd_step = (
             cast(Callable[[jax.Array], Any], weight_decay)(state.count)
             if callable(weight_decay)
@@ -195,7 +186,7 @@ def apollo_adamw(
         )
         return new_updates, ScaleByAPOLLOState(count=count_inc, leaves=new_leaves)
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def apollo_state_nbytes(
@@ -301,46 +292,32 @@ def _update_leaf(
 ) -> _LeafUpdateResult:
     if _is_passthrough(grad) or _is_passthrough(state):
         return _LeafUpdateResult(grad, state)
-    if not isinstance(state, APOLLOLeafState) or not state.projected:
-        return _full_adam_leaf(
-            grad,
+    projected = isinstance(state, APOLLOLeafState) and state.projected
+    projection = state.projection
+    moment_grad = grad
+    if projected:
+        projection = _refresh_projection(
             state,
-            param,
-            count_inc=count_inc,
-            b1=b1,
-            b2=b2,
-            eps=eps,
-            eps_root=eps_root,
-            scale=scale,
-            scale_front=scale_front,
-            disable_norm_growth_limiter=disable_norm_growth_limiter,
-            norm_growth_limiter=norm_growth_limiter,
-            weight_decay=weight_decay,
-            learning_rate=learning_rate,
-            mu_dtype=mu_dtype,
+            count=count,
+            rank=rank,
+            projection_seed=projection_seed,
+            projection_refresh_interval=projection_refresh_interval,
         )
-
-    projection = _refresh_projection(
-        state,
-        count=count,
-        rank=rank,
-        projection_seed=projection_seed,
-        projection_refresh_interval=projection_refresh_interval,
-    )
-    projected_grad = _project(grad, projection, state.orientation)
-    mu = (b1 * state.mu + (1.0 - b1) * projected_grad).astype(mu_dtype)
-    nu = (b2 * state.nu + (1.0 - b2) * jnp.square(projected_grad)).astype(mu_dtype)
+        moment_grad = _project(grad, projection, state.orientation)
+    mu = (b1 * state.mu + (1.0 - b1) * moment_grad).astype(mu_dtype)
+    nu = (b2 * state.nu + (1.0 - b2) * jnp.square(moment_grad)).astype(mu_dtype)
     step_size = _reference_step_size(learning_rate, count_inc, b1, b2)
-    projected_update = mu.astype(jnp.float32) / (
+    update = mu.astype(jnp.float32) / (
         jnp.sqrt(nu.astype(jnp.float32) + eps_root) + eps
     )
-    factors = _scaling_factors(
-        projected_grad,
-        projected_update,
-        scaling=scaling,
-        eps=SCALING_FACTOR_EPS,
-    )
-    update = _apply_scaling(grad.astype(jnp.float32), factors, state.orientation)
+    if projected:
+        factors = _scaling_factors(
+            moment_grad,
+            update,
+            scaling=scaling,
+            eps=SCALING_FACTOR_EPS,
+        )
+        update = _apply_scaling(grad.astype(jnp.float32), factors, state.orientation)
     update, update_norm = _apply_reference_scale_and_limiter(
         update,
         previous_norm=state.prev_update_norm,
@@ -358,58 +335,6 @@ def _update_leaf(
         update,
         APOLLOLeafState(
             projection,
-            mu,
-            nu,
-            update_norm.astype(mu_dtype),
-            state.orientation,
-            state.projected,
-            state.shape,
-            state.leaf_index,
-        ),
-    )
-
-
-def _full_adam_leaf(
-    grad,
-    state,
-    param,
-    *,
-    count_inc,
-    b1,
-    b2,
-    eps,
-    eps_root,
-    scale,
-    scale_front,
-    disable_norm_growth_limiter,
-    norm_growth_limiter,
-    weight_decay,
-    learning_rate,
-    mu_dtype,
-) -> _LeafUpdateResult:
-    mu = (b1 * state.mu + (1.0 - b1) * grad).astype(mu_dtype)
-    nu = (b2 * state.nu + (1.0 - b2) * jnp.square(grad)).astype(mu_dtype)
-    step_size = _reference_step_size(learning_rate, count_inc, b1, b2)
-    update = mu.astype(jnp.float32) / (
-        jnp.sqrt(nu.astype(jnp.float32) + eps_root) + eps
-    )
-    update, update_norm = _apply_reference_scale_and_limiter(
-        update,
-        previous_norm=state.prev_update_norm,
-        scale=scale,
-        scale_front=scale_front,
-        disable_norm_growth_limiter=disable_norm_growth_limiter,
-        norm_growth_limiter=norm_growth_limiter,
-    )
-    update = -step_size * update
-    if param is not None:
-        decay = jnp.asarray(weight_decay, dtype=jnp.float32)
-        update = update - learning_rate * decay * param.astype(jnp.float32)
-    update = update.astype(grad.dtype)
-    return _LeafUpdateResult(
-        update,
-        APOLLOLeafState(
-            state.projection,
             mu,
             nu,
             update_norm.astype(mu_dtype),
@@ -439,15 +364,18 @@ def _refresh_projection(
         return state.projection
     projected_dim = state.projection.shape[1]
     resolved_rank = min(rank, projected_dim)
-    new_projection = _make_projection(
-        projection_seed=projection_seed,
-        leaf_index=state.leaf_index,
-        step=count,
-        shape=(resolved_rank, projected_dim),
-        dtype=state.projection.dtype,
-    )
     should_refresh = (count % projection_refresh_interval) == 0
-    return jnp.where(should_refresh, new_projection, state.projection)
+    return jax.lax.cond(
+        should_refresh,
+        lambda: _make_projection(
+            projection_seed=projection_seed,
+            leaf_index=state.leaf_index,
+            step=count,
+            shape=(resolved_rank, projected_dim),
+            dtype=state.projection.dtype,
+        ),
+        lambda: state.projection,
+    )
 
 
 def _make_projection(
@@ -565,7 +493,7 @@ def _tree_map_with_index(fn, tree):
 
 
 def _is_passthrough(value: Any) -> bool:
-    return value is None or isinstance(value, _masking.MaskedNode)
+    return value is None or isinstance(value, optax.MaskedNode)
 
 
 def _is_state_or_passthrough(value: Any) -> bool:

@@ -21,7 +21,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics
+import optax
+from optax._src import numerics
 
 import rollfast.optim.muon as optax_muon
 from rollfast.optim.adam import scale_by_adam
@@ -45,6 +46,7 @@ from rollfast.optim.psgd import (
 )
 from rollfast.optim.rmnp import _build_unscaled_rmnp_branch
 from rollfast.utils import (
+    _reject_complex_tree,
     MomentumAccumulator,
     _fresh_prng_key,
     _is_aux_leaf,
@@ -55,29 +57,14 @@ from rollfast.utils import (
 )
 
 
-def _reject_complex_tree(tree: Any) -> None:
-    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
-        if hasattr(leaf, "dtype") and jnp.issubdtype(
-            jnp.dtype(leaf.dtype), jnp.complexfloating
-        ):
-            raise ValueError(
-                "Hyperball does not support complex leaves; found one at "
-                f"{jax.tree_util.keystr(path)}."
-            )
-
-
-MaskOrFn = Any | Callable[[base.Params], Any] | None
+MaskOrFn = Any | Callable[[optax.Params], Any] | None
 
 
 class HyperballState(NamedTuple):
     """State for the terminal Hyperball transform."""
 
     count: jax.Array
-    init_norm: base.Params
-
-
-def _is_bool_leaf(x: Any) -> bool:
-    return _is_aux_leaf(x) or isinstance(x, (bool, int)) or hasattr(x, "dtype")
+    init_norm: optax.Params
 
 
 def _is_array_like(x: Any) -> bool:
@@ -101,7 +88,7 @@ def _safe_norm(x: jax.Array, *, eps: float, axis_name: str | None) -> jax.Array:
     )
 
 
-def _init_norm_tree(params: base.Params, axis_name: str | None) -> base.Params:
+def _init_norm_tree(params: optax.Params, axis_name: str | None) -> optax.Params:
     return jax.tree.map(
         lambda p: p if _is_aux_leaf(p) else _leaf_l2_norm(p, axis_name=axis_name),
         params,
@@ -109,7 +96,7 @@ def _init_norm_tree(params: base.Params, axis_name: str | None) -> base.Params:
     )
 
 
-def _all_true_mask(params: base.Params) -> base.Params:
+def _all_true_mask(params: optax.Params) -> optax.Params:
     return jax.tree.map(
         lambda p: not _is_aux_leaf(p),
         params,
@@ -117,7 +104,7 @@ def _all_true_mask(params: base.Params) -> base.Params:
     )
 
 
-def _default_rank2_hyperball_mask(params: base.Params) -> base.Params:
+def _default_rank2_hyperball_mask(params: optax.Params) -> optax.Params:
     """Default HeavyBall-style routing: Hyperball for rank >= 2 leaves."""
     return jax.tree.map(
         lambda p: (
@@ -244,18 +231,18 @@ def _hyperball_leaf_update(
 
 
 def apply_hyperball(
-    learning_rate: base.ScalarOrSchedule,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    learning_rate: optax.ScalarOrSchedule,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
     *,
     hyperball_mask: MaskOrFn = None,
-    fallback_learning_rate: base.ScalarOrSchedule | None = None,
+    fallback_learning_rate: optax.ScalarOrSchedule | None = None,
     fallback_weight_decay: bool = False,
     caution: bool = False,
     cautious_weight_decay: bool = False,
     eps: float = 1e-12,
     axis_name: str | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Terminal Optax transform implementing Hyperball projection.
 
     This transform consumes positive, unscaled directions from a preceding
@@ -295,22 +282,22 @@ def apply_hyperball(
     if isinstance(weight_decay, (int, float)):
         _validate_nonnegative_static_scalar("weight_decay", weight_decay)
 
-    def init_fn(params: base.Params) -> HyperballState:
-        _reject_complex_tree(params)
+    def init_fn(params: optax.Params) -> HyperballState:
+        _reject_complex_tree(params, "Hyperball")
         return HyperballState(
             count=jnp.zeros([], dtype=jnp.int32),
             init_norm=_init_norm_tree(params, axis_name),
         )
 
     def update_fn(
-        updates: base.Updates,
-        state: base.OptState,
-        params: base.Params | None = None,
+        updates: optax.Updates,
+        state: optax.OptState,
+        params: optax.Params | None = None,
         **extra_args: Any,
-    ) -> tuple[base.Updates, base.OptState]:
-        _reject_complex_tree(updates)
+    ) -> tuple[optax.Updates, optax.OptState]:
+        _reject_complex_tree(updates, "Hyperball")
         if params is not None:
-            _reject_complex_tree(params)
+            _reject_complex_tree(params, "Hyperball")
         if params is None:
             raise ValueError("`params` must be provided to `apply_hyperball`.")
 
@@ -357,12 +344,12 @@ def apply_hyperball(
             resolved_weight_decay_mask,
             is_leaf=_is_aux_leaf,
         )
-        count_inc = cast(jax.Array, numerics.safe_increment(hyperball_state.count))
+        count_inc = cast(jax.Array, optax.safe_increment(hyperball_state.count))
         return new_updates, HyperballState(
             count=count_inc, init_norm=hyperball_state.init_norm
         )
 
-    return base.GradientTransformationExtraArgs(init_fn, update_fn)
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
 # Semantic alias: the transform consumes an unscaled direction and applies the
@@ -384,7 +371,7 @@ def _build_unscaled_adam_branch(
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     key: jax.Array,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Build the unscaled Adam fallback branch used by Hyperball wrappers."""
     return scale_by_adam(
         b1=b1,
@@ -406,13 +393,13 @@ def _build_unscaled_adam_branch(
 def _partitioned_matrix_hyperball(
     *,
     matrix_label: str,
-    matrix_branch: base.GradientTransformation,
-    adam_branch: base.GradientTransformation,
+    matrix_branch: optax.GradientTransformation,
+    adam_branch: optax.GradientTransformation,
     param_labels: Any,
     default_hyperball_mask: MaskOrFn,
-    learning_rate: base.ScalarOrSchedule,
-    fallback_learning_rate: base.ScalarOrSchedule,
-    weight_decay: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
+    fallback_learning_rate: optax.ScalarOrSchedule,
+    weight_decay: optax.ScalarOrSchedule,
     weight_decay_mask: MaskOrFn,
     hyperball_mask: MaskOrFn,
     fallback_weight_decay: bool,
@@ -420,12 +407,12 @@ def _partitioned_matrix_hyperball(
     cautious_weight_decay: bool,
     hyperball_eps: float,
     axis_name: str | None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Assemble a matrix/Adam partition followed by terminal Hyperball."""
     resolved_hyperball_mask = (
         hyperball_mask if hyperball_mask is not None else default_hyperball_mask
     )
-    partitioned_updates = combine.partition(
+    partitioned_updates = optax.partition(
         transforms={
             matrix_label: matrix_branch,
             "adam": adam_branch,
@@ -433,7 +420,7 @@ def _partitioned_matrix_hyperball(
         param_labels=param_labels,
     )
 
-    return combine.chain(
+    return optax.chain(
         partitioned_updates,
         apply_hyperball(
             learning_rate=learning_rate,
@@ -451,13 +438,13 @@ def _partitioned_matrix_hyperball(
 
 
 def adamw_hyperball(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: jax.typing.ArrayLike = 0.9,
     b2: jax.typing.ArrayLike = 0.999,
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike | None = None,
-    weight_decay: base.ScalarOrSchedule = 1e-4,
+    weight_decay: optax.ScalarOrSchedule = 1e-4,
     weight_decay_mask: MaskOrFn = None,
     *,
     hyperball_mask: MaskOrFn = None,
@@ -471,9 +458,9 @@ def adamw_hyperball(
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Adam with Hyperball replacing decoupled weight decay on selected leaves."""
-    return combine.chain(
+    return optax.chain(
         scale_by_adam(
             b1=b1,
             b2=b2,
@@ -504,12 +491,12 @@ def adamw_hyperball(
 
 
 def muon_hyperball(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     ns_coeffs: optax_muon.MuonNsCoeffs = MUON_NS_COEFFS,
     ns_steps: jax.typing.ArrayLike = 5,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
     mu_dtype: jax.typing.DTypeLike | None = None,
     *,
@@ -520,7 +507,7 @@ def muon_hyperball(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     muon_weight_dimension_numbers: optax_muon.WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     hyperball_mask: MaskOrFn = None,
@@ -533,7 +520,7 @@ def muon_hyperball(
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Muon/Adam partition with Hyperball replacing decoupled weight decay.
 
     By default, Hyperball is applied to the same leaves routed to Muon. Adam
@@ -601,10 +588,10 @@ def muon_hyperball(
 
 
 def rmnp_hyperball(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
     mu_dtype: jax.typing.DTypeLike | None = None,
     *,
@@ -614,7 +601,7 @@ def rmnp_hyperball(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     hyperball_mask: MaskOrFn = None,
@@ -624,7 +611,7 @@ def rmnp_hyperball(
     hyperball_eps: float = 1e-12,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """RMNP/Adam partition with Hyperball replacing decoupled weight decay.
 
     By default, Hyperball is applied to the same leaves routed to RMNP. Adam
@@ -678,11 +665,11 @@ def rmnp_hyperball(
 
 
 def kron_hyperball(
-    learning_rate: base.ScalarOrSchedule = 0.001,
+    learning_rate: optax.ScalarOrSchedule = 0.001,
     b1: float = 0.9,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
-    preconditioner_update_probability: base.ScalarOrSchedule = (
+    preconditioner_update_probability: optax.ScalarOrSchedule = (
         precond_update_prob_schedule()
     ),
     max_size_triangular: int = 8192,
@@ -697,7 +684,7 @@ def kron_hyperball(
     precond_dtype: str | jnp.dtype | None = None,
     precond_update_precision: str | None = "tensorfloat32",
     precond_grads_precision: str | None = None,
-    scanned_layers: base.Params | None = None,
+    scanned_layers: optax.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
     preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
@@ -720,7 +707,7 @@ def kron_hyperball(
     caution: bool = False,
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """PSGD Kron with Hyperball replacing decoupled weight decay."""
     kron_transform = scale_by_kron(
         b1=b1,
@@ -757,8 +744,8 @@ def kron_hyperball(
         axis_name=axis_name,
         key=key,
     )
-    return combine.chain(
-        base.GradientTransformation(kron_transform.init, kron_transform.update),
+    return optax.chain(
+        optax.GradientTransformation(kron_transform.init, kron_transform.update),
         apply_hyperball(
             learning_rate=learning_rate,
             weight_decay=weight_decay,
@@ -774,10 +761,10 @@ def kron_hyperball(
 
 
 def prism_hyperball(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.95,
     gamma: float = 1.0,
-    weight_decay: base.ScalarOrSchedule = 0.0,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
     ns_iters: int = 5,
     ns_coeffs: optax_muon.MuonNsCoeffs = MUON_NS_COEFFS,
@@ -803,7 +790,7 @@ def prism_hyperball(
     magma_p: float = 0.5,
     magma_tau: float = 2.0,
     key: jax.Array | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -814,7 +801,7 @@ def prism_hyperball(
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
     fallback_weight_decay: bool = False,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """PRISM/Adam partition with Hyperball replacing decoupled weight decay.
 
     By default, the Hyperball projection is applied to the same leaves routed to
@@ -891,9 +878,9 @@ def prism_hyperball(
 def _partitioned_aurora_hyperball(
     *,
     riemannian: bool,
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float,
-    weight_decay: base.ScalarOrSchedule,
+    weight_decay: optax.ScalarOrSchedule,
     weight_decay_mask: MaskOrFn,
     pp_iterations: int,
     pp_beta: float,
@@ -920,7 +907,7 @@ def _partitioned_aurora_hyperball(
     magma_tau: float,
     guard_nonfinite: bool,
     key: jax.Array | None,
-    adam_learning_rate: base.ScalarOrSchedule | None,
+    adam_learning_rate: optax.ScalarOrSchedule | None,
     adam_b1: float,
     adam_b2: float,
     adam_eps: float,
@@ -930,7 +917,7 @@ def _partitioned_aurora_hyperball(
     cautious_weight_decay: bool,
     hyperball_eps: float,
     fallback_weight_decay: bool,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     key_aurora, key_adam = jax.random.split(_fresh_prng_key(key), 2)
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -1005,9 +992,9 @@ def _partitioned_aurora_hyperball(
 
 
 def aurora_hyperball(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.95,
-    weight_decay: base.ScalarOrSchedule = 0.025,
+    weight_decay: optax.ScalarOrSchedule = 0.025,
     weight_decay_mask: MaskOrFn = None,
     pp_iterations: int = 2,
     pp_beta: float = 0.5,
@@ -1030,7 +1017,7 @@ def aurora_hyperball(
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -1041,7 +1028,7 @@ def aurora_hyperball(
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
     fallback_weight_decay: bool = False,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Aurora/Adam partition with Hyperball replacing decoupled weight decay."""
     return _partitioned_aurora_hyperball(
         riemannian=False,
@@ -1088,9 +1075,9 @@ def aurora_hyperball(
 
 
 def riemannian_aurora_hyperball(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     b1: float = 0.95,
-    weight_decay: base.ScalarOrSchedule = 0.025,
+    weight_decay: optax.ScalarOrSchedule = 0.025,
     weight_decay_mask: MaskOrFn = None,
     outer_steps: int = 3,
     cg_steps: int = 20,
@@ -1115,7 +1102,7 @@ def riemannian_aurora_hyperball(
     magma_tau: float = 2.0,
     guard_nonfinite: bool = True,
     key: jax.Array | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -1126,7 +1113,7 @@ def riemannian_aurora_hyperball(
     cautious_weight_decay: bool = False,
     hyperball_eps: float = 1e-12,
     fallback_weight_decay: bool = False,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Riemannian-Aurora/Adam partition with Hyperball projection."""
     return _partitioned_aurora_hyperball(
         riemannian=True,

@@ -12,7 +12,8 @@ from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
+import optax
+from optax._src import numerics, utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -56,8 +57,8 @@ class ScaleByNorMuonState(NamedTuple):
     """State for Muon variants with optional NorMuon second moment."""
 
     count: jax.Array
-    mu: base.Updates
-    nu: base.Updates
+    mu: optax.Updates
+    nu: optax.Updates
     key: jax.Array | None
 
 
@@ -228,7 +229,7 @@ def scale_by_normuon(
     bias_correction: bool = False,
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Scale updates with NorMuon/ContraMuon matrix directions.
 
     ``beta2=None`` disables NorMuon's second-moment normalization, giving plain
@@ -345,13 +346,13 @@ def scale_by_normuon(
             key=runtime.key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def scale_by_normuon_shape(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Scale Muon-variant matrix directions using Muon-style shape factors."""
     return scale_by_muon_shape(
         weight_dimension_numbers=weight_dimension_numbers,
@@ -362,12 +363,12 @@ def scale_by_normuon_shape(
 def _partitioned_muon_variant(
     *,
     label: str,
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta1: jax.typing.ArrayLike,
     beta2: jax.typing.ArrayLike | None,
     eps: jax.typing.ArrayLike,
-    weight_decay: base.ScalarOrSchedule,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
+    weight_decay: optax.ScalarOrSchedule,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None,
     ns_iters: int,
     ns_coeffs: MuonNsCoeffs,
     contra_coeff: jax.typing.ArrayLike,
@@ -383,12 +384,12 @@ def _partitioned_muon_variant(
     adam_b1: jax.typing.ArrayLike,
     adam_b2: jax.typing.ArrayLike,
     adam_eps_root: jax.typing.ArrayLike,
-    adam_weight_decay: base.ScalarOrSchedule | None,
-    adam_learning_rate: base.ScalarOrSchedule | None,
+    adam_weight_decay: optax.ScalarOrSchedule | None,
+    adam_learning_rate: optax.ScalarOrSchedule | None,
     weight_dimension_numbers: WeightDimNumOrFn | None,
     consistent_rms: jax.typing.ArrayLike | None,
     key: jax.Array | None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
     effective_adam_weight_decay = (
@@ -425,13 +426,13 @@ def _partitioned_muon_variant(
     ]
     if _has_nonzero_or_scheduled(weight_decay):
         matrix_components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+            optax.add_decayed_weights(weight_decay, weight_decay_mask)
         )
-    matrix_components.append(transform.scale_by_learning_rate(learning_rate))
+    matrix_components.append(optax.scale_by_learning_rate(learning_rate))
 
-    return combine.partition(
+    return optax.partition(
         transforms={
-            label: combine.chain(*matrix_components),
+            label: optax.chain(*matrix_components),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,
@@ -450,12 +451,12 @@ def _partitioned_muon_variant(
 
 
 def normuon(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta1: jax.typing.ArrayLike = 0.95,
     beta2: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     ns_iters: int = 5,
     ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     *,
@@ -470,12 +471,12 @@ def normuon(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_weight_decay: optax.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     normuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """NorMuon optimizer with automatic matrix/AdamW partitioning.
 
     This tracks one second moment along the configured matrix layout after
@@ -516,11 +517,11 @@ def normuon(
 
 
 def contramuon(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta1: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     ns_iters: int = 5,
     ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     *,
@@ -534,12 +535,12 @@ def contramuon(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_weight_decay: optax.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     contramuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """ContraMuon optimizer with automatic matrix/AdamW partitioning.
 
     Subtracts ``contra_coeff / 2`` times a power-iteration estimate of the
@@ -577,12 +578,12 @@ def contramuon(
 
 
 def contranormuon(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta1: jax.typing.ArrayLike = 0.95,
     beta2: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     ns_iters: int = 5,
     ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     *,
@@ -599,12 +600,12 @@ def contranormuon(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_weight_decay: optax.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     contranormuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """ContraMuon plus NorMuon normalization with AdamW fallback."""
     return _partitioned_muon_variant(
         label="contranormuon",

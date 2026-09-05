@@ -1,27 +1,10 @@
-import jax
 import jax.numpy as jnp
 import optax
 import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_plan
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
-
-
-def _zeros_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.zeros_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import zeros_like_trainable, ones_like_trainable, tiny_plan
 
 
 @pytest.mark.parametrize(
@@ -40,7 +23,7 @@ def test_hybrid_from_plan_updates_and_reports_groups(builder, optimizer_name):
     bundle = builder(plan, **kwargs)
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -67,7 +50,7 @@ def test_hybrid_no_decay_leaf_unchanged_under_zero_gradients():
     )
     state = bundle.init(plan.trainable)
     updates, _ = bundle.update(
-        _zeros_like_trainable(plan.trainable),
+        zeros_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -88,7 +71,7 @@ def test_hybrid_supports_ema_eval_view_and_manifest():
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )
@@ -204,7 +187,7 @@ def test_p2_matrix_builders_update_and_manifest(builder, optimizer_name, kwargs)
     )
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(
-        _ones_like_trainable(plan.trainable),
+        ones_like_trainable(plan.trainable),
         state,
         plan.trainable,
     )

@@ -36,33 +36,23 @@ def test_partition_norm_axis_resolution_filters_replicated_axes():
     ) == ("model", "tensor")
 
 
-def test_global_l2_norm_reduces_only_partition_axes(monkeypatch):
-    calls = []
+def test_global_l2_norm_reduces_only_partition_axes():
+    def norm_on_shard(grad):
+        return global_l2_norm(
+            {"w": grad},
+            axis_name=("data", "model"),
+            replicated_axis_names=("data",),
+        )
 
-    def fake_psum(x, axis_name):
-        calls.append(axis_name)
-        return x * 4.0
-
-    monkeypatch.setattr(jax.lax, "psum", fake_psum)
-
-    norm = global_l2_norm(
-        {"w": jnp.ones((2,), dtype=jnp.float32)},
-        axis_name=("data", "model"),
-        replicated_axis_names=("data",),
-    )
-
-    assert calls == ["model"]
-    np.testing.assert_allclose(norm, jnp.sqrt(8.0))
+    # Two replicas of four model shards, each containing two gradient values.
+    grads = jnp.ones((2, 4, 2), dtype=jnp.float32)
+    norms = jax.jit(
+        jax.vmap(jax.vmap(norm_on_shard, axis_name="model"), axis_name="data")
+    )(grads)
+    np.testing.assert_allclose(norms, jnp.sqrt(8.0))
 
 
-def test_global_norm_clip_uses_explicit_partition_axes(monkeypatch):
-    calls = []
-
-    def fake_psum(x, axis_name):
-        calls.append(axis_name)
-        return x * 4.0
-
-    monkeypatch.setattr(jax.lax, "psum", fake_psum)
+def test_global_norm_clip_uses_explicit_partition_axes():
     tx = clip_by_global_norm(
         1.0,
         axis_name=("data", "model"),
@@ -70,13 +60,15 @@ def test_global_norm_clip_uses_explicit_partition_axes(monkeypatch):
         replicated_axis_names=("data",),
     )
 
-    updates, _ = tx.update(
-        {"w": jnp.ones((2,), dtype=jnp.float32)},
-        tx.init(None),
-    )
+    def clip_shard(grad):
+        updates, _ = tx.update({"w": grad}, tx.init(None))
+        return updates["w"]
 
-    assert calls == ["model"]
-    np.testing.assert_allclose(updates["w"], jnp.ones((2,)) / jnp.sqrt(8.0), rtol=1e-5)
+    grads = jnp.ones((2, 4, 2), dtype=jnp.float32)
+    updates = jax.jit(
+        jax.vmap(jax.vmap(clip_shard, axis_name="model"), axis_name="data")
+    )(grads)
+    np.testing.assert_allclose(updates, grads / jnp.sqrt(8.0), rtol=1e-5)
 
 
 def test_global_norm_clip_uses_complex_magnitude_and_preserves_phase():
@@ -91,25 +83,23 @@ def test_global_norm_clip_uses_complex_magnitude_and_preserves_phase():
     assert jnp.imag(updates["w"][0]) != 0.0
 
 
-def test_sam_perturbation_uses_partition_axes(monkeypatch):
-    calls = []
+def test_sam_perturbation_uses_partition_axes():
+    def perturb_shard(grad):
+        perturbation, norm = sam_perturbation(
+            {"w": grad},
+            rho=0.5,
+            axis_name=("data", "model"),
+            partition_axis_names=("model",),
+            replicated_axis_names=("data",),
+        )
+        return perturbation["w"], norm
 
-    def fake_psum(x, axis_name):
-        calls.append(axis_name)
-        return x * 4.0
-
-    monkeypatch.setattr(jax.lax, "psum", fake_psum)
-
-    _, perturbation_norm = sam_perturbation(
-        {"w": jnp.ones((2,), dtype=jnp.float32)},
-        rho=0.5,
-        axis_name=("data", "model"),
-        partition_axis_names=("model",),
-        replicated_axis_names=("data",),
-    )
-
-    assert calls == ["model", "model"]
-    np.testing.assert_allclose(perturbation_norm, 0.5, rtol=1e-5)
+    grads = jnp.ones((2, 4, 2), dtype=jnp.float32)
+    perturbation, norms = jax.jit(
+        jax.vmap(jax.vmap(perturb_shard, axis_name="model"), axis_name="data")
+    )(grads)
+    np.testing.assert_allclose(perturbation, 0.5 * grads / jnp.sqrt(8.0), rtol=1e-5)
+    np.testing.assert_allclose(norms, 0.5, rtol=1e-5)
 
 
 def test_builder_derives_norm_axes_from_sharding_policy():

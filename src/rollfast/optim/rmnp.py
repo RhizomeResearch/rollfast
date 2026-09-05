@@ -21,7 +21,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, transform, utils
+import optax
+from optax._src import utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -50,7 +51,7 @@ class ScaleByRmnpState(NamedTuple):
     """State for RMNP's first-moment estimates."""
 
     count: jax.Array
-    mu: base.Updates
+    mu: optax.Updates
     key: jax.Array | None
 
 
@@ -92,7 +93,7 @@ def scale_by_rmnp(
     momentum_accumulator: MomentumAccumulator = "ema",
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Scale updates with Row-Momentum Normalized Preconditioning.
 
     This transform tracks a first moment, optionally forms a Nesterov lookahead
@@ -169,13 +170,13 @@ def scale_by_rmnp(
             key=runtime.key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def scale_by_rmnp_shape(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Scale RMNP matrix directions using Muon-style shape factors."""
     return scale_by_muon_shape(
         weight_dimension_numbers=weight_dimension_numbers,
@@ -194,9 +195,9 @@ def _build_unscaled_rmnp_branch(
     weight_dimension_numbers: WeightDimNumOrFn | None,
     consistent_rms: jax.typing.ArrayLike | None,
     key: jax.Array,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Build the unscaled RMNP direction branch shared by wrappers."""
-    return combine.chain(
+    return optax.chain(
         scale_by_rmnp(
             beta=beta,
             eps=eps,
@@ -215,11 +216,11 @@ def _build_unscaled_rmnp_branch(
 
 
 def rmnp(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     mu_dtype: jax.typing.DTypeLike | None = None,
     *,
     nesterov: bool = True,
@@ -228,12 +229,12 @@ def rmnp(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_weight_decay: optax.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """RMNP optimizer with AdamW fallback for non-matrix parameters."""
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -259,13 +260,13 @@ def rmnp(
     ]
     if _has_nonzero_or_scheduled(weight_decay):
         rmnp_components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+            optax.add_decayed_weights(weight_decay, weight_decay_mask)
         )
-    rmnp_components.append(transform.scale_by_learning_rate(learning_rate))
+    rmnp_components.append(optax.scale_by_learning_rate(learning_rate))
 
-    return combine.partition(
+    return optax.partition(
         transforms={
-            "rmnp": combine.chain(*rmnp_components),
+            "rmnp": optax.chain(*rmnp_components),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,

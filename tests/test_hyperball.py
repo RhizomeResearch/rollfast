@@ -2,6 +2,7 @@ from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
 
@@ -166,19 +167,6 @@ def test_apply_hyperball_rejects_negative_weight_decay():
         apply_hyperball(learning_rate=0.01, weight_decay=-0.1)
 
 
-def test_kron_hyperball():
-    params = _params()
-    grads = _grads()
-    tx = kron_hyperball(
-        learning_rate=0.01,
-        preconditioner_update_probability=1.0,
-    )
-
-    state = tx.init(params)
-    updates, state = tx.update(grads, state, params)
-    _assert_shapes_and_matrix_norm(updates, params)
-
-
 def test_kron_hyperball_accepts_extra_grad_args():
     params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
     grads = {"w": jnp.ones((4, 4), dtype=jnp.float32) * 0.1}
@@ -266,12 +254,19 @@ def test_public_aliases():
     assert rollfast.hyperball_riemannian_aurora is riemannian_aurora_hyperball
 
 
-def test_muon_hyperball_routes_vectors_to_adam_fallback():
+@pytest.mark.parametrize(
+    "optimizer_fn, kwargs",
+    [
+        pytest.param(muon_hyperball, {"ns_steps": 2}, id="muon"),
+        pytest.param(rmnp_hyperball, {}, id="rmnp"),
+    ],
+)
+def test_hyperball_routes_vectors_to_adam_fallback(optimizer_fn, kwargs):
     params = _params()
     grads = _grads()
-    tx = muon_hyperball(
+    tx = optimizer_fn(
+        **kwargs,
         learning_rate=0.01,
-        ns_steps=2,
         fallback_weight_decay=True,
         weight_decay=0.1,
     )
@@ -286,45 +281,40 @@ def test_muon_hyperball_routes_vectors_to_adam_fallback():
     assert jnp.all(jnp.isfinite(updates["b"]))
 
 
-def test_rmnp_hyperball_routes_vectors_to_adam_fallback():
-    params = _params()
-    grads = _grads()
-    tx = rmnp_hyperball(
-        learning_rate=0.01,
-        fallback_weight_decay=True,
-        weight_decay=0.1,
+@pytest.mark.parametrize(
+    "optimizer_fn, kwargs",
+    [
+        pytest.param(muon_hyperball, {"ns_steps": 2}, id="muon"),
+        pytest.param(rmnp_hyperball, {}, id="rmnp"),
+    ],
+)
+def test_partitioned_hyperball_wrappers_project_with_global_norms(optimizer_fn, kwargs):
+    params = {"w": jnp.arange(1.0, 9.0).reshape(2, 2, 2)}
+    grads = {"w": jnp.asarray([[[1.0, 2.0], [3.0, 1.0]], [[2.0, 1.0], [1.0, 4.0]]])}
+    tx = optimizer_fn(learning_rate=0.01, axis_name="devices", **kwargs)
+    unprojected = optimizer_fn(
+        learning_rate=0.01, hyperball_mask={"w": False}, **kwargs
     )
 
-    state = tx.init(params)
-    updates, state = tx.update(grads, state, params)
-    updates, next_params = _assert_shapes_and_matrix_norm(updates, params)
+    def update_on_shard(p, g):
+        updates, _ = tx.update(g, tx.init(p), p)
+        return updates
 
-    assert not jnp.allclose(
-        jnp.linalg.norm(next_params["b"]), jnp.linalg.norm(params["b"])
+    def unprojected_on_shard(p, g):
+        updates, _ = unprojected.update(g, unprojected.init(p), p)
+        return updates
+
+    updates = jax.jit(jax.vmap(update_on_shard, axis_name="devices"))(params, grads)
+    delta = jax.vmap(unprojected_on_shard)(params, grads)["w"]
+    # Project all shards together onto the initial global sphere.
+    radius = np.linalg.norm(params["w"])
+    candidate = np.asarray(params["w"]) + 0.01 * radius * np.asarray(
+        delta
+    ) / np.linalg.norm(delta)
+    expected = candidate * radius / np.linalg.norm(candidate)
+    np.testing.assert_allclose(
+        params["w"] + updates["w"], expected, rtol=1e-6, atol=1e-6
     )
-    assert jnp.all(jnp.isfinite(updates["b"]))
-
-
-def test_partitioned_hyperball_wrappers_forward_axis_name(monkeypatch):
-    captured_axis_names = []
-
-    def fake_apply_hyperball(**kwargs):
-        captured_axis_names.append(kwargs["axis_name"])
-        return optax.identity()
-
-    monkeypatch.setattr(hyperball_module, "apply_hyperball", fake_apply_hyperball)
-
-    hyperball_module.muon_hyperball(
-        learning_rate=0.01,
-        ns_steps=2,
-        axis_name="devices",
-    )
-    hyperball_module.rmnp_hyperball(
-        learning_rate=0.01,
-        axis_name="devices",
-    )
-
-    assert captured_axis_names == ["devices", "devices"]
 
 
 def test_muon_hyperball_forwards_magma_axis_and_key_to_partition_branches(
@@ -382,33 +372,31 @@ def test_muon_hyperball_forwards_magma_axis_and_key_to_partition_branches(
     assert jnp.array_equal(captured_adam["key"], key_adam)
 
 
-def test_prism_and_aurora_hyperball_forward_nesterov_to_adam_fallback(monkeypatch):
-    captured_adam = []
+@pytest.mark.parametrize(
+    "optimizer_fn, kwargs",
+    [
+        pytest.param(prism_hyperball, {"ns_iters": 2}, id="prism"),
+        pytest.param(aurora_hyperball, {"polar_ns_iters": 2}, id="aurora"),
+    ],
+)
+@pytest.mark.parametrize("nesterov", [False, True], ids=["adam", "nadam"])
+def test_hyperball_adam_fallback_matches_optax(optimizer_fn, kwargs, nesterov):
+    params = _params()
+    tx = optimizer_fn(learning_rate=0.01, nesterov=nesterov, **kwargs)
+    reference = optax.adam(learning_rate=0.01, nesterov=nesterov)
+    state = tx.init(params)
+    reference_state = reference.init(params["b"])
+    update = jax.jit(tx.update)
 
-    def fake_scale_by_adam(**kwargs):
-        captured_adam.append(kwargs)
-        return optax.identity()
-
-    monkeypatch.setattr(hyperball_module, "scale_by_adam", fake_scale_by_adam)
-    monkeypatch.setattr(
-        hyperball_module, "_build_unscaled_prism_branch", lambda **_: optax.identity()
-    )
-    monkeypatch.setattr(
-        hyperball_module, "_build_unscaled_aurora_branch", lambda **_: optax.identity()
-    )
-
-    hyperball_module.prism_hyperball(
-        learning_rate=0.01,
-        ns_iters=2,
-        nesterov=False,
-    )
-    hyperball_module.aurora_hyperball(
-        learning_rate=0.01,
-        polar_ns_iters=2,
-        nesterov=False,
-    )
-
-    assert [kwargs["nesterov"] for kwargs in captured_adam] == [False, False]
+    for grad in (
+        jnp.asarray([0.1, -0.2, 0.3, -0.4]),
+        jnp.asarray([-0.3, 0.1, 0.2, 0.5]),
+    ):
+        grads = {"w": _grads()["w"], "b": grad}
+        updates, state = update(grads, state, params)
+        expected, reference_state = reference.update(grad, reference_state, params["b"])
+        np.testing.assert_allclose(updates["b"], expected, rtol=1e-5, atol=1e-7)
+        params = optax.apply_updates(params, updates)
 
 
 def test_muon_hyperball_keeps_external_shape_scaling_without_magma(monkeypatch):

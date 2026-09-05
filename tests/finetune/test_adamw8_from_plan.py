@@ -10,86 +10,7 @@ from rollfast.optim.adam8 import (
     tree_state_nbytes,
 )
 
-from .helpers import TinyGroup, TinyPlan
-
-
-def large_plan() -> TinyPlan:
-    trainable = {
-        "w": jnp.linspace(-1.0, 1.0, 8192, dtype=jnp.float32).reshape(128, 64),
-        "embed": jnp.ones((4096,), dtype=jnp.float32) * 0.5,
-        "bias": jnp.ones((4096,), dtype=jnp.float32),
-    }
-    labels = {
-        "w": "large_decay",
-        "embed": "embed_decay",
-        "bias": "bias_no_decay",
-    }
-    groups = {
-        "large_decay": TinyGroup(
-            "large_decay",
-            role="backbone",
-            depth=0,
-            lr_multiplier=1.0,
-            weight_decay=True,
-            tags=("block",),
-        ),
-        "embed_decay": TinyGroup(
-            "embed_decay",
-            role="embedding.patch",
-            depth=None,
-            lr_multiplier=1.0,
-            weight_decay=True,
-            tags=(),
-        ),
-        "bias_no_decay": TinyGroup(
-            "bias_no_decay",
-            role="head",
-            depth=None,
-            lr_multiplier=1.0,
-            weight_decay=False,
-            tags=("bias",),
-        ),
-    }
-    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
-
-
-def leaf_estimation_plan(*, mixed: bool) -> TinyPlan:
-    trainable = {
-        "large": jnp.ones((4097 if mixed else 2048,), dtype=jnp.float32),
-        "small_a": jnp.ones((2048,), dtype=jnp.float32),
-        "small_b": jnp.ones((33 if mixed else 2048,), dtype=jnp.float32),
-    }
-    labels = {name: "shared" for name in trainable}
-    groups = {
-        "shared": TinyGroup(
-            "shared",
-            role="backbone",
-            depth=0,
-            lr_multiplier=1.0,
-            weight_decay=True,
-            tags=("block",),
-        )
-    }
-    if mixed:
-        trainable["sensitive"] = jnp.ones((5000,), dtype=jnp.float32)
-        labels["sensitive"] = "sensitive"
-        groups["sensitive"] = TinyGroup(
-            "sensitive",
-            role="backbone",
-            depth=0,
-            lr_multiplier=1.0,
-            weight_decay=True,
-            tags=("bias",),
-        )
-    return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import ones_like_trainable, large_plan, leaf_estimation_plan
 
 
 def _quantized_leaves(tree):
@@ -238,7 +159,7 @@ def test_adamw8_from_plan_update_stays_close_to_fp32_after_quantized_storage():
         weight_decay=0.01,
         state_quantization=quantization,
     )
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     fp32_state = fp32_bundle.init(plan.trainable)
     q_state = q_bundle.init(plan.trainable)
     fp32_updates, fp32_state = fp32_bundle.update(grads, fp32_state, plan.trainable)

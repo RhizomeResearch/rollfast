@@ -6,7 +6,7 @@ from typing import NamedTuple
 import rollfast.finetune as rfft
 from rollfast.finetune import state_migration as migration_module
 
-from .helpers import TinyGroup, TinyPlan, tiny_plan
+from .helpers import ones_like_trainable, TinyGroup, TinyPlan, tiny_plan
 
 
 def _head_only_plan() -> TinyPlan:
@@ -59,14 +59,6 @@ def _renamed_groups_plan() -> TinyPlan:
         trainable=full.trainable,
         labels=labels,
         group_specs=groups,
-    )
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
     )
 
 
@@ -130,7 +122,7 @@ def _counter_leaves(state):
 
 def _advance_clock_fixture(bundle, params):
     state = bundle.init(params)
-    finite_grads = _ones_like_trainable(params)
+    finite_grads = ones_like_trainable(params)
     nonfinite_grads = jax.tree.map(
         lambda x: None if x is None else jnp.full_like(x, jnp.nan),
         params,
@@ -173,7 +165,7 @@ def test_reconfigure_preserves_shared_head_moments_and_initializes_backbone():
         clip_global_norm=None,
     )
     old_state = old_bundle.init(old_plan.trainable)
-    grads = _ones_like_trainable(old_plan.trainable)
+    grads = ones_like_trainable(old_plan.trainable)
     _, old_state = old_bundle.update(grads, old_state, old_plan.trainable)
 
     _, migrated_state, migration = rfft.reconfigure_optimizer(
@@ -221,7 +213,7 @@ def test_transfer_optimizer_state_reports_new_preserved_and_warnings():
     )
     old_state = old_bundle.init(old_plan.trainable)
     _, old_state = old_bundle.update(
-        _ones_like_trainable(old_plan.trainable),
+        ones_like_trainable(old_plan.trainable),
         old_state,
         old_plan.trainable,
     )
@@ -266,9 +258,7 @@ def test_transfer_optimizer_state_can_be_exact_for_identical_stage():
         clip_global_norm=None,
     )
     state = bundle.init(plan.trainable)
-    _, state = bundle.update(
-        _ones_like_trainable(plan.trainable), state, plan.trainable
-    )
+    _, state = bundle.update(ones_like_trainable(plan.trainable), state, plan.trainable)
 
     _, migrated_state, transfer = rfft.transfer_optimizer_state(
         old_plan=plan,
@@ -312,7 +302,7 @@ def test_transfer_optimizer_state_reports_group_conversion():
     )
     old_state = old_bundle.init(old_plan.trainable)
     _, old_state = old_bundle.update(
-        _ones_like_trainable(old_plan.trainable),
+        ones_like_trainable(old_plan.trainable),
         old_state,
         old_plan.trainable,
     )
@@ -368,7 +358,7 @@ def test_reconfigure_reset_all_initializes_shared_state():
     )
     old_state = old_bundle.init(old_plan.trainable)
     _, old_state = old_bundle.update(
-        _ones_like_trainable(old_plan.trainable),
+        ones_like_trainable(old_plan.trainable),
         old_state,
         old_plan.trainable,
     )
@@ -406,7 +396,7 @@ def test_reconfigure_counter_policy_is_explicit():
     )
     old_state = old_bundle.init(old_plan.trainable)
     _, old_state = old_bundle.update(
-        _ones_like_trainable(old_plan.trainable),
+        ones_like_trainable(old_plan.trainable),
         old_state,
         old_plan.trainable,
     )
@@ -531,7 +521,7 @@ def test_reconfigure_schedule_free_step_count_is_optimizer_clock(
     )
     old_state = bundle.init(plan.trainable)
     updates, old_state = bundle.update(
-        _ones_like_trainable(plan.trainable), old_state, plan.trainable
+        ones_like_trainable(plan.trainable), old_state, plan.trainable
     )
     del updates
 
@@ -595,7 +585,7 @@ def test_reconfigure_preserves_kron_preconditioners_across_group_relabel():
     )
     old_state = old_bundle.init(old_plan.trainable)
     _, old_state = old_bundle.update(
-        _ones_like_trainable(old_plan.trainable),
+        ones_like_trainable(old_plan.trainable),
         old_state,
         old_plan.trainable,
     )

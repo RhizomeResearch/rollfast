@@ -5,7 +5,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, numerics
+import optax
+from optax._src import numerics
 
 from rollfast.optim.magma import apply_magma_internal
 from rollfast.utils import (
@@ -30,18 +31,18 @@ from rollfast.utils import (
 )
 
 GradClipMaxAmps = float | tuple[float, float] | None
-MaskOrFn = Any | Callable[[base.Params], Any] | None
+MaskOrFn = Any | Callable[[optax.Params], Any] | None
 
 
 class MatrixRuntimeStep(NamedTuple):
     """Prepared per-step state shared by matrix optimizer transforms."""
 
     count: jax.Array
-    raw_gradients: base.Updates
-    effective_updates: base.Updates
-    mu_f32: base.Updates
-    target_for_shape: base.Updates
-    mu_cast: base.Updates
+    raw_gradients: optax.Updates
+    effective_updates: optax.Updates
+    mu_f32: optax.Updates
+    target_for_shape: optax.Updates
+    mu_cast: optax.Updates
     should_skip: jax.Array
     next_key: jax.Array
     magma_key: jax.Array | None
@@ -107,24 +108,24 @@ def _split_runtime_keys(
     return next_key, sr_key, None
 
 
-def init_matrix_magma_state(params: base.Params, use_magma: bool) -> base.Params:
+def init_matrix_magma_state(params: optax.Params, use_magma: bool) -> optax.Params:
     """Initialize optional Magma state for matrix optimizer transforms."""
     return _init_magma_state(params) if use_magma else ()
 
 
 def init_matrix_momentum_state(
-    params: base.Params,
+    params: optax.Params,
     dtype: jax.typing.DTypeLike,
-) -> base.Params:
+) -> optax.Params:
     """Initialize a masked-tree-safe first-moment state."""
     return _zeros_like_tree(params, dtype)
 
 
 def prepare_matrix_runtime_step(
-    updates: base.Updates,
+    updates: optax.Updates,
     *,
     count: jax.Array,
-    mu: base.Updates,
+    mu: optax.Updates,
     key: jax.Array,
     beta: jax.typing.ArrayLike,
     nesterov: bool,
@@ -140,7 +141,7 @@ def prepare_matrix_runtime_step(
     """Prepare clipped gradients, momentum, and shaping targets for one step."""
     _validate_positive_static_scalar("raw_global_grad_clip", raw_global_grad_clip)
     next_key, sr_key, magma_key = _split_runtime_keys(key, use_magma)
-    count_inc = cast(jax.Array, numerics.safe_increment(count))
+    count_inc = cast(jax.Array, optax.safe_increment(count))
 
     if raw_global_grad_clip is not None:
         grad_norm = _tree_global_norm(updates, axis_name=axis_name)
@@ -178,7 +179,7 @@ def prepare_matrix_runtime_step(
             mu_bc = _tree_bias_correction_momentum(
                 mu_f32,
                 beta,
-                numerics.safe_increment(count_inc),
+                optax.safe_increment(count_inc),
                 momentum_accumulator=momentum_accumulator,
             )
             updates_bc = _tree_bias_correction_momentum(
@@ -233,14 +234,14 @@ def prepare_matrix_runtime_step(
 
 
 def apply_matrix_post_shape_lookahead(
-    shaped_updates: base.Updates,
+    shaped_updates: optax.Updates,
     runtime: MatrixRuntimeStep,
     *,
     beta: jax.typing.ArrayLike,
     nesterov: bool,
     shape_nesterov: bool,
     momentum_accumulator: MomentumAccumulator,
-) -> base.Updates:
+) -> optax.Updates:
     """Apply post-shaping Nesterov lookahead when requested."""
     if nesterov and not shape_nesterov:
         return _tree_momentum_lookahead(
@@ -253,20 +254,20 @@ def apply_matrix_post_shape_lookahead(
 
 
 def finish_matrix_runtime_step(
-    updates: base.Updates,
+    updates: optax.Updates,
     runtime: MatrixRuntimeStep,
     *,
-    params: base.Params | None,
-    magma_s: base.Params,
+    params: optax.Params | None,
+    magma_s: optax.Params,
     use_magma: bool,
     magma_p: float,
     magma_tau: float,
-    weight_decay: base.ScalarOrSchedule,
+    weight_decay: optax.ScalarOrSchedule,
     weight_decay_mask: MaskOrFn,
     grad_clip_max_amps: GradClipMaxAmps,
     axis_name: str | None,
     guard_fn: Callable[[jax.Array], jax.Array] | None = None,
-) -> tuple[base.Updates, base.Params]:
+) -> tuple[optax.Updates, optax.Params]:
     """Apply shared post-processing after optimizer-specific matrix shaping."""
     _validate_grad_clip_max_amps(grad_clip_max_amps)
     new_updates = updates
@@ -293,7 +294,7 @@ def finish_matrix_runtime_step(
         )
 
     if has_weight_decay:
-        params = cast(base.Params, params)
+        params = cast(optax.Params, params)
         wd_step = _resolve_scalar(
             weight_decay,
             runtime.count - jnp.asarray(1, dtype=runtime.count.dtype),

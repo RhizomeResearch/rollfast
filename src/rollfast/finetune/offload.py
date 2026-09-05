@@ -36,10 +36,13 @@ def offload_optimizer_state(
             lambda leaf: _device_leaf(leaf, resolved),
             state,
         )
-    return jtu.tree_map(
-        lambda leaf: _host_leaf(leaf, resolved),
-        state,
-    )
+    leaves, treedef = jtu.tree_flatten(state)
+    indices = [i for i, leaf in enumerate(leaves) if _eligible_leaf(leaf, resolved)]
+    # Start copies for all eligible buffers before waiting for any one of them.
+    host_leaves = jax.device_get([leaves[i] for i in indices])
+    for index, leaf in zip(indices, host_leaves, strict=True):
+        leaves[index] = leaf
+    return treedef.unflatten(leaves)
 
 
 def restore_offloaded_optimizer_state(
@@ -90,12 +93,6 @@ def state_offload_manifest(
         }
     )
     return manifest
-
-
-def _host_leaf(leaf: Any, policy: StateOffloadPolicy) -> Any:
-    if not _eligible_leaf(leaf, policy):
-        return leaf
-    return jax.device_get(leaf)
 
 
 def _device_leaf(

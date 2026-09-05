@@ -6,15 +6,7 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_lora_plan, tiny_plan
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import ones_like_trainable, tiny_lora_plan, tiny_plan
 
 
 def _assert_tree_allclose(left, right):
@@ -42,7 +34,7 @@ def test_state_checkpoint_round_trip_preserves_next_update():
         ema=rfft.EMAConfig(enabled=True, decay=0.5),
     )
     state = bundle.init(plan.trainable)
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     updates, state = bundle.update(grads, state, plan.trainable)
     params = jax.tree.map(
         lambda p, u: p + u if p is not None else None,

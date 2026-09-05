@@ -2,21 +2,12 @@
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_plan
-
-
-def _ones_like_trainable(tree):
-    return jax.tree.map(
-        lambda x: jnp.ones_like(x) if x is not None else None,
-        tree,
-        is_leaf=lambda x: x is None,
-    )
+from .helpers import ones_like_trainable, tiny_plan
 
 
 def test_factorized_adamw_has_no_partition_state():
@@ -44,7 +35,7 @@ def test_factorized_adamw_matches_manual_first_group_updates():
         clip_global_norm=None,
     )
     state = bundle.init(plan.trainable)
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
     updates, _ = bundle.update(grads, state, plan.trainable)
     groups = {group.source_label: group for group in bundle.report.groups}
     adam_unit = 1.0 / (1.0 + bundle.optimizer_config.eps)
@@ -70,7 +61,7 @@ def test_factorized_adamw_requires_params():
         clip_global_norm=None,
     )
     state = bundle.init(plan.trainable)
-    grads = _ones_like_trainable(plan.trainable)
+    grads = ones_like_trainable(plan.trainable)
 
     with pytest.raises(ValueError, match=r"params.*factorized AdamW"):
         bundle.update(grads, state)

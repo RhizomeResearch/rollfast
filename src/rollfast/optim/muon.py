@@ -14,7 +14,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, transform, utils
+import optax
+from optax._src import utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -22,7 +23,6 @@ from rollfast.optim.dimension_numbers import (
 )
 from rollfast.optim.dimension_numbers import (
     WeightDimNumOrFn,
-    _get_dimension_numbers,
     _is_dimension_numbers_leaf,
     _make_matrix_partition_fns,
     _normalize_axes,
@@ -61,7 +61,7 @@ class MuonState(NamedTuple):
     """State for the Muon matrix branch."""
 
     count: jax.Array
-    mu: base.Updates
+    mu: optax.Updates
     ns_coeffs: jax.Array
     magma_s: Any
     key: jax.Array | None
@@ -101,10 +101,10 @@ def _scale_update_for_consistent_rms(
 
 
 def _scale_muon_shape_tree(
-    updates: base.Updates,
-    dim_nums: base.Params,
+    updates: optax.Updates,
+    dim_nums: optax.Params,
     consistent_rms: jax.typing.ArrayLike | None,
-) -> base.Updates:
+) -> optax.Updates:
     if consistent_rms is None:
         return jax.tree.map(
             _scale_update_for_width_transfer,
@@ -123,7 +123,7 @@ def _scale_muon_shape_tree(
 def scale_by_muon_shape(
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Scale Muon updates by width-transfer or consistent-RMS shape factors."""
     _validate_positive_static_scalar("consistent_rms", consistent_rms)
 
@@ -136,13 +136,10 @@ def scale_by_muon_shape(
         )
         return _scale_muon_shape_tree(updates, dim_nums, consistent_rms), state
 
-    return base.GradientTransformation(base.init_empty_state, update_fn)
+    return optax.GradientTransformation(optax.init_empty_state, update_fn)
 
 
 scale_by_shape = scale_by_muon_shape
-
-
-_resolve_ns_coeffs = resolve_ns_coeffs
 
 
 def _call_orthogonalize(
@@ -178,11 +175,11 @@ def scale_by_muon(
     magma_tau: float = 2.0,
     shape_updates: bool = False,
     consistent_rms: jax.typing.ArrayLike | None = None,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Rescale updates according to the Muon algorithm.
 
     ``shape_updates`` and ``weight_decay`` are only used by the public Muon
@@ -208,9 +205,6 @@ def scale_by_muon(
         jax.typing.DTypeLike,
         jnp.float32 if mu_dtype is None else utils.canonicalize_dtype(mu_dtype),
     )
-
-    def resolve_dim_nums(params_or_updates):
-        return _get_dimension_numbers(weight_dimension_numbers, params_or_updates)
 
     def init_fn(params):
         state_key = _fresh_prng_key(key)
@@ -295,7 +289,7 @@ def scale_by_muon(
             )
 
         if use_magma and _has_nonzero_or_scheduled(weight_decay):
-            params = cast(base.Params, params)
+            params = cast(optax.Params, params)
             wd_step = _resolve_scalar(weight_decay, state.count)
             muon_updates = _apply_weight_decay_tree(
                 muon_updates,
@@ -329,7 +323,7 @@ def scale_by_muon(
             key=next_key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def _build_unscaled_muon_branch(
@@ -349,13 +343,13 @@ def _build_unscaled_muon_branch(
     magma_p: float,
     magma_tau: float,
     consistent_rms: jax.typing.ArrayLike | None,
-    weight_decay: base.ScalarOrSchedule,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None,
+    weight_decay: optax.ScalarOrSchedule,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None,
     axis_name: str | None,
     key: jax.Array,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Build the unscaled Muon direction branch shared by wrappers."""
-    components: list[base.GradientTransformation] = [
+    components: list[optax.GradientTransformation] = [
         scale_by_muon(
             ns_coeffs=ns_coeffs,
             ns_steps=ns_steps,
@@ -389,20 +383,20 @@ def _build_unscaled_muon_branch(
         )
         if _has_nonzero_or_scheduled(weight_decay):
             components.append(
-                transform.add_decayed_weights(weight_decay, weight_decay_mask)
+                optax.add_decayed_weights(weight_decay, weight_decay_mask)
             )
 
-    return combine.chain(*components)
+    return optax.chain(*components)
 
 
 def muon(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     ns_coeffs: MuonNsCoeffs = _DEFAULT_NS_COEFFS,
     ns_steps: jax.typing.ArrayLike = 5,
     beta: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     mu_dtype: jax.typing.DTypeLike | None = None,
     *,
     nesterov: bool = True,
@@ -412,8 +406,8 @@ def muon(
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps: jax.typing.ArrayLike | None = None,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_weight_decay: optax.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     muon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     orthogonalize_fn: OrthogonalizeFn = orthogonalize_via_newton_schulz,
@@ -423,7 +417,7 @@ def muon(
     magma_tau: float = 2.0,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Muon optimizer with automatic Muon/AdamW partitioning."""
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -459,11 +453,11 @@ def muon(
         key=key_muon,
     )
 
-    return combine.partition(
+    return optax.partition(
         transforms={
-            "muon": combine.chain(
+            "muon": optax.chain(
                 muon_branch,
-                transform.scale_by_learning_rate(learning_rate),
+                optax.scale_by_learning_rate(learning_rate),
             ),
             "adam": adamw(
                 learning_rate=adam_learning_rate,

@@ -236,7 +236,7 @@ reference profiles, not the stability of the supported Python API. See:
 - [`docs/stability.md`](./docs/stability.md) for the v1 compatibility contract;
 - [`docs/migrating-to-1.0.md`](./docs/migrating-to-1.0.md) when upgrading from
   0.x;
-- [`docs/releases/1.0.0.md`](./docs/releases/1.0.0.md) and
+- [`docs/releases/1.1.0.md`](./docs/releases/1.1.0.md) and
   [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Examples and Fine-Tuning

@@ -28,6 +28,44 @@ class AveragingState(NamedTuple):
 EvalFn = Callable[[Any, optax.OptState | None, str], Any]
 
 
+class _AveragingSetup(NamedTuple):
+    tx: optax.GradientTransformationExtraArgs
+    eval_fn: EvalFn | None
+    eval_views: tuple[str, ...]
+    default_eval_view: str
+
+
+def _build_averaging(
+    tx: optax.GradientTransformation,
+    *,
+    ema: EMAConfig,
+    swa: SWAConfig,
+    total_steps: int | None,
+    labels: Any,
+    groups: tuple[Any, ...],
+    inner_eval_fn: EvalFn | None = None,
+    inner_views: tuple[str, ...] = ("optimizer",),
+    inner_default: str = "optimizer",
+) -> _AveragingSetup:
+    """Assemble parameter averaging and its matching evaluation views."""
+    return _AveragingSetup(
+        tx=wrap_with_averaging(
+            tx,
+            ema=ema,
+            swa=swa,
+            total_steps=total_steps,
+            labels=labels,
+            groups=groups,
+            source_eval_fn=inner_eval_fn,
+        ),
+        eval_fn=make_averaging_eval_fn(ema=ema, swa=swa, inner_eval_fn=inner_eval_fn),
+        eval_views=eval_views(ema=ema, swa=swa, inner_views=inner_views),
+        default_eval_view=default_eval_view(
+            ema=ema, swa=swa, inner_default=inner_default
+        ),
+    )
+
+
 def averaging_enabled(ema: EMAConfig, swa: SWAConfig) -> bool:
     """Return whether any parameter averaging wrapper is enabled."""
 
@@ -240,18 +278,21 @@ def _update_ema(
 
     cadence = (step - config.start_step) % config.update_every == 0
     should_update = applied & (step >= config.start_step) & cadence
-    cast_params = _cast_tree(params, config.state_dtype)
-    next_ema = jax.tree.map(
-        lambda old, new: (
-            None if old is None else config.decay * old + (1.0 - config.decay) * new
-        ),
-        ema_params,
-        cast_params,
-        is_leaf=lambda x: x is None,
-    )
-    next_ema = _where_mask_tree(mask, next_ema, cast_params)
+
+    def update():
+        cast_params = _cast_tree(params, config.state_dtype)
+        next_ema = jax.tree.map(
+            lambda old, new: (
+                None if old is None else config.decay * old + (1.0 - config.decay) * new
+            ),
+            ema_params,
+            cast_params,
+            is_leaf=lambda x: x is None,
+        )
+        return _where_mask_tree(mask, next_ema, cast_params)
+
     return (
-        _where_tree(should_update, next_ema, ema_params),
+        jax.lax.cond(should_update, update, lambda: ema_params),
         ema_count + should_update.astype(jnp.int32),
     )
 
@@ -271,18 +312,23 @@ def _update_swa(
 
     cadence = (step - swa_start_step) % config.frequency == 0
     should_update = applied & (step >= swa_start_step) & cadence
-    cast_params = _cast_tree(params, config.state_dtype)
-    next_count = swa_count + jnp.asarray(1, dtype=jnp.int32)
-    next_swa = jax.tree.map(
-        lambda old, new: (
-            None if old is None else old + (new - old) / next_count.astype(new.dtype)
-        ),
-        swa_params,
-        cast_params,
-        is_leaf=lambda x: x is None,
-    )
+
+    def update():
+        cast_params = _cast_tree(params, config.state_dtype)
+        next_count = swa_count + jnp.asarray(1, dtype=jnp.int32)
+        return jax.tree.map(
+            lambda old, new: (
+                None
+                if old is None
+                else old + (new - old) / next_count.astype(new.dtype)
+            ),
+            swa_params,
+            cast_params,
+            is_leaf=lambda x: x is None,
+        )
+
     return (
-        _where_tree(should_update, next_swa, swa_params),
+        jax.lax.cond(should_update, update, lambda: swa_params),
         swa_count + should_update.astype(jnp.int32),
     )
 

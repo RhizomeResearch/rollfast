@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from optax.transforms import _masking
+import optax
 
 from rollfast.utils import dist_reduce
 
@@ -45,7 +45,7 @@ def apply_magma_internal(
         On Surprising Effectiveness of Masking Updates in Adaptive Optimizers.
         arXiv preprint arXiv:2602.15322.
     """
-    is_leaf_fn = lambda x: isinstance(x, _masking.MaskedNode) or x is None
+    is_leaf_fn = lambda x: isinstance(x, optax.MaskedNode) or x is None
 
     leaves_g, treedef = jax.tree.flatten(raw_gradients, is_leaf=is_leaf_fn)
 
@@ -82,9 +82,9 @@ def apply_magma_internal(
             g is None
             or mu is None
             or delta is None
-            or isinstance(g, _masking.MaskedNode)
-            or isinstance(mu, _masking.MaskedNode)
-            or isinstance(delta, _masking.MaskedNode)
+            or isinstance(g, optax.MaskedNode)
+            or isinstance(mu, optax.MaskedNode)
+            or isinstance(delta, optax.MaskedNode)
         ):
             new_delta_leaves.append(delta)
             new_s_leaves.append(s_prev)

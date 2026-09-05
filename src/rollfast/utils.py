@@ -3,15 +3,27 @@ from typing import Any, Literal, NamedTuple, TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, numerics
-from optax.transforms import _masking
+import optax
+from optax._src import numerics
+
 
 MomentumAccumulator: TypeAlias = Literal["ema", "heavy_ball"]
-MaskOrFn: TypeAlias = Any | Callable[[base.Params], Any] | None
+MaskOrFn: TypeAlias = Any | Callable[[optax.Params], Any] | None
+
+
+def _reject_complex_tree(tree: Any, family: str) -> None:
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(
+            jnp.dtype(leaf.dtype), jnp.complexfloating
+        ):
+            raise ValueError(
+                f"{family} does not support complex leaves; found one at "
+                f"{jax.tree_util.keystr(path)}."
+            )
 
 
 def _is_aux_leaf(x: Any) -> bool:
-    return x is None or isinstance(x, _masking.MaskedNode)
+    return x is None or isinstance(x, optax.MaskedNode)
 
 
 def _map_non_aux(fn: Callable[[jax.Array], jax.Array], tree: Any) -> Any:
@@ -22,7 +34,7 @@ def _map_non_aux(fn: Callable[[jax.Array], jax.Array], tree: Any) -> Any:
     )
 
 
-def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+def _zeros_like_tree(params: optax.Params, dtype: jax.typing.DTypeLike) -> optax.Params:
     target_dtype = jnp.dtype(dtype)
 
     def _zeros_leaf(x):
@@ -43,7 +55,7 @@ def _zeros_like_tree(params: base.Params, dtype: jax.typing.DTypeLike) -> base.P
     )
 
 
-def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Params:
+def _cast_state_tree(tree: optax.Params, dtype: jax.typing.DTypeLike) -> optax.Params:
     target_dtype = jnp.dtype(dtype)
 
     def _cast_leaf(x):
@@ -62,7 +74,7 @@ def _cast_state_tree(tree: base.Params, dtype: jax.typing.DTypeLike) -> base.Par
     )
 
 
-def _init_magma_state(params: base.Params) -> base.Params:
+def _init_magma_state(params: optax.Params) -> optax.Params:
     return jax.tree.map(
         lambda x: x if _is_aux_leaf(x) else jnp.array(0.5, dtype=jnp.float32),
         params,
@@ -91,7 +103,7 @@ def _apply_weight_decay_leaf(
 
 
 def _resolve_scalar(
-    value: base.ScalarOrSchedule,
+    value: optax.ScalarOrSchedule,
     count: jax.Array,
 ) -> jax.typing.ArrayLike:
     """Resolve a scalar-or-schedule value at the given optimizer count."""
@@ -102,7 +114,7 @@ def _resolve_scalar(
     return value
 
 
-def _has_nonzero_or_scheduled(value: base.ScalarOrSchedule) -> bool:
+def _has_nonzero_or_scheduled(value: optax.ScalarOrSchedule) -> bool:
     """Return True when a scalar-or-schedule value may affect updates."""
     if isinstance(value, (int, float)):
         if value < 0.0:
@@ -159,25 +171,25 @@ def _is_mask_callable(mask: Any) -> bool:
 
 def _resolve_mask(
     mask: MaskOrFn,
-    params: base.Params,
-    default_fn: Callable[[base.Params], base.Params] | None = None,
-) -> base.Params | None:
+    params: optax.Params,
+    default_fn: Callable[[optax.Params], optax.Params] | None = None,
+) -> optax.Params | None:
     """Resolve a callable-or-tree mask, optionally using a default when unset."""
     if mask is None:
         return None if default_fn is None else default_fn(params)
     if _is_mask_callable(mask):
-        return cast(Callable[[base.Params], Any], mask)(params)
-    return cast(base.Params, mask)
+        return cast(Callable[[optax.Params], Any], mask)(params)
+    return cast(optax.Params, mask)
 
 
 def _apply_weight_decay_tree(
-    updates: base.Updates,
-    params: base.Params,
+    updates: optax.Updates,
+    params: optax.Params,
     weight_decay_step: jax.typing.ArrayLike,
-    weight_decay_mask: base.Params | None = None,
+    weight_decay_mask: optax.Params | None = None,
     *,
     is_leaf: Callable[[Any], bool] = _is_aux_leaf,
-) -> base.Updates:
+) -> optax.Updates:
     """Apply decoupled weight decay across a tree with optional array masks."""
     _validate_nonnegative_static_scalar("weight_decay", weight_decay_step)
     if weight_decay_mask is None:
@@ -372,8 +384,8 @@ def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
 
 
 def _tree_stochastic_cast(
-    tree: base.Params, target_dtype: Any, key: jax.Array
-) -> base.Params:
+    tree: optax.Params, target_dtype: Any, key: jax.Array
+) -> optax.Params:
     """Safely maps stochastic rounding across a PyTree while ignoring Partitioning masks
     and non-differentiable static leaves (e.g., Equinox Callables).
 
@@ -410,12 +422,12 @@ def _tree_stochastic_cast(
 
 
 def _store_moment_tree(
-    tree: base.Params,
+    tree: optax.Params,
     dtype: jax.typing.DTypeLike,
     key: jax.Array | None,
     *,
     sr_key: jax.Array | None = None,
-) -> tuple[base.Params, jax.Array | None]:
+) -> tuple[optax.Params, jax.Array | None]:
     """Store a moment tree, using stochastic rounding for BF16 state."""
     target_dtype = jnp.dtype(dtype)
     if target_dtype == jnp.dtype(jnp.bfloat16):
@@ -425,7 +437,7 @@ def _store_moment_tree(
     return _cast_state_tree(tree, target_dtype), key
 
 
-def _unzip_leaf_tuple_tree(tree: base.Params, width: int) -> tuple[base.Params, ...]:
+def _unzip_leaf_tuple_tree(tree: optax.Params, width: int) -> tuple[optax.Params, ...]:
     """Split a PyTree whose leaves are fixed-width tuples into tuple components."""
     is_tuple_leaf = lambda x: isinstance(x, tuple) and len(x) == width
     return tuple(
@@ -435,12 +447,12 @@ def _unzip_leaf_tuple_tree(tree: base.Params, width: int) -> tuple[base.Params, 
 
 
 def _tree_update_moment_f32(
-    updates: base.Updates,
-    moments: base.Updates,
+    updates: optax.Updates,
+    moments: optax.Updates,
     decay: jax.typing.ArrayLike,
     *,
     momentum_accumulator: MomentumAccumulator = "ema",
-) -> base.Updates:
+) -> optax.Updates:
     """
     Prevents accumulator truncation. Optax internally casts to the state's dtype.
     This enforces strict FP32 calculation regardless of the state's storage precision.
@@ -468,8 +480,8 @@ def _tree_update_moment_f32(
 
 
 def _tree_update_moment_sq_f32(
-    updates: base.Updates, moments: base.Updates, decay: jax.typing.ArrayLike
-) -> base.Updates:
+    updates: optax.Updates, moments: optax.Updates, decay: jax.typing.ArrayLike
+) -> optax.Updates:
     """
     Prevents sub-normal variance from vanishing. Squaring an unscaled bf16 gradient
     instantly underflows if magnitude < 2^-64. Upcasting BEFORE squaring mitigates this.
@@ -494,12 +506,12 @@ def _tree_update_moment_sq_f32(
 
 
 def _tree_bias_correction_momentum(
-    tree: base.Updates,
+    tree: optax.Updates,
     decay: jax.typing.ArrayLike,
     count: jax.typing.ArrayLike,
     *,
     momentum_accumulator: MomentumAccumulator,
-) -> base.Updates:
+) -> optax.Updates:
     if momentum_accumulator == "heavy_ball":
         return _cast_state_tree(tree, jnp.float32)
     correction = 1.0 - jnp.power(jnp.asarray(decay, dtype=jnp.float32), count)
@@ -507,12 +519,12 @@ def _tree_bias_correction_momentum(
 
 
 def _tree_momentum_lookahead(
-    moments: base.Updates,
-    updates: base.Updates,
+    moments: optax.Updates,
+    updates: optax.Updates,
     decay: jax.typing.ArrayLike,
     *,
     momentum_accumulator: MomentumAccumulator,
-) -> base.Updates:
+) -> optax.Updates:
     decay32 = jnp.asarray(decay, dtype=jnp.float32)
     grad_scale = _momentum_grad_scale(decay32, momentum_accumulator)
 
@@ -534,9 +546,9 @@ class FirstMomentRuntime(NamedTuple):
     """Prepared first-moment state for Muon-family matrix transforms."""
 
     count: jax.Array
-    mu: base.Updates
-    direction: base.Updates
-    mu_stored: base.Updates
+    mu: optax.Updates
+    direction: optax.Updates
+    mu_stored: optax.Updates
     key: jax.Array | None
     sr_key: jax.Array | None
     extra_keys: tuple[jax.Array, ...]
@@ -563,8 +575,8 @@ def _split_first_moment_keys(
 
 
 def _prepare_first_moment_runtime(
-    updates: base.Updates,
-    moments: base.Updates,
+    updates: optax.Updates,
+    moments: optax.Updates,
     count: jax.Array,
     key: jax.Array | None,
     decay: jax.typing.ArrayLike,
@@ -578,7 +590,7 @@ def _prepare_first_moment_runtime(
     extra_key_count: int = 0,
 ) -> FirstMomentRuntime:
     """Update first moment, form the direction, store state, and advance keys."""
-    count_inc = cast(jax.Array, numerics.safe_increment(count))
+    count_inc = cast(jax.Array, optax.safe_increment(count))
     mu = _tree_update_moment_f32(
         updates,
         moments,
@@ -590,7 +602,7 @@ def _prepare_first_moment_runtime(
         moment_count = count_inc
         if nesterov:
             for _ in range(nesterov_moment_count_offset):
-                moment_count = cast(jax.Array, numerics.safe_increment(moment_count))
+                moment_count = cast(jax.Array, optax.safe_increment(moment_count))
         mu_target = _tree_bias_correction_momentum(
             mu,
             decay,
@@ -645,12 +657,28 @@ def _prepare_first_moment_runtime(
     )
 
 
+def _apply_update_leaf(p: Any, u: Any, k: jax.Array | None, *, stochastic: bool) -> Any:
+    if _is_aux_leaf(p) or _is_aux_leaf(u):
+        return p
+
+    p_arr = jnp.asarray(p)
+    u_arr = jnp.asarray(u)
+
+    if p_arr.dtype == jnp.bfloat16:
+        sum_f32 = p_arr.astype(jnp.float32) + u_arr.astype(jnp.float32)
+        if stochastic:
+            return _stochastic_round_bf16(sum_f32, cast(jax.Array, k))
+        return sum_f32.astype(jnp.bfloat16)
+
+    return jnp.asarray(p_arr + u_arr).astype(p_arr.dtype)
+
+
 def apply_updates(
-    params: base.Params,
-    updates: base.Updates,
+    params: optax.Params,
+    updates: optax.Updates,
     key: jax.Array | None = None,
     stochastic: bool = True,
-) -> base.Params:
+) -> optax.Params:
     """Applies an update to the corresponding parameters with optional stochastic
     rounding for bf16.
 
@@ -684,23 +712,8 @@ def apply_updates(
     else:
         keys_tree = jax.tree.unflatten(treedef, [None] * len(leaves))
 
-    def _apply_leaf(p, u, k):
-        if _is_aux_leaf(p) or _is_aux_leaf(u):
-            return p
-
-        p_arr = jnp.asarray(p)
-        u_arr = jnp.asarray(u)
-
-        if p_arr.dtype == jnp.bfloat16:
-            sum_f32 = p_arr.astype(jnp.float32) + u_arr.astype(jnp.float32)
-            if stochastic:
-                return _stochastic_round_bf16(sum_f32, k)
-            return sum_f32.astype(jnp.bfloat16)
-
-        return jnp.asarray(p_arr + u_arr).astype(p_arr.dtype)
-
     return jax.tree.map(
-        _apply_leaf,
+        lambda p, u, k: _apply_update_leaf(p, u, k, stochastic=stochastic),
         params,
         updates,
         keys_tree,
@@ -709,11 +722,11 @@ def apply_updates(
 
 
 def apply_updates_prefix(
-    model: base.Params,
-    updates: base.Updates,
+    model: optax.Params,
+    updates: optax.Updates,
     key: jax.Array | None = None,
     stochastic: bool = True,
-) -> base.Params:
+) -> optax.Params:
     """Equinox-compatible apply_updates: `updates` may be a prefix of `model`.
 
     Semantics:
@@ -748,22 +761,10 @@ def apply_updates_prefix(
     else:
         keys_tree = jax.tree.unflatten(update_treedef, [None] * len(update_leaves))
 
-    def _apply_update(u, p, k):
-        if _is_aux_leaf(u):
-            return p
-        if _is_aux_leaf(p):
-            return p
-        # Non-array leaves (e.g. Equinox Callables) should never receive a
-        # non-None update; surface the error immediately rather than masking it.
-        p_arr = jnp.asarray(p)
-        u_arr = jnp.asarray(u)
-
-        if p_arr.dtype == jnp.bfloat16:
-            sum_f32 = p_arr.astype(jnp.float32) + u_arr.astype(jnp.float32)
-            if stochastic:
-                return _stochastic_round_bf16(sum_f32, k)
-            return sum_f32.astype(jnp.bfloat16)
-
-        return jnp.asarray(p_arr + u_arr).astype(p_arr.dtype)
-
-    return jax.tree.map(_apply_update, updates, model, keys_tree, is_leaf=_is_aux_leaf)
+    return jax.tree.map(
+        lambda u, p, k: _apply_update_leaf(p, u, k, stochastic=stochastic),
+        updates,
+        model,
+        keys_tree,
+        is_leaf=_is_aux_leaf,
+    )

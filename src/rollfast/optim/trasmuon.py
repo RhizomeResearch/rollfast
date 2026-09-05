@@ -11,7 +11,8 @@ from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, combine, numerics, transform, utils
+import optax
+from optax._src import numerics, utils
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import (
@@ -52,11 +53,11 @@ class ScaleByTrasMuonState(NamedTuple):
     """State for TrasMuon's matrix branch."""
 
     count: jax.Array
-    mu: base.Updates
-    v_row: base.Updates
-    energy_ref: base.Updates
-    clip_ema: base.Updates
-    clip_last: base.Updates
+    mu: optax.Updates
+    v_row: optax.Updates
+    energy_ref: optax.Updates
+    clip_ema: optax.Updates
+    clip_last: optax.Updates
     key: jax.Array | None
 
 
@@ -241,7 +242,7 @@ def scale_by_trasmuon(
     mu_dtype: jax.typing.DTypeLike | None = None,
     weight_dimension_numbers: WeightDimNumOrFn | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """Scale updates with TrasMuon's matrix direction.
 
     The returned updates are positive descent directions. Compose with
@@ -387,16 +388,16 @@ def scale_by_trasmuon(
             key=runtime.key,
         )
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def trasmuon(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     beta1: jax.typing.ArrayLike = 0.95,
     beta2: jax.typing.ArrayLike = 0.95,
     eps: jax.typing.ArrayLike = 1e-8,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-    weight_decay_mask: Any | Callable[[base.Params], Any] | None = None,
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     ns_iters: int = 5,
     ns_coeffs: MuonNsCoeffs = MUON_NS_COEFFS,
     *,
@@ -414,11 +415,11 @@ def trasmuon(
     adam_b1: jax.typing.ArrayLike = 0.9,
     adam_b2: jax.typing.ArrayLike = 0.999,
     adam_eps_root: jax.typing.ArrayLike = 0.0,
-    adam_weight_decay: base.ScalarOrSchedule | None = None,
-    adam_learning_rate: base.ScalarOrSchedule | None = None,
+    adam_weight_decay: optax.ScalarOrSchedule | None = None,
+    adam_learning_rate: optax.ScalarOrSchedule | None = None,
     trasmuon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformation:
+) -> optax.GradientTransformation:
     """TrasMuon optimizer with automatic matrix/AdamW partitioning."""
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -456,13 +457,13 @@ def trasmuon(
     ]
     if _has_nonzero_or_scheduled(weight_decay):
         trasmuon_components.append(
-            transform.add_decayed_weights(weight_decay, weight_decay_mask)
+            optax.add_decayed_weights(weight_decay, weight_decay_mask)
         )
-    trasmuon_components.append(transform.scale_by_learning_rate(learning_rate))
+    trasmuon_components.append(optax.scale_by_learning_rate(learning_rate))
 
-    return combine.partition(
+    return optax.partition(
         transforms={
-            "trasmuon": combine.chain(*trasmuon_components),
+            "trasmuon": optax.chain(*trasmuon_components),
             "adam": adamw(
                 learning_rate=adam_learning_rate,
                 b1=adam_b1,

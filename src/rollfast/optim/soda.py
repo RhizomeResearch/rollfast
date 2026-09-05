@@ -24,7 +24,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-from optax._src import base
+import optax
 
 from rollfast.optim.adam import adamw
 from rollfast.optim.dimension_numbers import WeightDimNumOrFn
@@ -43,32 +43,21 @@ from rollfast.optim.psgd import (
 )
 from rollfast.optim.rmnp import rmnp
 from rollfast.schedules.wsd import _make_wsd_schedule_pair
-from rollfast.utils import MomentumAccumulator
-
-
-def _reject_complex_tree(tree) -> None:
-    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
-        if hasattr(leaf, "dtype") and jnp.issubdtype(
-            jnp.dtype(leaf.dtype), jnp.complexfloating
-        ):
-            raise ValueError(
-                "SODA does not support complex leaves; found one at "
-                f"{jax.tree_util.keystr(path)}."
-            )
+from rollfast.utils import MomentumAccumulator, _reject_complex_tree
 
 
 class SodaState(NamedTuple):
     """State for the practical SODA wrapper."""
 
     count: jax.Array
-    base_state: base.OptState
-    z0: base.Params
+    base_state: optax.OptState
+    z0: optax.Params
 
 
 def soda(
-    base_optimizer: base.GradientTransformation,
+    base_optimizer: optax.GradientTransformation,
     state_dtype: jax.typing.DTypeLike | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     r"""Practical SODA wrapper for an existing base optimizer.
 
     This implements Algorithm 1 from "Optimistic Dual Averaging Unifies Modern
@@ -80,10 +69,10 @@ def soda(
     include weight decay. SODA replaces tuned weight decay with a parameter-free
     initialization-centered anchor term.
     """
-    base_optimizer = base.with_extra_args_support(base_optimizer)
+    base_optimizer = optax.with_extra_args_support(base_optimizer)
 
     def init_fn(params):
-        _reject_complex_tree(params)
+        _reject_complex_tree(params, "SODA")
         z0 = jax.tree.map(
             lambda x: (
                 jnp.array(x, dtype=state_dtype, copy=True) if x is not None else None
@@ -98,9 +87,9 @@ def soda(
         )
 
     def update_fn(updates, state, params=None, **extra_args):
-        _reject_complex_tree(updates)
+        _reject_complex_tree(updates, "SODA")
         if params is not None:
-            _reject_complex_tree(params)
+            _reject_complex_tree(params, "SODA")
         if params is None:
             raise ValueError("`params` must be provided to `soda`.")
 
@@ -135,7 +124,7 @@ def soda(
             z0=state.z0,
         )
 
-    return base.GradientTransformationExtraArgs(init_fn, update_fn)
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
 def soda_adam(
@@ -152,7 +141,7 @@ def soda_adam(
     nesterov: bool = False,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Adam base optimizer wrapped with SODA."""
     lr_schedule, _ = _make_wsd_schedule_pair(
         learning_rate=learning_rate,
@@ -212,7 +201,7 @@ def soda_prism(
     adam_eps: float = 1e-8,
     prism_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """PRISM base optimizer wrapped with SODA."""
     prism_schedule, adam_schedule = _make_wsd_schedule_pair(
         learning_rate=learning_rate,
@@ -266,7 +255,7 @@ def soda_kron(
     decay_fraction: float = 0.1,
     state_dtype: jax.typing.DTypeLike | None = None,
     b1: float = 0.9,
-    preconditioner_update_probability: base.ScalarOrSchedule = (
+    preconditioner_update_probability: optax.ScalarOrSchedule = (
         precond_update_prob_schedule()
     ),
     max_size_triangular: int = 8192,
@@ -281,7 +270,7 @@ def soda_kron(
     precond_dtype: str | jnp.dtype | None = None,
     precond_update_precision: str | None = "tensorfloat32",
     precond_grads_precision: str | None = None,
-    scanned_layers: base.Params | None = None,
+    scanned_layers: optax.Params | None = None,
     lax_map_scanned_layers: bool = False,
     lax_map_batch_size: int = 8,
     preconditioner_mode: str | PreconditionerMode = PreconditionerMode.Q0P5EQ1P5,
@@ -295,7 +284,7 @@ def soda_kron(
     newton_schulz_iters: int = 5,
     axis_name: str | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """PSGD Kron base optimizer wrapped with SODA."""
     lr_schedule, _ = _make_wsd_schedule_pair(
         learning_rate=learning_rate,
@@ -363,7 +352,7 @@ def soda_muon(
     muon_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """Rollfast Muon base optimizer wrapped with SODA."""
     muon_schedule, adam_schedule = _make_wsd_schedule_pair(
         learning_rate=learning_rate,
@@ -419,7 +408,7 @@ def soda_rmnp(
     rmnp_weight_dimension_numbers: WeightDimNumOrFn | None = None,
     consistent_rms: jax.typing.ArrayLike | None = None,
     key: jax.Array | None = None,
-) -> base.GradientTransformationExtraArgs:
+) -> optax.GradientTransformationExtraArgs:
     """RMNP base optimizer wrapped with SODA."""
     rmnp_schedule, adam_schedule = _make_wsd_schedule_pair(
         learning_rate=learning_rate,

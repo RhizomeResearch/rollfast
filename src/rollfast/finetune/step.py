@@ -279,6 +279,37 @@ def make_master_update_step(
     return step
 
 
+def _apply_scaled_master_grads(
+    optimizer: OptimizerBundle,
+    visible_params: Any,
+    master_params: Any,
+    opt_state: optax.OptState,
+    scaled_grads: Any,
+    scale: jax.Array,
+    loss: Any,
+) -> tuple[Any, Any, optax.OptState, jax.Array]:
+    """Commit parameters and optimizer state together only for finite gradients."""
+    precision = optimizer.precision_config
+    grads = _tree_divide(scaled_grads, scale)
+    all_finite = _tree_all_finite((loss, grads))
+    grads = _select_tree(all_finite, grads, _tree_zeros_like(grads))
+    grads = _cast_gradient_tree(grads, precision.gradient_dtype)
+
+    def propose():
+        updates, candidate_opt_state = optimizer.update(grads, opt_state, master_params)
+        candidate_master = optax.apply_updates(master_params, updates)
+        candidate_visible = _cast_tree_like(candidate_master, visible_params)
+        return candidate_visible, candidate_master, candidate_opt_state
+
+    visible_params, master_params, opt_state = _commit_finite_optimizer_result(
+        all_finite,
+        propose,
+        (visible_params, master_params, opt_state),
+        optimizer,
+    )
+    return visible_params, master_params, opt_state, all_finite
+
+
 def make_loss_scaled_master_update_step(
     loss_fn: Callable[..., Any],
     optimizer: OptimizerBundle,
@@ -323,20 +354,17 @@ def make_loss_scaled_master_update_step(
             *args,
             **kwargs,
         )
-        grads = _tree_divide(scaled_grads, scale)
-        all_finite = _tree_all_finite((_primary_loss(value, has_aux=has_aux), grads))
-        grads = _select_tree(all_finite, grads, _tree_zeros_like(grads))
-        grads = _cast_gradient_tree(grads, precision.gradient_dtype)
-        updates, candidate_opt_state = optimizer.update(grads, opt_state, master_params)
-        candidate_master = optax.apply_updates(master_params, updates)
-        candidate_visible = _cast_tree_like(candidate_master, visible_params)
-        visible_params = _select_tree(
-            all_finite,
-            candidate_visible,
-            visible_params,
+        visible_params, master_params, opt_state, all_finite = (
+            _apply_scaled_master_grads(
+                optimizer,
+                visible_params,
+                master_params,
+                opt_state,
+                scaled_grads,
+                scale,
+                _primary_loss(value, has_aux=has_aux),
+            )
         )
-        master_params = _select_tree(all_finite, candidate_master, master_params)
-        opt_state = _select_tree(all_finite, candidate_opt_state, opt_state)
         loss_scale_state = _updated_loss_scale_state(
             loss_scale_state,
             all_finite,
@@ -427,20 +455,17 @@ def make_stateful_loss_scaled_master_update_step(
             *args,
             **kwargs,
         )
-        grads = _tree_divide(scaled_grads, scale)
-        all_finite = _tree_all_finite((_primary_loss(value, has_aux=has_aux), grads))
-        grads = _select_tree(all_finite, grads, _tree_zeros_like(grads))
-        grads = _cast_gradient_tree(grads, precision.gradient_dtype)
-        updates, candidate_opt_state = optimizer.update(grads, opt_state, master_params)
-        candidate_master = optax.apply_updates(master_params, updates)
-        candidate_visible = _cast_tree_like(candidate_master, visible_params)
-        visible_params = _select_tree(
-            all_finite,
-            candidate_visible,
-            visible_params,
+        visible_params, master_params, opt_state, all_finite = (
+            _apply_scaled_master_grads(
+                optimizer,
+                visible_params,
+                master_params,
+                opt_state,
+                scaled_grads,
+                scale,
+                _primary_loss(value, has_aux=has_aux),
+            )
         )
-        master_params = _select_tree(all_finite, candidate_master, master_params)
-        opt_state = _select_tree(all_finite, candidate_opt_state, opt_state)
         model_state = _commit_model_state(
             state_policy,
             model_state,
@@ -891,14 +916,18 @@ def make_stateful_sam_step(
             perturbed_grads,
             _tree_zeros_like(perturbed_grads),
         )
-        updates, candidate_opt_state = base_optimizer.update(
-            safe_perturbed_grads,
-            opt_state,
-            trainable,
+
+        def propose():
+            updates, candidate_opt_state = base_optimizer.update(
+                safe_perturbed_grads,
+                opt_state,
+                trainable,
+            )
+            return optax.apply_updates(trainable, updates), candidate_opt_state
+
+        trainable, opt_state = _commit_finite_optimizer_result(
+            all_finite, propose, (trainable, opt_state), base_optimizer
         )
-        candidate_trainable = optax.apply_updates(trainable, updates)
-        trainable = _select_tree(all_finite, candidate_trainable, trainable)
-        opt_state = _select_tree(all_finite, candidate_opt_state, opt_state)
         model_state = _commit_model_state(
             state_policy,
             model_state,
@@ -954,9 +983,8 @@ def _evaluate_sam_value_and_grad(
         axis=microbatch_axis,
         count=microbatch_count,
     )
-    total_value = None
-    total_grads = None
-    for index in range(count):
+
+    def evaluate(index):
         micro_args = _slice_microbatch_tree(
             args,
             index=index,
@@ -969,9 +997,19 @@ def _evaluate_sam_value_and_grad(
             axis=microbatch_axis,
             count=count,
         )
-        value, grads = value_and_grad(trainable, *micro_args, **micro_kwargs)
-        total_value = value if total_value is None else _tree_add(total_value, value)
-        total_grads = grads if total_grads is None else _tree_add(total_grads, grads)
+        return value_and_grad(trainable, *micro_args, **micro_kwargs)
+
+    total_value, total_grads = evaluate(0) if count > 0 else (None, None)
+    if count > 1:
+
+        def accumulate(carry, index):
+            value, grads = evaluate(index)
+            return (_tree_add(carry[0], value), _tree_add(carry[1], grads)), None
+
+        # Seed from the first microbatch to retain the original sum order and dtype.
+        (total_value, total_grads), _ = jax.lax.scan(
+            accumulate, (total_value, total_grads), jnp.arange(1, count)
+        )
 
     if microbatch_reduction == "mean":
         scale = 1.0 / count
@@ -1012,9 +1050,10 @@ def _evaluate_loss_bundle_value_and_grad(
         axis=microbatch_axis,
         count=microbatch_count,
     )
-    total_bundle = None
-    total_grads = None
-    for index in range(count):
+    if count <= 0:
+        raise ValueError("microbatch_count must be positive.")
+
+    def evaluate(index):
         micro_args = _slice_microbatch_tree(
             args,
             index=index,
@@ -1033,12 +1072,21 @@ def _evaluate_loss_bundle_value_and_grad(
             micro_args,
             micro_kwargs,
         )
-        total_bundle = (
-            bundle if total_bundle is None else _add_loss_bundles(total_bundle, bundle)
+        return bundle, grads
+
+    total_bundle, total_grads = evaluate(0)
+    if count > 1:
+
+        def accumulate(carry, index):
+            bundle, grads = evaluate(index)
+            return (
+                _add_loss_bundles(carry[0], bundle),
+                _tree_add(carry[1], grads),
+            ), None
+
+        (total_bundle, total_grads), _ = jax.lax.scan(
+            accumulate, (total_bundle, total_grads), jnp.arange(1, count)
         )
-        total_grads = grads if total_grads is None else _tree_add(total_grads, grads)
-    if total_bundle is None:
-        raise ValueError("microbatch_count must be positive.")
     return total_bundle, total_grads
 
 
@@ -1518,6 +1566,37 @@ def _select_tree(condition: Any, true_tree: Any, false_tree: Any) -> Any:
         true_tree,
         false_tree,
         is_leaf=lambda x: x is None,
+    )
+
+
+def _commit_finite_optimizer_result(
+    all_finite: jax.Array,
+    propose: Callable[[], Any],
+    current: Any,
+    optimizer: OptimizerBundle,
+) -> Any:
+    policy = optimizer.gradient_policy
+    if (
+        policy.axis_name is not None
+        or policy.partition_axis_names is not None
+        or policy.replicated_axis_names is not None
+        or optimizer.sharding_policy.mesh_axes
+    ):
+        # Replica-local finite flags must not change participation in collectives.
+        return _select_tree(all_finite, propose(), current)
+
+    def accept():
+        # Retain where's dtype promotion for transforms that canonicalize state
+        # on their first update, including restored mixed-precision state.
+        return _select_tree(True, propose(), current)
+
+    proposed_jaxpr, result_shape = jax.make_jaxpr(accept, return_shape=True)()
+    if proposed_jaxpr.effects:
+        # Custom transformations can introduce collectives or callbacks that
+        # are not described by the bundle's policies. Preserve those effects.
+        return _select_tree(all_finite, propose(), current)
+    return jax.lax.cond(
+        all_finite, accept, lambda: _cast_tree_like(current, result_shape)
     )
 
 

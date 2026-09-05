@@ -8,25 +8,14 @@ from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
-from optax._src import base, numerics, utils
-from optax.transforms import _masking
+import optax
+from optax._src import utils
 
-from rollfast.utils import _safe_bias_correction
+from rollfast.utils import _reject_complex_tree, _safe_bias_correction
 
 
 Projection = Literal["auto", "left", "right", "two_sided"]
 StateOnRefresh = Literal["reuse_coordinates", "reset", "transport"]
-
-
-def _reject_complex_tree(tree: Any) -> None:
-    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
-        if hasattr(leaf, "dtype") and jnp.issubdtype(
-            jnp.dtype(leaf.dtype), jnp.complexfloating
-        ):
-            raise ValueError(
-                "GaLore does not support complex leaves; found one at "
-                f"{jax.tree_util.keystr(path)}."
-            )
 
 
 @jax.tree_util.register_pytree_node_class
@@ -78,7 +67,7 @@ class _LeafUpdateResult:
 
 
 def galore_adamw(
-    learning_rate: base.ScalarOrSchedule,
+    learning_rate: optax.ScalarOrSchedule,
     *,
     rank: int,
     update_interval: int = 200,
@@ -93,8 +82,8 @@ def galore_adamw(
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike = jnp.float32,
-    weight_decay: base.ScalarOrSchedule = 0.0,
-) -> base.GradientTransformation:
+    weight_decay: optax.ScalarOrSchedule = 0.0,
+) -> optax.GradientTransformation:
     """AdamW with GaLore low-rank moment states for eligible matrices."""
 
     if rank < 1:
@@ -122,7 +111,7 @@ def galore_adamw(
     decay_requires_params = callable(weight_decay) or weight_decay != 0.0
 
     def init_fn(params):
-        _reject_complex_tree(params)
+        _reject_complex_tree(params, "GaLore")
         leaves = jax.tree.map(
             lambda param: _init_leaf_state(
                 param,
@@ -138,9 +127,9 @@ def galore_adamw(
         return ScaleByGaLoreState(count=jnp.zeros([], jnp.int32), leaves=leaves)
 
     def update_fn(updates, state, params=None):
-        _reject_complex_tree(updates)
+        _reject_complex_tree(updates, "GaLore")
         if params is not None:
-            _reject_complex_tree(params)
+            _reject_complex_tree(params, "GaLore")
         if params is None:
             if decay_requires_params:
                 raise ValueError(
@@ -148,7 +137,7 @@ def galore_adamw(
                     "is nonzero or scheduled."
                 )
             params = jax.tree.map(lambda _: None, updates)
-        count_inc = cast(jax.Array, numerics.safe_increment(state.count))
+        count_inc = cast(jax.Array, optax.safe_increment(state.count))
         should_refresh = (state.count % update_interval) == 0
         wd_step = (
             cast(Callable[[jax.Array], Any], weight_decay)(state.count)
@@ -196,7 +185,7 @@ def galore_adamw(
         )
         return new_updates, ScaleByGaLoreState(count=count_inc, leaves=new_leaves)
 
-    return base.GradientTransformation(init_fn, update_fn)
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def projected_state_nbytes(
@@ -294,85 +283,36 @@ def _update_leaf(
 ) -> _LeafUpdateResult:
     if _is_passthrough(grad) or _is_passthrough(state):
         return _LeafUpdateResult(grad, state)
-    if not isinstance(state, GaLoreLeafState) or not state.projected:
-        return _full_adam_leaf(
+    projected = isinstance(state, GaLoreLeafState) and state.projected
+    basis_left, basis_right = state.basis_left, state.basis_right
+    moment_grad = grad
+    mu_prev, nu_prev = state.mu, state.nu
+    if projected:
+        basis_left, basis_right = _refresh_basis(
             grad,
             state,
-            param,
-            count_inc=count_inc,
-            b1=b1,
-            b2=b2,
-            eps=eps,
-            eps_root=eps_root,
-            weight_decay=weight_decay,
-            learning_rate=learning_rate,
-            mu_dtype=mu_dtype,
-        )
-
-    basis_left, basis_right = _refresh_basis(
-        grad,
-        state,
-        should_refresh=should_refresh,
-        basis_dtype=basis_dtype,
-    )
-    projected_grad = _project(grad, basis_left, basis_right, state.orientation)
-    if state_on_basis_refresh == "reset":
-        mu_prev = jnp.where(should_refresh, jnp.zeros_like(state.mu), state.mu)
-        nu_prev = jnp.where(should_refresh, jnp.zeros_like(state.nu), state.nu)
-    elif state_on_basis_refresh == "transport":
-        mu_prev, nu_prev = _transport_projected_moments(
-            state,
-            basis_left,
-            basis_right,
             should_refresh=should_refresh,
+            basis_dtype=basis_dtype,
         )
-    else:
-        mu_prev = state.mu
-        nu_prev = state.nu
-    mu = (b1 * mu_prev + (1.0 - b1) * projected_grad).astype(mu_dtype)
-    nu = (b2 * nu_prev + (1.0 - b2) * jnp.square(projected_grad)).astype(mu_dtype)
-    mu_hat = _safe_bias_correction(mu.astype(jnp.float32), 1.0 - b1**count_inc)
-    nu_hat = _safe_bias_correction(nu.astype(jnp.float32), 1.0 - b2**count_inc)
-    projected_update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
-    update = _reconstruct(projected_update, basis_left, basis_right, state.orientation)
-    update = update * scale
-    if param is not None:
-        decay = jnp.asarray(weight_decay, dtype=jnp.float32)
-        update = update + decay * param.astype(jnp.float32)
-    update = (-learning_rate * update).astype(grad.dtype)
-    return _LeafUpdateResult(
-        update,
-        GaLoreLeafState(
-            basis_left,
-            basis_right,
-            mu,
-            nu,
-            state.orientation,
-            state.projected,
-            state.shape,
-        ),
-    )
-
-
-def _full_adam_leaf(
-    grad,
-    state,
-    param,
-    *,
-    count_inc,
-    b1,
-    b2,
-    eps,
-    eps_root,
-    weight_decay,
-    learning_rate,
-    mu_dtype,
-) -> _LeafUpdateResult:
-    mu = (b1 * state.mu + (1.0 - b1) * grad).astype(mu_dtype)
-    nu = (b2 * state.nu + (1.0 - b2) * jnp.square(grad)).astype(mu_dtype)
+        moment_grad = _project(grad, basis_left, basis_right, state.orientation)
+        if state_on_basis_refresh == "reset":
+            mu_prev = jnp.where(should_refresh, jnp.zeros_like(state.mu), state.mu)
+            nu_prev = jnp.where(should_refresh, jnp.zeros_like(state.nu), state.nu)
+        elif state_on_basis_refresh == "transport":
+            mu_prev, nu_prev = _transport_projected_moments(
+                state,
+                basis_left,
+                basis_right,
+                should_refresh=should_refresh,
+            )
+    mu = (b1 * mu_prev + (1.0 - b1) * moment_grad).astype(mu_dtype)
+    nu = (b2 * nu_prev + (1.0 - b2) * jnp.square(moment_grad)).astype(mu_dtype)
     mu_hat = _safe_bias_correction(mu.astype(jnp.float32), 1.0 - b1**count_inc)
     nu_hat = _safe_bias_correction(nu.astype(jnp.float32), 1.0 - b2**count_inc)
     update = mu_hat / (jnp.sqrt(nu_hat + eps_root) + eps)
+    if projected:
+        update = _reconstruct(update, basis_left, basis_right, state.orientation)
+        update = update * scale
     if param is not None:
         decay = jnp.asarray(weight_decay, dtype=jnp.float32)
         update = update + decay * param.astype(jnp.float32)
@@ -380,8 +320,8 @@ def _full_adam_leaf(
     return _LeafUpdateResult(
         update,
         GaLoreLeafState(
-            state.basis_left,
-            state.basis_right,
+            basis_left,
+            basis_right,
             mu,
             nu,
             state.orientation,
@@ -398,19 +338,22 @@ def _refresh_basis(
     should_refresh,
     basis_dtype,
 ) -> tuple[jax.Array, jax.Array]:
-    basis_left, basis_right = _basis_from_grad(grad, state.orientation, state.mu.shape)
-    basis_left = basis_left.astype(basis_dtype)
-    basis_right = basis_right.astype(basis_dtype)
-    if state.orientation == "left":
-        basis_left = jnp.where(should_refresh, basis_left, state.basis_left)
-        basis_right = state.basis_right
-    elif state.orientation == "right":
-        basis_left = state.basis_left
-        basis_right = jnp.where(should_refresh, basis_right, state.basis_right)
-    else:
-        basis_left = jnp.where(should_refresh, basis_left, state.basis_left)
-        basis_right = jnp.where(should_refresh, basis_right, state.basis_right)
-    return basis_left, basis_right
+    def refresh():
+        basis_left, basis_right = _basis_from_grad(
+            grad, state.orientation, state.mu.shape
+        )
+        return (
+            state.basis_left
+            if state.orientation == "right"
+            else basis_left.astype(basis_dtype),
+            state.basis_right
+            if state.orientation == "left"
+            else basis_right.astype(basis_dtype),
+        )
+
+    return jax.lax.cond(
+        should_refresh, refresh, lambda: (state.basis_left, state.basis_right)
+    )
 
 
 def _transport_projected_moments(
@@ -420,35 +363,35 @@ def _transport_projected_moments(
     *,
     should_refresh,
 ) -> tuple[jax.Array, jax.Array]:
-    if state.orientation == "left":
-        overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
-            jnp.float32
-        )
-        mu = overlap @ state.mu.astype(jnp.float32)
-        nu = jnp.square(overlap) @ state.nu.astype(jnp.float32)
-    elif state.orientation == "right":
-        overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
-            jnp.float32
-        )
-        mu = state.mu.astype(jnp.float32) @ overlap
-        nu = state.nu.astype(jnp.float32) @ jnp.square(overlap)
-    else:
-        left_overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
-            jnp.float32
-        )
-        right_overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
-            jnp.float32
-        )
-        mu = left_overlap @ state.mu.astype(jnp.float32) @ right_overlap
-        nu = (
-            jnp.square(left_overlap)
-            @ state.nu.astype(jnp.float32)
-            @ jnp.square(right_overlap)
-        )
-    return (
-        jnp.where(should_refresh, mu.astype(state.mu.dtype), state.mu),
-        jnp.where(should_refresh, nu.astype(state.nu.dtype), state.nu),
-    )
+    def transport():
+        if state.orientation == "left":
+            overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
+                jnp.float32
+            )
+            mu = overlap @ state.mu.astype(jnp.float32)
+            nu = jnp.square(overlap) @ state.nu.astype(jnp.float32)
+        elif state.orientation == "right":
+            overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
+                jnp.float32
+            )
+            mu = state.mu.astype(jnp.float32) @ overlap
+            nu = state.nu.astype(jnp.float32) @ jnp.square(overlap)
+        else:
+            left_overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
+                jnp.float32
+            )
+            right_overlap = state.basis_right.T.astype(
+                jnp.float32
+            ) @ basis_right.astype(jnp.float32)
+            mu = left_overlap @ state.mu.astype(jnp.float32) @ right_overlap
+            nu = (
+                jnp.square(left_overlap)
+                @ state.nu.astype(jnp.float32)
+                @ jnp.square(right_overlap)
+            )
+        return mu.astype(state.mu.dtype), nu.astype(state.nu.dtype)
+
+    return jax.lax.cond(should_refresh, transport, lambda: (state.mu, state.nu))
 
 
 def _basis_from_grad(
@@ -530,7 +473,7 @@ def _numel(shape: tuple[int, ...]) -> int:
 
 
 def _is_passthrough(value: Any) -> bool:
-    return value is None or isinstance(value, _masking.MaskedNode)
+    return value is None or isinstance(value, optax.MaskedNode)
 
 
 def _is_state_or_passthrough(value: Any) -> bool:

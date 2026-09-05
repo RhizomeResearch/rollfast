@@ -9,7 +9,7 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import tiny_plan
+from .helpers import assert_rng_equal, tiny_plan
 
 
 def _bundle(plan, *, accumulation_steps: int = 1):
@@ -47,17 +47,6 @@ def _assert_tree_allclose(left, right):
     for lhs, rhs in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True):
         if hasattr(lhs, "dtype"):
             np.testing.assert_allclose(lhs, rhs)
-
-
-def _assert_rng_equal(left, right):
-    for name in (
-        "forward",
-        "sam",
-        "stochastic_rounding",
-        "quantization",
-        "controller",
-    ):
-        np.testing.assert_allclose(getattr(left, name), getattr(right, name))
 
 
 def test_stateful_sam_replays_same_key_and_commits_first_pass_state_only():
@@ -125,7 +114,7 @@ def test_stateful_sam_skips_transaction_when_second_pass_is_nonfinite():
     assert model_state["updates"] == 0
     _assert_tree_allclose(params, plan.trainable)
     _assert_tree_allclose(opt_state, old_opt_state)
-    _assert_rng_equal(rng_after, rng)
+    assert_rng_equal(rng_after, rng)
 
 
 def test_stateful_sam_aggregate_policy_commits_first_pass_via_hook():
