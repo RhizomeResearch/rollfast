@@ -1,12 +1,11 @@
 """Compile Rollfast AdamW with blockwise 8-bit state for an Equimo plan."""
 
-import jax
-
 import equimo.finetune as eqft
 import equimo.vision.models as em
+import jax
+
 import rollfast.finetune as rfft
 from rollfast.optim.adam8 import tree_state_nbytes
-
 
 key = jax.random.PRNGKey(0)
 model = em.vit_tiny_patch16_224(num_classes=10, key=key)

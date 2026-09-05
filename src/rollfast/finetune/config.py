@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from importlib import metadata as importlib_metadata
-import math
-from typing import Any, Callable, Literal, Mapping, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -13,10 +14,11 @@ import optax
 
 from rollfast.optim.adam8 import (
     DYNAMIC_SIGNED_CODEBOOK_ID as ADAM8_FIRST_MOMENT_CODEBOOK_ID,
+)
+from rollfast.optim.adam8 import (
     DYNAMIC_UNSIGNED_CODEBOOK_ID as ADAM8_SECOND_MOMENT_CODEBOOK_ID,
 )
 from rollfast.utils import AxisName, resolve_partition_norm_axis_name
-
 
 SCHEMA_VERSION = 1
 
@@ -98,7 +100,7 @@ class ScheduleConfig:
         if self.power <= 0.0:
             raise ValueError("power must be positive.")
 
-    def resolved(self, total_steps: int | None = None) -> "ScheduleConfig":
+    def resolved(self, total_steps: int | None = None) -> ScheduleConfig:
         """Return a copy with ``total_steps`` filled in if supplied."""
 
         resolved_total = self.total_steps if total_steps is None else total_steps
@@ -113,7 +115,7 @@ class ScheduleConfig:
         warmup_epochs: float,
         end_lr_ratio: float = 0.01,
         step_counter: StepCounter = "optimizer",
-    ) -> "ScheduleConfig":
+    ) -> ScheduleConfig:
         """Build a warmup-cosine schedule from epoch and batch counts."""
 
         if num_epochs <= 0:
@@ -146,7 +148,7 @@ class ScheduleConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ScheduleConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> ScheduleConfig:
         return cls(
             kind=data.get("kind", "warmup_cosine"),
             total_steps=data.get("total_steps"),
@@ -215,7 +217,7 @@ class OptimizerConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "OptimizerConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> OptimizerConfig:
         return cls(
             name=data.get("name", "adamw"),
             base_lr=data.get("base_lr", 5e-4),
@@ -282,7 +284,7 @@ class GradientPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "GradientPolicy":
+    def from_dict(cls, data: Mapping[str, Any]) -> GradientPolicy:
         return cls(
             clip_global_norm=data.get("clip_global_norm", 1.0),
             nonfinite=data.get("nonfinite", "skip"),
@@ -336,7 +338,7 @@ class AccumulationConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "AccumulationConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> AccumulationConfig:
         return cls(
             steps=data.get("steps", 1),
             normalization=data.get("normalization", "examples"),
@@ -412,7 +414,7 @@ class PrecisionConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "PrecisionConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> PrecisionConfig:
         expected = data.get("expected_model_compute_dtype")
         return cls(
             expected_model_compute_dtype=None
@@ -495,7 +497,7 @@ class StateQuantizationConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StateQuantizationConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> StateQuantizationConfig:
         return cls(
             enabled=data.get("enabled", False),
             bits=data.get("bits", 8),
@@ -552,9 +554,12 @@ class GroupRule:
                 raise ValueError("weight_decay_value must be finite.")
             if weight_decay_value < 0.0:
                 raise ValueError("weight_decay_value must be non-negative.")
-        if self.min_depth is not None and self.max_depth is not None:
-            if self.min_depth > self.max_depth:
-                raise ValueError("min_depth cannot exceed max_depth.")
+        if (
+            self.min_depth is not None
+            and self.max_depth is not None
+            and self.min_depth > self.max_depth
+        ):
+            raise ValueError("min_depth cannot exceed max_depth.")
 
 
 @dataclass(frozen=True)
@@ -699,7 +704,7 @@ class SAMConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SAMConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> SAMConfig:
         return cls(
             enabled=data.get("enabled", False),
             rho=data.get("rho", 0.05),
@@ -759,7 +764,7 @@ class ASAMConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ASAMConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> ASAMConfig:
         return cls(
             enabled=data.get("enabled", False),
             rho=data.get("rho", 0.5),
@@ -833,7 +838,7 @@ class AdaLoRAControllerConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "AdaLoRAControllerConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> AdaLoRAControllerConfig:
         return cls(
             initial_budget=data.get("initial_budget", 12),
             target_budget=data.get("target_budget", 8),
@@ -957,7 +962,7 @@ class ShardingPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "ShardingPolicy":
+    def from_dict(cls, data: Mapping[str, Any]) -> ShardingPolicy:
         return cls(
             mesh_axes=tuple(data.get("mesh_axes", ())),
             data_axes=tuple(data.get("data_axes", ("data",))),
@@ -993,7 +998,7 @@ class StateOffloadPolicy:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "StateOffloadPolicy":
+    def from_dict(cls, data: Mapping[str, Any]) -> StateOffloadPolicy:
         return cls(
             enabled=bool(data.get("enabled", False)),
             target=data.get("target", "host"),
@@ -1126,11 +1131,13 @@ class APOLLOConfig:
     def __post_init__(self) -> None:
         if self.rank < 1:
             raise ValueError("APOLLO rank must be >= 1.")
-        if self.projection_refresh_interval is not None:
-            if self.projection_refresh_interval < 1:
-                raise ValueError(
-                    "APOLLO projection_refresh_interval must be >= 1 when provided."
-                )
+        if (
+            self.projection_refresh_interval is not None
+            and self.projection_refresh_interval < 1
+        ):
+            raise ValueError(
+                "APOLLO projection_refresh_interval must be >= 1 when provided."
+            )
         if self.scaling not in {"channel", "tensor"}:
             raise ValueError("APOLLO scaling must be 'channel' or 'tensor'.")
         if self.scale is not None and self.scale <= 0.0:
@@ -1164,7 +1171,7 @@ class APOLLOConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "APOLLOConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> APOLLOConfig:
         return cls(
             rank=data.get("rank", 256),
             projection_seed=data.get("projection_seed", 0),
@@ -1222,7 +1229,7 @@ class MuonConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "MuonConfig":
+    def from_dict(cls, data: Mapping[str, Any]) -> MuonConfig:
         return cls(
             ns_steps=data.get("ns_steps", 5),
             beta=data.get("beta", 0.95),
@@ -1465,14 +1472,14 @@ def _dtype_from_name(name: str) -> jnp.dtype:
 
 __all__ = (
     "SCHEMA_VERSION",
+    "APOLLOConfig",
+    "ASAMConfig",
     "AccumulationConfig",
     "AccumulationState",
     "AdaLoRAControllerConfig",
     "AlgorithmSemantics",
-    "APOLLOConfig",
-    "ASAMConfig",
-    "AveragingSourceView",
     "AuxLossRule",
+    "AveragingSourceView",
     "CompiledGroup",
     "CompiledPolicyTrees",
     "EMAConfig",
@@ -1481,8 +1488,8 @@ __all__ = (
     "GradientPolicy",
     "GroupRule",
     "LoRAPlusConfig",
-    "LossScaleState",
     "LossBundle",
+    "LossScaleState",
     "MuonConfig",
     "NormalizedLeaf",
     "OptimizerBundle",
@@ -1497,7 +1504,7 @@ __all__ = (
     "ScheduleConfig",
     "SchedulePoint",
     "ShardingPolicy",
-    "StepCounters",
     "StateOffloadPolicy",
     "StateQuantizationConfig",
+    "StepCounters",
 )

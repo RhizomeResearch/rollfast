@@ -1,5 +1,5 @@
 import rollfast
-import rollfast.schedules as schedules
+from rollfast import schedules
 from rollfast.optim.adam import scale_by_adam
 from rollfast.optim.psgd import (
     GradClipMode,

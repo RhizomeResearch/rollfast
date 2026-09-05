@@ -11,7 +11,7 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import assert_tree_allclose, TinyGroup, TinyPlan
+from .helpers import TinyGroup, TinyPlan, assert_tree_allclose
 
 
 def _plan(dtype) -> TinyPlan:

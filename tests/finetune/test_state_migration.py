@@ -1,12 +1,13 @@
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import pytest
-from typing import NamedTuple
 
 import rollfast.finetune as rfft
 from rollfast.finetune import state_migration as migration_module
 
-from .helpers import ones_like_trainable, TinyGroup, TinyPlan, tiny_plan
+from .helpers import TinyGroup, TinyPlan, ones_like_trainable, tiny_plan
 
 
 def _head_only_plan() -> TinyPlan:
@@ -474,7 +475,7 @@ def test_reconfigure_applies_clock_policy_by_owner(counter_policy, preserved_own
     initial_counters = _counter_leaves(initial_state)
     migrated_counters = _counter_leaves(migrated_state)
     assert old_counters.keys() == initial_counters.keys() == migrated_counters.keys()
-    assert set(owner for owner, _ in old_counters.values()) == {
+    assert {owner for owner, _ in old_counters.values()} == {
         "optimizer_algorithm_schedule",
         "finite_guard",
         "accumulation",

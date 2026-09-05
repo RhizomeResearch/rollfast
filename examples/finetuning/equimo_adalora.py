@@ -1,12 +1,11 @@
 """Build a Rollfast AdaLoRA rank controller for Equimo AdaLoRA modules."""
 
+import equimo.finetune as eqft
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-import equimo.finetune as eqft
 import rollfast.finetune as rfft
-
 
 key = jax.random.PRNGKey(0)
 model = eqx.nn.MLP(4, 2, 8, 2, key=key)

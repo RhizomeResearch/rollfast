@@ -1,14 +1,13 @@
 from types import SimpleNamespace
 
+import equimo.finetune as eqft
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
 import pytest
 
-import equimo.finetune as eqft
 from rollfast.integrations import equimo
-
 from tests.finetune.helpers import tiny_plan
 
 

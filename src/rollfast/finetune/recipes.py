@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field
 import math
+from dataclasses import dataclass, field
 
 from .config import (
     AccumulationConfig,
@@ -13,8 +12,8 @@ from .config import (
     GroupRule,
     OptimizerConfig,
     PrecisionConfig,
-    SWAConfig,
     ScheduleConfig,
+    SWAConfig,
 )
 
 

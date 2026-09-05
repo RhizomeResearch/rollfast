@@ -1,8 +1,10 @@
 import inspect
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
-import jax
 import rollfast
 import rollfast.finetune as rfft
 import rollfast.finetune.builders as builders_module
@@ -20,7 +22,6 @@ import rollfast.optim.soda as soda_module
 import rollfast.optim.trasmuon as trasmuon_module
 import rollfast.schedules.schedulefree as schedulefree_module
 
-
 HYBRID_PLAN_PARAMETERS = (
     "plan",
     "total_steps",
@@ -34,6 +35,29 @@ HYBRID_PLAN_PARAMETERS = (
     "ema",
     "swa",
 )
+
+
+@pytest.mark.parametrize(
+    "function",
+    (
+        rollfast.scale_by_kron,
+        rollfast.kron,
+        rollfast.kron_hyperball,
+        rollfast.soda_kron,
+        rollfast.schedule_free_kron,
+    ),
+)
+def test_kron_default_schedule_preserves_annealing(function):
+    schedule = (
+        inspect.signature(function)
+        .parameters["preconditioner_update_probability"]
+        .default
+    )
+    assert callable(schedule)
+    steps = jnp.asarray([0, 500, 1000, 5000])
+    expected = np.clip(np.exp(-0.001 * (np.asarray(steps) - 500)), 0.03, 1.0)
+    for evaluate in (schedule, jax.jit(schedule)):
+        np.testing.assert_allclose(evaluate(steps), expected, rtol=1e-6)
 
 
 def test_key_defaults_are_not_jax_arrays():

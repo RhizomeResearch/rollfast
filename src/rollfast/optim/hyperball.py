@@ -46,16 +46,15 @@ from rollfast.optim.psgd import (
 )
 from rollfast.optim.rmnp import _build_unscaled_rmnp_branch
 from rollfast.utils import (
-    _reject_complex_tree,
     MomentumAccumulator,
     _fresh_prng_key,
     _is_aux_leaf,
+    _reject_complex_tree,
     _resolve_mask,
     _resolve_scalar,
     _validate_nonnegative_static_scalar,
     dist_reduce,
 )
-
 
 MaskOrFn = Any | Callable[[optax.Params], Any] | None
 
@@ -664,14 +663,15 @@ def rmnp_hyperball(
     )
 
 
+_DEFAULT_KRON_HYPERBALL_SCHEDULE = precond_update_prob_schedule()
+
+
 def kron_hyperball(
     learning_rate: optax.ScalarOrSchedule = 0.001,
     b1: float = 0.9,
     weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: MaskOrFn = None,
-    preconditioner_update_probability: optax.ScalarOrSchedule = (
-        precond_update_prob_schedule()
-    ),
+    preconditioner_update_probability: optax.ScalarOrSchedule = _DEFAULT_KRON_HYPERBALL_SCHEDULE,
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
@@ -1164,14 +1164,14 @@ hyperball_riemannian_aurora = riemannian_aurora_hyperball
 
 __all__ = [
     "HyperballState",
-    "apply_hyperball",
-    "scale_by_hyperball",
     "adamw_hyperball",
+    "apply_hyperball",
+    "aurora_hyperball",
+    "hyperball_riemannian_aurora",
     "kron_hyperball",
     "muon_hyperball",
-    "rmnp_hyperball",
     "prism_hyperball",
-    "aurora_hyperball",
     "riemannian_aurora_hyperball",
-    "hyperball_riemannian_aurora",
+    "rmnp_hyperball",
+    "scale_by_hyperball",
 ]

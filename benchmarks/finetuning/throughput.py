@@ -6,7 +6,6 @@ import time
 
 import jax
 import jax.numpy as jnp
-
 from _common import benchmark_step, emit, metadata, rfft, tiny_plan, tree_l2_loss
 
 
@@ -36,7 +35,7 @@ def main() -> None:
         clip_global_norm=None,
     )
     adamw_step = jax.jit(rfft.make_update_step(tree_l2_loss, adamw))
-    adamw_params, adamw_state, adamw_loss, adamw_seconds = benchmark_step(
+    adamw_params, _adamw_state, adamw_loss, adamw_seconds = benchmark_step(
         adamw_step,
         adamw.init(plan.trainable),
         plan.trainable,

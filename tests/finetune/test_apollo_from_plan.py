@@ -10,7 +10,7 @@ import pytest
 import rollfast.finetune as rfft
 from rollfast.optim.apollo import APOLLOLeafState, apollo_adamw
 
-from .helpers import ones_like_trainable, TinyGroup, TinyPlan, tiny_plan
+from .helpers import TinyGroup, TinyPlan, ones_like_trainable, tiny_plan
 
 
 def _apollo_leaf_states(state):

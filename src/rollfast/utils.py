@@ -1,14 +1,13 @@
 from collections.abc import Callable
-from typing import Any, Literal, NamedTuple, TypeAlias, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 import optax
 from optax._src import numerics
 
-
-MomentumAccumulator: TypeAlias = Literal["ema", "heavy_ball"]
-MaskOrFn: TypeAlias = Any | Callable[[optax.Params], Any] | None
+MomentumAccumulator = Literal["ema", "heavy_ball"]
+MaskOrFn = Any | Callable[[optax.Params], Any] | None
 
 
 def _reject_complex_tree(tree: Any, family: str) -> None:

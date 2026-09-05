@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import pickle
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-import pickle
-from typing import Any, Mapping
+from typing import Any
 
 import jax
 
-from .config import OptimizerBundle, SCHEMA_VERSION
+from .config import SCHEMA_VERSION, OptimizerBundle
 
 _CHECKPOINT_FORMAT = "rollfast.finetune.optimizer_state"
 _COMPATIBILITY_FIELDS = (
@@ -270,21 +271,24 @@ def _validate_checkpoint_schema(checkpoint: OptimizerStateCheckpoint) -> None:
             "checkpoint manifest is missing model_checkpoint_id."
         )
     components = checkpoint.manifest.get("components", {})
-    if checkpoint.manifest.get("precision", {}).get("master_params") == "always":
-        if not components.get("master_params", False):
-            raise OptimizerStateRestoreError(
-                "checkpoint is missing required master parameters."
-            )
-    if checkpoint.manifest.get("precision", {}).get("loss_scale", "none") != "none":
-        if not components.get("loss_scale", False):
-            raise OptimizerStateRestoreError(
-                "checkpoint is missing required loss-scale state."
-            )
-    if "schedule_free" in checkpoint.manifest.get("eval_views", ()):
-        if not components.get("schedule_free", False):
-            raise OptimizerStateRestoreError(
-                "checkpoint manifest is missing schedule-free state metadata."
-            )
+    if checkpoint.manifest.get("precision", {}).get(
+        "master_params"
+    ) == "always" and not components.get("master_params", False):
+        raise OptimizerStateRestoreError(
+            "checkpoint is missing required master parameters."
+        )
+    if checkpoint.manifest.get("precision", {}).get(
+        "loss_scale", "none"
+    ) != "none" and not components.get("loss_scale", False):
+        raise OptimizerStateRestoreError(
+            "checkpoint is missing required loss-scale state."
+        )
+    if "schedule_free" in checkpoint.manifest.get(
+        "eval_views", ()
+    ) and not components.get("schedule_free", False):
+        raise OptimizerStateRestoreError(
+            "checkpoint manifest is missing schedule-free state metadata."
+        )
 
 
 def _validate_manifest_compatibility(

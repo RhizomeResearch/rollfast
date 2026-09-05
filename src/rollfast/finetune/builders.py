@@ -36,17 +36,17 @@ from .config import (
     GaLoreConfig,
     GradientPolicy,
     GroupRule,
+    MuonConfig,
     OptimizerBundle,
     OptimizerConfig,
     OptimizerName,
     OptimizerReport,
-    MuonConfig,
     PrecisionConfig,
-    SWAConfig,
     ScheduleConfig,
     ScheduleKind,
     ShardingPolicy,
     StateQuantizationConfig,
+    SWAConfig,
 )
 from .groups import compile_groups, unmatched_rule_warnings
 from .schedules import build_schedule, preview_schedule
@@ -1819,25 +1819,35 @@ def _report_warnings(
 def _hybrid_profile_warnings(family: str) -> tuple[str, ...]:
     if family == "aurora":
         return (
-            "Aurora builder is experimental until validated against the "
-            "Tilde Research reference implementation.",
+            (
+                "Aurora builder is experimental until validated against the "
+                "Tilde Research reference implementation."
+            ),
         )
     if family == "prism":
         return (
-            "PRISM builder is experimental until validated against the "
-            "public PRISM reference profile.",
+            (
+                "PRISM builder is experimental until validated against the "
+                "public PRISM reference profile."
+            ),
         )
     if family == "muon":
         return (
-            "Muon builder is experimental for pretrained fine-tuning until "
-            "benchmarked on target workloads.",
+            (
+                "Muon builder is experimental for pretrained fine-tuning until "
+                "benchmarked on target workloads."
+            ),
         )
     if family == "kron":
         return (
-            "Kron/PSGD builder is experimental until validated against public "
-            "PSGD/Kron references.",
-            "kron_adam uses Rollfast's PSGD Kron transform for each routed "
-            "group; the transform does not include an internal Adam fallback.",
+            (
+                "Kron/PSGD builder is experimental until validated against public "
+                "PSGD/Kron references."
+            ),
+            (
+                "kron_adam uses Rollfast's PSGD Kron transform for each routed "
+                "group; the transform does not include an internal Adam fallback."
+            ),
         )
     return ()
 
@@ -2078,8 +2088,10 @@ def _galore_sharding_warnings(
     if not sharding.allow_host_materialization:
         return ()
     return (
-        "GaLore basis refresh may materialize full gradient matrices; "
-        f"estimated refresh communication bytes={refresh_communication_bytes}.",
+        (
+            "GaLore basis refresh may materialize full gradient matrices; "
+            f"estimated refresh communication bytes={refresh_communication_bytes}."
+        ),
     )
 
 
@@ -2206,8 +2218,10 @@ def _apollo_method_config(apollo: APOLLOConfig) -> dict[str, Any]:
 
 def _apollo_profile_warnings() -> tuple[str, ...]:
     return (
-        "APOLLO/APOLLO-Mini implementation is experimental until validated "
-        "against the authors' reference implementation.",
+        (
+            "APOLLO/APOLLO-Mini implementation is experimental until validated "
+            "against the authors' reference implementation."
+        ),
     )
 
 

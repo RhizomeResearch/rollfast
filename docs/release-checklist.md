@@ -3,6 +3,10 @@
 Run these gates from a clean checkout of the release commit using the Python
 version declared by the project.
 
+Ruff and ty are pinned in `pyproject.toml` so local checks and fresh CI installs
+use the same versions. Update these pins deliberately and run all static checks
+when doing so; tool upgrades can change default lint rules and formatting.
+
 ## Required Gates
 
 ```bash

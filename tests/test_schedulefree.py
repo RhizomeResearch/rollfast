@@ -8,8 +8,8 @@ import pytest
 from optax._src import base
 
 import rollfast
-import rollfast.schedules as schedules
 import rollfast.schedules.schedulefree as schedulefree_module
+from rollfast import schedules
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.schedules.schedulefree import (
     ScheduleFreeState,
@@ -100,8 +100,8 @@ def test_schedule_free_mixed_dtypes_remain_finite_across_two_updates():
 
     for _ in range(2):
         updates, state = tx.update(grads, state, params)
-        for name in params:
-            assert updates[name].dtype == params[name].dtype
+        for name, param in params.items():
+            assert updates[name].dtype == param.dtype
             assert jnp.all(jnp.isfinite(updates[name]))
         params = optax.apply_updates(params, updates)
 

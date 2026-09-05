@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 
-from .config import AdaLoRAControllerConfig, SCHEMA_VERSION
+from .config import SCHEMA_VERSION, AdaLoRAControllerConfig
+
+_DEFAULT_CONFIG = AdaLoRAControllerConfig()
 
 
 class AdaLoRAState(NamedTuple):
@@ -40,7 +43,7 @@ class AdaLoRAController:
     group_names: tuple[str, ...]
     max_ranks: tuple[int, ...]
     total_steps: int
-    config: AdaLoRAControllerConfig = AdaLoRAControllerConfig()
+    config: AdaLoRAControllerConfig = _DEFAULT_CONFIG
 
     def __post_init__(self) -> None:
         if self.total_steps <= 0:

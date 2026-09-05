@@ -1,11 +1,11 @@
+import equimo.vision.models as em
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import optax
 import pytest
 
-import equimo.vision.models as em
-import equinox as eqx
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import aurora, get_equinox_aurora_spec
 from rollfast.optim.hyperball import (

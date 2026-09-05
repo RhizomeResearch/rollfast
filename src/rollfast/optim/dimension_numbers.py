@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from typing import Any, NamedTuple, TypeAlias, cast
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +31,7 @@ WeightDimNumOrFn = (
 # for direct transforms over one array, but it is not broadcast over PyTrees:
 # structured params must use a matching spec tree or callable so routing remains
 # explicit for biases, embeddings, convolution kernels, and fallback leaves.
-MaskOrFn: TypeAlias = Any | Callable[[optax.Params], Any] | None
+MaskOrFn = Any | Callable[[optax.Params], Any] | None
 ReshapeFn = Callable[[jax.Array], jax.Array]
 
 

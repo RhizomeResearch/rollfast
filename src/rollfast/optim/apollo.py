@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
-import math
 from typing import Any, Literal, NamedTuple, cast
 
 import jax
@@ -13,7 +13,6 @@ import optax
 from optax._src import utils
 
 from rollfast.utils import _reject_complex_tree
-
 
 Scaling = Literal["channel", "tensor"]
 Orientation = Literal["left", "right", "full"]

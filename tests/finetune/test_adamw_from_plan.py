@@ -1,9 +1,10 @@
+from typing import Any
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
 import pytest
-import equinox as eqx
-from typing import Any
 
 import rollfast.finetune as rfft
 from rollfast.finetune.transforms import (

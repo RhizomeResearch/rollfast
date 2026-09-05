@@ -1,13 +1,12 @@
 """Build a Rollfast optimizer for an Equimo LoRA plan."""
 
+import equimo.finetune as eqft
+import equimo.vision.models as em
 import jax
 import jax.numpy as jnp
 import optax
 
-import equimo.finetune as eqft
-import equimo.vision.models as em
 import rollfast.finetune as rfft
-
 
 key = jax.random.PRNGKey(0)
 model = em.vit_tiny_patch16_224(num_classes=10, key=key)

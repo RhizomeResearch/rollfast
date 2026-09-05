@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+import numpy as np
 import optax
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 import rollfast.finetune as rfft
 from rollfast.optim.adam8 import QuantizedBlocks

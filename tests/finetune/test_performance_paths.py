@@ -1,7 +1,7 @@
 """Behavior and work avoidance in fine-tuning performance paths."""
 
-from dataclasses import replace
 import importlib
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ import pytest
 import rollfast.finetune as rfft
 from rollfast.finetune import step as steps
 from rollfast.optim.adam8 import quantize_blocks
+
 from .helpers import TinyGroup, TinyPlan, tiny_plan
 
 

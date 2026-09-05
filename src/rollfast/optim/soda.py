@@ -248,6 +248,9 @@ def soda_prism(
     return soda(base_optimizer, state_dtype=state_dtype)
 
 
+_DEFAULT_SODA_KRON_SCHEDULE = precond_update_prob_schedule()
+
+
 def soda_kron(
     learning_rate: float,
     total_steps: int,
@@ -255,9 +258,7 @@ def soda_kron(
     decay_fraction: float = 0.1,
     state_dtype: jax.typing.DTypeLike | None = None,
     b1: float = 0.9,
-    preconditioner_update_probability: optax.ScalarOrSchedule = (
-        precond_update_prob_schedule()
-    ),
+    preconditioner_update_probability: optax.ScalarOrSchedule = _DEFAULT_SODA_KRON_SCHEDULE,
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,

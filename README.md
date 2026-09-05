@@ -403,7 +403,7 @@ from rollfast import prism, get_equinox_prism_spec
 
 # Define parameters
 params = {
-    'linear': {'w': jnp.zeros((128, 128)), 'b': jnp.zeros((128,))},
+    "linear": {"w": jnp.zeros((128, 128)), "b": jnp.zeros((128,))},
 }
 
 # Initialize PRISM
@@ -411,12 +411,12 @@ params = {
 # 'b' will be optimized by AdamW
 optimizer = prism(
     learning_rate=1e-3,
-    mode='bidirectional', # or 'original'
-    ns_iters=5,           # Newton-Schulz iterations (for 'original' mode)
-    ns_coeffs="standard", # only used by 'original' mode
-    inv_steps=6,          # Polynomial iterations (for 'bidirectional' mode)
-    gamma=1.0,            # Innovation damping
-    weight_decay=0.01
+    mode="bidirectional",  # or 'original'
+    ns_iters=5,  # Newton-Schulz iterations (for 'original' mode)
+    ns_coeffs="standard",  # only used by 'original' mode
+    inv_steps=6,  # Polynomial iterations (for 'bidirectional' mode)
+    gamma=1.0,  # Innovation damping
+    weight_decay=0.01,
 )
 
 opt_state = optimizer.init(params)
@@ -429,7 +429,7 @@ Equinox dependency with `pip install "rollfast[equinox]"` before using it.
 ```python
 import equinox as eqx
 
-model = ... # Your Equinox model
+model = ...  # Your Equinox model
 specs = get_equinox_prism_spec(model)
 optimizer = prism(
     learning_rate=1e-3,
@@ -451,7 +451,7 @@ import jax.numpy as jnp
 from rollfast import aurora
 
 params = {
-    'linear': {'w': jnp.zeros((256, 128)), 'b': jnp.zeros((256,))},
+    "linear": {"w": jnp.zeros((256, 128)), "b": jnp.zeros((256,))},
 }
 
 # 'w' will be optimized by Aurora
@@ -475,7 +475,7 @@ the optional Equinox dependency.
 ```python
 from rollfast import aurora, get_equinox_aurora_spec
 
-model = ... # Your Equinox model
+model = ...  # Your Equinox model
 optimizer = aurora(
     learning_rate=3e-4,
     aurora_weight_dimension_numbers=get_equinox_aurora_spec(model),
@@ -502,10 +502,10 @@ from rollfast.optim.hyperball import prism_hyperball
 optimizer = prism_hyperball(
     learning_rate=1e-3,
     weight_decay=0.01,
-    mode='bidirectional',
+    mode="bidirectional",
     inv_steps=6,
-    hyperball_mask=None,       # Defaults to the PRISM-routed leaves
-    fallback_weight_decay=False
+    hyperball_mask=None,  # Defaults to the PRISM-routed leaves
+    fallback_weight_decay=False,
 )
 ```
 
@@ -546,8 +546,7 @@ import optax
 from rollfast.optim.hyperball import apply_hyperball
 
 optimizer = optax.chain(
-    optax.scale_by_adam(),
-    apply_hyperball(learning_rate=1e-3, weight_decay=0.01)
+    optax.scale_by_adam(), apply_hyperball(learning_rate=1e-3, weight_decay=0.01)
 )
 ```
 
@@ -568,12 +567,12 @@ import optax
 from rollfast import schedule_free_eval_params, schedule_free_prism
 
 optimizer = schedule_free_prism(
-    learning_rate=1.0,   # Peak LR for internal steps
-    total_steps=10000,   # Required for WSD schedule generation
+    learning_rate=1.0,  # Peak LR for internal steps
+    total_steps=10000,  # Required for WSD schedule generation
     warmup_fraction=0.1,
     weighting_mode="schedulet",
-    sf_b1=0.9,           # Schedule-Free interpolation (beta)
-    gamma=0.8,           # PRISM specific arg
+    sf_b1=0.9,  # Schedule-Free interpolation (beta)
+    gamma=0.8,  # PRISM specific arg
 )
 
 params = {"linear": {"w": jnp.zeros((128, 128)), "b": jnp.zeros((128,))}}
@@ -768,8 +767,8 @@ optimizer = kron(
     learning_rate=1e-3,
     b1=0.9,
     preconditioner_lr=0.1,
-    preconditioner_mode='Q0.5EQ1.5',  # Procrustes-regularized update
-    whiten_grad=True
+    preconditioner_mode="Q0.5EQ1.5",  # Procrustes-regularized update
+    whiten_grad=True,
 )
 ```
 
@@ -784,13 +783,13 @@ import jax
 from rollfast import kron
 
 # Boolean pytree mask where True indicates a scanned parameter
-scanned_layers_mask = ... 
+scanned_layers_mask = ...
 
 optimizer = kron(
     learning_rate=3e-4,
     scanned_layers=scanned_layers_mask,
-    lax_map_scanned_layers=True, # Use lax.map for preconditioner updates
-    lax_map_batch_size=8
+    lax_map_scanned_layers=True,  # Use lax.map for preconditioner updates
+    lax_map_batch_size=8,
 )
 ```
 
@@ -819,26 +818,26 @@ model = ...
 
 # Cast model to BF16 for pure low-precision training
 model = jax.tree.map(
-    lambda x: x.astype(jnp.bfloat16) if eqx.is_inexact_array(x) else x, 
-    model
+    lambda x: x.astype(jnp.bfloat16) if eqx.is_inexact_array(x) else x, model
 )
+
 
 @eqx.filter_jit
 def step(model, opt_state, batch, key):
     fwd_key, sr_key = jax.random.split(key)
-    
+
     # Compute gradients (model is BF16, gradients will be BF16)
     (loss, aux), grads = eqx.filter_value_and_grad(compute_loss)(model, batch, fwd_key)
-    
+
     # Update optimizer
     # 'updates' PyTree structure matches the filtered model.
     filtered_model = eqx.filter(model, eqx.is_inexact_array)
     updates, new_opt_state = optimizer.update(grads, opt_state, filtered_model)
-    
+
     # Apply updates with Stochastic Rounding
     # This is critical when 'model' is BF16 to prevent vanishing updates.
     new_model = apply_updates_prefix(model, updates, sr_key, stochastic=True)
-    
+
     return new_model, new_opt_state, loss
 ```
 
@@ -868,7 +867,7 @@ from rollfast import adamw
 
 optimizer = adamw(
     learning_rate=1e-3,
-    mu_dtype=jnp.bfloat16  # Selected optimizer state is stored as BF16 with SR
+    mu_dtype=jnp.bfloat16,  # Selected optimizer state is stored as BF16 with SR
 )
 ```
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -15,8 +16,8 @@ from rollfast.optim.adam8 import (
 
 from ._state_tree import _format_tokens, _is_masked_node, _path_leaves, _path_tokens
 from .config import (
-    OptimizerBundle,
     SCHEMA_VERSION,
+    OptimizerBundle,
 )
 from .state_estimation import estimate_adamw8_moment_leaves
 from .validation import validate_plan
@@ -241,8 +242,10 @@ def estimate_optimizer_state_memory(
         + totals.by_category.get("moments", 0)
     )
     warnings = [
-        "static estimates exclude wrapper counters, finite guards, RNG keys, "
-        "schedule-free averaging state, and accumulation buffers."
+        (
+            "static estimates exclude wrapper counters, finite guards, RNG keys, "
+            "schedule-free averaging state, and accumulation buffers."
+        )
     ]
     if (
         bundle.optimizer_config.name in {"aurora_adam", "prism_adam", "kron_adam"}

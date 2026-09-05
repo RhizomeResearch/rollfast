@@ -485,11 +485,11 @@ __all__ = [
     "MuonDimensionNumbers",
     "MuonNsCoeffs",
     "MuonState",
+    "muon",
     "orthogonalize_via_newton_schulz",
     "polar_express_coeffs",
     "resolve_ns_coeffs",
     "scale_by_muon",
     "scale_by_muon_shape",
     "scale_by_shape",
-    "muon",
 ]

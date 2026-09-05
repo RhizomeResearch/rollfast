@@ -1,19 +1,19 @@
 """Collective and sharding checks for forced multi-device CPU CI."""
 
-from functools import partial
 from dataclasses import replace
+from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import numpy as np
 import optax
 import pytest
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from rollfast import adamw
 from rollfast.finetune.transforms import clip_by_global_norm
 from rollfast.optim.sam import global_l2_norm, sam_perturbation
-
 
 pytestmark = pytest.mark.skipif(
     jax.local_device_count() < 2,

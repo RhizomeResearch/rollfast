@@ -10,8 +10,8 @@ from rollfast.optim.adam import adamw
 from rollfast.optim.adam8 import (
     DYNAMIC_SIGNED_CODEBOOK_ID,
     DYNAMIC_UNSIGNED_CODEBOOK_ID,
-    QuantizedBlocks,
     SYMMETRIC_INT8_CODEBOOK_ID,
+    QuantizedBlocks,
     _dynamic_codebook_values,
     adamw8,
     dequantize_blocks,

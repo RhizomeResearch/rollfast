@@ -1,7 +1,7 @@
 """Equivalence and executed-work regressions for optimizer fast paths."""
 
-from dataclasses import replace
 import importlib
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp

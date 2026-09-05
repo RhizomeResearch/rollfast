@@ -148,6 +148,14 @@ def test_validation_rejects_unknown_label():
         rfft.validate_plan(bad)
 
 
+@pytest.mark.parametrize("label", [0, 1.5, b"w_decay"])
+def test_validation_preserves_value_error_for_non_string_labels(label):
+    plan = replace(_minimal_compiler_plan(), labels={"w": label})
+
+    with pytest.raises(ValueError, match="plan labels must be strings"):
+        rfft.validate_plan(plan)
+
+
 def test_validation_rejects_unused_group_by_default():
     plan = tiny_plan()
     groups = {

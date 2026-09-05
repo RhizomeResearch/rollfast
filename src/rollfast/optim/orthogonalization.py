@@ -9,7 +9,7 @@ reference simple-quintic polar implementation.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -21,13 +21,12 @@ from rollfast.optim.dimension_numbers import (
 )
 from rollfast.utils import _is_aux_leaf
 
-MuonPreconditioning: TypeAlias = Literal["frobenius", "spectral", "aol", "schatten"]
-NsCoeffTriple: TypeAlias = tuple[
-    jax.typing.ArrayLike, jax.typing.ArrayLike, jax.typing.ArrayLike
-]
-NsCoeffs: TypeAlias = NsCoeffTriple | tuple[NsCoeffTriple, ...] | str
-MuonNsCoeffs: TypeAlias = NsCoeffs
-OrthogonalizeFn: TypeAlias = Callable[
+# Keep runtime typing objects for callers that inspect the public aliases.
+MuonPreconditioning = Literal["frobenius", "spectral", "aol", "schatten"]
+NsCoeffTriple = tuple[jax.typing.ArrayLike, jax.typing.ArrayLike, jax.typing.ArrayLike]
+NsCoeffs = NsCoeffTriple | tuple[NsCoeffTriple, ...] | str
+MuonNsCoeffs = NsCoeffs
+OrthogonalizeFn = Callable[
     [
         jax.Array,
         jax.Array,
@@ -302,11 +301,11 @@ def orthogonalize_via_newton_schulz(
 __all__ = [
     "DION_NS_COEFFS",
     "MUON_NS_COEFFS",
+    "NS_COEFFS_PRESETS",
     "MuonNsCoeffs",
     "MuonPreconditioning",
-    "NS_COEFFS_PRESETS",
-    "NsCoeffs",
     "NsCoeffTriple",
+    "NsCoeffs",
     "OrthogonalizeFn",
     "orthogonalize_via_newton_schulz",
     "polar_express_coeffs",

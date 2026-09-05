@@ -52,8 +52,9 @@ dev = [
     "equinox>=0.13.6",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
-    "ruff>=0.15.7",
-    "ty>=0.0.24",
+    # Keep local checks and fresh CI installs on the same tool versions.
+    "ruff==0.16.6",
+    "ty==0.0.78",
 ]
 
 [tool.ruff.lint]

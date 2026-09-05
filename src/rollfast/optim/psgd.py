@@ -742,11 +742,12 @@ def _balance_Q(Q: list[jax.Array], axis_name: str | None = None) -> list[jax.Arr
     return [q * x.astype(q.dtype) for q, x in zip(Q, to_mul)]
 
 
+_DEFAULT_SCALE_BY_KRON_SCHEDULE = precond_update_prob_schedule()
+
+
 def scale_by_kron(
     b1: float = 0.9,
-    preconditioner_update_probability: optax.ScalarOrSchedule = (
-        precond_update_prob_schedule()
-    ),
+    preconditioner_update_probability: optax.ScalarOrSchedule = _DEFAULT_SCALE_BY_KRON_SCHEDULE,
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,
@@ -942,7 +943,10 @@ def scale_by_kron(
         Qs = [
             (
                 jax.tree.map(
-                    lambda d: jnp.repeat(jnp.expand_dims(d, 0), t.shape[0], axis=0), q
+                    lambda d, repeats=t.shape[0]: jnp.repeat(
+                        jnp.expand_dims(d, 0), repeats, axis=0
+                    ),
+                    q,
                 )
                 if s
                 else q
@@ -1463,14 +1467,15 @@ def scale_by_kron(
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
+_DEFAULT_KRON_SCHEDULE = precond_update_prob_schedule()
+
+
 def kron(
     learning_rate: optax.ScalarOrSchedule = 0.001,
     b1: float = 0.9,
     weight_decay: optax.ScalarOrSchedule = 0.0,
     weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
-    preconditioner_update_probability: optax.ScalarOrSchedule = (
-        precond_update_prob_schedule()
-    ),
+    preconditioner_update_probability: optax.ScalarOrSchedule = _DEFAULT_KRON_SCHEDULE,
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,

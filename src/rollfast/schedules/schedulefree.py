@@ -33,8 +33,8 @@ from rollfast.optim.psgd import (
 )
 from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
 from rollfast.utils import (
-    _reject_complex_tree,
     _fresh_prng_key,
+    _reject_complex_tree,
     _stochastic_round_bf16,
     _validate_nonnegative_static_scalar,
 )
@@ -786,6 +786,9 @@ def schedule_free_prism(
     )
 
 
+_DEFAULT_SCHEDULE_FREE_KRON_SCHEDULE = precond_update_prob_schedule()
+
+
 def schedule_free_kron(
     learning_rate: float,
     total_steps: int,
@@ -800,9 +803,7 @@ def schedule_free_kron(
     weight_decay: float = 0.0,
     weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     # PSGD Kron parameters
-    preconditioner_update_probability: optax.ScalarOrSchedule = (
-        precond_update_prob_schedule()
-    ),
+    preconditioner_update_probability: optax.ScalarOrSchedule = _DEFAULT_SCHEDULE_FREE_KRON_SCHEDULE,
     max_size_triangular: int = 8192,
     max_skew_triangular: float = 1.0,
     min_ndim_triangular: int = 2,

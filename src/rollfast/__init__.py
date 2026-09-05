@@ -145,9 +145,9 @@ from .utils import (
 )
 
 __all__ = [
+    "MUON_NS_COEFFS",
     "AuroraDimensionNumbers",
     "GradClipMode",
-    "MUON_NS_COEFFS",
     "MatrixDimensionNumbers",
     "MomentumAccumulator",
     "MuonDimensionNumbers",
@@ -190,6 +190,7 @@ __all__ = [
     "riemannian_aurora_hyperball",
     "rmnp",
     "rmnp_hyperball",
+    "sam_perturbation",
     "scale_by_adam",
     "scale_by_aurora",
     "scale_by_hyperball",
@@ -204,7 +205,6 @@ __all__ = [
     "scale_by_rmnp",
     "scale_by_rmnp_shape",
     "scale_by_trasmuon",
-    "sam_perturbation",
     "schedule_free",
     "schedule_free_adam",
     "schedule_free_aurora",

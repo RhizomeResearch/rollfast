@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import jax
 
@@ -12,7 +13,7 @@ from rollfast.optim.adam8 import QuantizedBlocks, tree_state_nbytes
 from ._protocols import FineTunePlanProtocol
 from ._state_tree import _format_tokens, _is_state_leaf, _path_leaves, _path_tokens
 from .builders import compile_optimizer
-from .config import OptimizerBundle, SCHEMA_VERSION
+from .config import SCHEMA_VERSION, OptimizerBundle
 
 StatePolicy = Literal[
     "reset_all",
@@ -76,7 +77,7 @@ class OptimizerMigrationReport:
             "clock_behavior": dict(self.clock_behavior),
         }
 
-    def to_state_transfer_report(self) -> "StateTransferReport":
+    def to_state_transfer_report(self) -> StateTransferReport:
         """Return the 2026 state-transfer report view for this migration."""
 
         reset_ids = (

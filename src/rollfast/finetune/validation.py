@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
@@ -96,7 +96,8 @@ def validate_plan(
         except TypeError as error:
             raise ValueError("plan labels must be hashable.") from error
         if not isinstance(label, str):
-            raise ValueError("plan labels must be strings.")
+            # Keep the v1 ValueError contract for invalid label values.
+            raise ValueError("plan labels must be strings.")  # noqa: TRY004
         if label not in raw_groups:
             raise ValueError(f"label {label!r} is missing from plan.group_specs.")
         if identity is None:

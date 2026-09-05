@@ -6,7 +6,7 @@ from optax._src import base
 
 import rollfast
 import rollfast.optim.soda as soda_module
-import rollfast.schedules as schedules
+from rollfast import schedules
 from rollfast.optim.soda import (
     soda,
     soda_adam,
@@ -111,8 +111,8 @@ def test_soda_mixed_dtypes_remain_finite_across_two_updates():
 
     for _ in range(2):
         updates, state = tx.update(grads, state, params)
-        for name in params:
-            assert updates[name].dtype == params[name].dtype
+        for name, param in params.items():
+            assert updates[name].dtype == param.dtype
             assert jnp.all(jnp.isfinite(updates[name]))
         params = optax.apply_updates(params, updates)
 

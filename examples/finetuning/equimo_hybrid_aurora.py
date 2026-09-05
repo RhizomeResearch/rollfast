@@ -1,11 +1,10 @@
 """Compile Rollfast Aurora/Adam for an Equimo fine-tuning plan."""
 
-import jax
-
 import equimo.finetune as eqft
 import equimo.vision.models as em
-import rollfast.finetune as rfft
+import jax
 
+import rollfast.finetune as rfft
 
 key = jax.random.PRNGKey(0)
 model = em.vit_tiny_patch16_224(num_classes=10, key=key)

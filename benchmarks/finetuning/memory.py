@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
 import io
+from contextlib import redirect_stdout
 
 from _common import emit, large_plan, metadata, rfft, tiny_plan
 

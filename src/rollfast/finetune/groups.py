@@ -58,13 +58,14 @@ def matches_rule(group: PlanGroup, rule: GroupRule) -> bool:
         return False
     if rule.tag is not None and rule.tag not in group.tags:
         return False
-    if rule.min_depth is not None:
-        if group.depth is None or group.depth < rule.min_depth:
-            return False
-    if rule.max_depth is not None:
-        if group.depth is None or group.depth > rule.max_depth:
-            return False
-    return True
+    if rule.min_depth is not None and (
+        group.depth is None or group.depth < rule.min_depth
+    ):
+        return False
+    return not (
+        rule.max_depth is not None
+        and (group.depth is None or group.depth > rule.max_depth)
+    )
 
 
 def preview_groups(groups: tuple[CompiledGroup, ...]) -> tuple[dict[str, object], ...]:

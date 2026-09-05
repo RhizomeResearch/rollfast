@@ -4,7 +4,7 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import zeros_like_trainable, ones_like_trainable, tiny_plan
+from .helpers import ones_like_trainable, tiny_plan, zeros_like_trainable
 
 
 @pytest.mark.parametrize(

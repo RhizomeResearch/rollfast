@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
-import math
-from typing import Any, Callable, Literal, NamedTuple, Optional, Union, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -13,12 +15,11 @@ import optax
 from optax._src import utils
 
 from rollfast.utils import (
-    _reject_complex_tree,
     _fresh_prng_key,
+    _reject_complex_tree,
     _safe_bias_correction,
     zeros_like_preserving_sharding,
 )
-
 
 SYMMETRIC_INT8_CODEBOOK_ID = "rollfast.symmetric_int8.neg127_pos127.v1"
 DYNAMIC_SIGNED_CODEBOOK_ID = "bitsandbytes.dynamic.signed.8bit.v1"
@@ -402,7 +403,7 @@ def adamw8(
     eps: jax.typing.ArrayLike = 1e-8,
     eps_root: jax.typing.ArrayLike = 0.0,
     weight_decay: optax.ScalarOrSchedule = 1e-4,
-    weight_decay_mask: Optional[Union[Any, Callable[[optax.Params], Any]]] = None,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
     *,
     block_size: int = 2048,
     min_size: int = 4096,
@@ -478,9 +479,9 @@ def _dynamic_codebook_values(*, signed: bool) -> tuple[float, ...]:
             else 2 ** (index + non_sign_bits - max_exponent_bits + 1) + 1
         )
         means = _linspace_bin_means(0.1, 1.0, fraction_items)
-        data.extend((exponent_scale * value for value in means))
+        data.extend(exponent_scale * value for value in means)
         if signed:
-            data.extend((-exponent_scale * value for value in means))
+            data.extend(-exponent_scale * value for value in means)
     data.append(0.0)
     data.append(1.0)
     if len(data) != 2**total_bits:
@@ -493,10 +494,7 @@ def _linspace_bin_means(start: float, stop: float, points: int) -> list[float]:
         return []
     step = (stop - start) / (points - 1)
     boundaries = [start + step * index for index in range(points)]
-    return [
-        (left + right) / 2.0
-        for left, right in zip(boundaries[:-1], boundaries[1:], strict=True)
-    ]
+    return [(left + right) / 2.0 for left, right in itertools.pairwise(boundaries)]
 
 
 def _codebook_for_quantizer(quantizer: CodebookQuantizer) -> jax.Array:
@@ -737,13 +735,13 @@ def _quantizer_from_state_leaf(leaf: QuantizedBlocks) -> CodebookQuantizer:
 
 
 __all__ = (
-    "QuantizedBlocks",
-    "BlockLayout",
-    "CodebookQuantizer",
-    "ScaleByAdam8State",
     "DYNAMIC_SIGNED_CODEBOOK_ID",
     "DYNAMIC_UNSIGNED_CODEBOOK_ID",
     "SYMMETRIC_INT8_CODEBOOK_ID",
+    "BlockLayout",
+    "CodebookQuantizer",
+    "QuantizedBlocks",
+    "ScaleByAdam8State",
     "adamw8",
     "dequantize_blocks",
     "estimate_quantized_moment_bytes",

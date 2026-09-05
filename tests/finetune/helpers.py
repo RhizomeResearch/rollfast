@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import jax
-import numpy as np
-import jax.tree_util as jtu
 import jax.numpy as jnp
+import jax.tree_util as jtu
+import numpy as np
 
 
 @dataclass(frozen=True)

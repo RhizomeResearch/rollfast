@@ -8,7 +8,7 @@ from rollfast.optim.normuon import normuon, scale_by_normuon
 from rollfast.optim.pion import pion, scale_by_pion
 from rollfast.optim.prism import prism, scale_by_prism
 from rollfast.optim.rmnp import rmnp, scale_by_rmnp
-from rollfast.optim.trasmuon import trasmuon, scale_by_trasmuon
+from rollfast.optim.trasmuon import scale_by_trasmuon, trasmuon
 
 
 @pytest.mark.parametrize(

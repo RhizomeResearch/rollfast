@@ -5,9 +5,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import optax
+from _common import emit, metadata
 
 import rollfast
-from _common import emit, metadata
 
 
 def _loss(params):

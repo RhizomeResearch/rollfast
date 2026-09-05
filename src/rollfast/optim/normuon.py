@@ -639,9 +639,9 @@ def contranormuon(
 
 
 __all__ = [
-    "ScaleByNorMuonState",
     "NorMuonNormalizationAxis",
     "NorMuonRescale",
+    "ScaleByNorMuonState",
     "contramuon",
     "contranormuon",
     "normuon",

@@ -13,7 +13,6 @@ from optax._src import utils
 
 from rollfast.utils import _reject_complex_tree, _safe_bias_correction
 
-
 Projection = Literal["auto", "left", "right", "two_sided"]
 StateOnRefresh = Literal["reuse_coordinates", "reset", "transport"]
 

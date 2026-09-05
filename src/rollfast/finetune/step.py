@@ -15,9 +15,9 @@ from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sha
 
 from ._protocols import CombinableFineTunePlanProtocol, FineTunePlanProtocol
 from .config import (
-    ASAMConfig,
     AccumulationConfig,
     AccumulationState,
+    ASAMConfig,
     FineTuneStepState,
     LossBundle,
     LossScaleState,
@@ -1735,34 +1735,32 @@ def _perturb_label(label: str, group: Any, config: SAMConfig | ASAMConfig) -> bo
         terms.update(str(tag).lower() for tag in getattr(group, "tags", ()))
     if not config.perturb_bias and any("bias" in term for term in terms):
         return False
-    if not config.perturb_norm and any("norm" in term for term in terms):
-        return False
-    return True
+    return not (not config.perturb_norm and any("norm" in term for term in terms))
 
 
 __all__ = (
-    "SAMStepInfo",
     "AccumulatingLossBundleInfo",
     "ModelStateAggregator",
+    "SAMStepInfo",
     "StatefulSAMStepInfo",
     "StatefulStepInfo",
     "init_accumulation_state",
     "init_finetune_step_state",
     "init_rng_streams",
     "init_step_counters",
-    "make_finetune_update_step",
     "make_accumulating_loss_bundle_update_step",
+    "make_finetune_update_step",
     "make_loss_bundle_update_step",
     "make_loss_scaled_master_update_step",
     "make_master_params",
     "make_master_update_step",
-    "make_plan_loss_scaled_master_update_step",
-    "make_plan_update_step",
     "make_plan_loss_bundle_update_step",
+    "make_plan_loss_scaled_master_update_step",
     "make_plan_master_update_step",
+    "make_plan_update_step",
     "make_sam_step",
-    "make_stateful_sam_step",
     "make_stateful_loss_scaled_master_update_step",
+    "make_stateful_sam_step",
     "make_update_step",
     "sam_cost_report",
 )
