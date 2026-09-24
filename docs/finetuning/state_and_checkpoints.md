@@ -48,8 +48,71 @@ opt_state = rfft.load_state_checkpoint(
 )
 ```
 
-When checkpoints cross a trust boundary, use a backend-native, non-executable array checkpoint format instead of these
-pickle helpers.
+For a non-executable checkpoint on a shared POSIX filesystem, use the array helpers. Supply explicit limits and rebuild
+a trusted template from the same compiled plan and expected component structures. All participating JAX processes call
+save and load in the same order. The template supplies Python container types, static fields and target sharding; the
+file supplies only metadata and numeric array bytes. See
+[`examples/finetuning/array_checkpoint.py`](../../examples/finetuning/array_checkpoint.py) for a runnable example.
+
+```python
+limits = rfft.ArrayCheckpointLimits(
+    max_manifest_bytes=2_000_000,
+    max_arrays=10_000,
+    max_shards=20_000,
+    max_array_bytes=100_000_000,
+    max_total_bytes=1_000_000_000,
+)
+checkpoint = rfft.make_state_checkpoint(
+    optim,
+    opt_state,
+    model_checkpoint_id=training_model_id,
+    base_model_value_hash=training_model_digest,
+    counters={"successful_update": applied_updates},
+)
+rfft.save_array_state_checkpoint("optimizer.rfarr", checkpoint, limits=limits)
+
+# After restoring the matching training model, compile its plan again and
+# construct a template with matching optional component structures.
+template = rfft.make_state_checkpoint(
+    optim,
+    optim.init(trainable),
+    model_checkpoint_id=training_model_id,
+    base_model_value_hash=training_model_digest,
+    counters={"successful_update": 0},
+)
+checkpoint = rfft.load_array_state_checkpoint(
+    "optimizer.rfarr",
+    optim,
+    template=template,
+    model_checkpoint_id=training_model_id,
+    base_model_value_hash=training_model_digest,
+    applied_updates=applied_updates,
+    limits=limits,
+)
+opt_state = checkpoint.state
+```
+
+The reader validates the plan fingerprint, effective group table, optimizer configuration, expected model identity,
+component tree, leaf shape and dtype, sharding layout, file lengths and SHA-256 checksums before returning state. These
+checks detect incompatibility and accidental damage; they do not authenticate the checkpoint's origin. Apply source
+admission and access controls separately. Pass the training model's identity and successful-update count from an
+independently restored model artifact. An evaluated EMA or SWA model is a distinct artifact.
+
+The array format is versioned separately from the logical optimizer checkpoint schema. It writes uncompressed NumPy
+arrays with pickle disabled and supports bf16, complex arrays and typed PRNG keys without numeric conversion. The reader
+requires finite caller-selected limits. Checkpoint metadata must be JSON serializable. It restores onto the same process
+count and equivalent shard layout; changing the partition requires an explicit migration outside this reader. A shared
+POSIX filesystem is required for multiple processes. Run only one writer per path at a time.
+
+Writers create immutable generations and atomically replace a small index after every participant has written and synced
+its shards. A failed write leaves the previous completed generation readable. Incomplete generations are never loaded;
+administrators can remove them after excluding concurrent writers and readers. Old generations remain available until
+separately retired. File checksums do not replace a signed or otherwise authenticated artifact inventory.
+
+Existing logical checkpoints without `state_schema` remain loadable through the older trusted path. Pass `template=` to
+`restore_state_checkpoint` when qualifying such a checkpoint's tree. The array reader requires a checkpoint produced
+with the new structural schema and does not load pickle files. The pickle helper now also writes through a temporary
+file before replacing its destination, but its read path still executes pickle and requires `trusted=True`.
 
 Equimo model/delta serialization remains separate. Save the Equimo model or fine-tuning bundle with Equimo, and save the
 Rollfast optimizer state alongside it with the same training step metadata.

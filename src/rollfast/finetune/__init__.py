@@ -13,6 +13,11 @@ from .adalora import (
     allocate_rank_mask,
     make_adalora_controller,
 )
+from .array_storage import (
+    ArrayCheckpointLimits,
+    load_array_state_checkpoint,
+    save_array_state_checkpoint,
+)
 from .averaging import AveragingState
 from .builders import (
     adamw8_from_plan,
@@ -159,6 +164,7 @@ __all__ = (
     "AdaLoRAControllerConfig",
     "AdaLoRAState",
     "AlgorithmSemantics",
+    "ArrayCheckpointLimits",
     "AuxLossRule",
     "AveragingSourceView",
     "AveragingState",
@@ -235,6 +241,7 @@ __all__ = (
     "init_rng_streams",
     "init_step_counters",
     "linear_probe_adamw",
+    "load_array_state_checkpoint",
     "load_state_checkpoint",
     "lora_adamw",
     "make_accumulating_loss_bundle_update_step",
@@ -268,6 +275,7 @@ __all__ = (
     "restore_offloaded_optimizer_state",
     "restore_state_checkpoint",
     "sam_cost_report",
+    "save_array_state_checkpoint",
     "save_state_checkpoint",
     "schedule_free_adam_from_plan",
     "state_manifest",

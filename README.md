@@ -296,7 +296,9 @@ planned update uses index `total_steps - 1`. Preview a particular group with
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and checkpoint guidance in
 [`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md) configuration support in
 [`docs/finetuning/configuration.md`](./docs/finetuning/configuration.md), and averaging guidance in
-[`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md).
+[`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md). The checkpoint guide includes bounded, non-executable
+array storage for shared POSIX filesystems; a runnable example is in
+[`examples/finetuning/array_checkpoint.py`](./examples/finetuning/array_checkpoint.py).
 
 ## Usage
 

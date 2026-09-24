@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import pickle
+import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import jax
 
+from ._checkpoint_tree import checkpoint_parts, describe_tree, match_tree_schema
 from .config import SCHEMA_VERSION, OptimizerBundle
 
 _CHECKPOINT_FORMAT = "rollfast.finetune.optimizer_state"
@@ -98,7 +101,7 @@ def make_state_checkpoint(
         raise ValueError(
             "loss_scale state is required when precision.loss_scale is enabled."
         )
-    return OptimizerStateCheckpoint(
+    checkpoint = OptimizerStateCheckpoint(
         manifest={
             **state_manifest(bundle),
             "model_checkpoint_id": model_checkpoint_id,
@@ -124,6 +127,16 @@ def make_state_checkpoint(
         counters=counters,
         metadata={} if metadata is None else dict(metadata),
     )
+    try:
+        schema, _ = describe_tree(checkpoint_parts(checkpoint))
+    except TypeError:
+        # The logical checkpoint remains backend-neutral for existing callers.
+        # Array storage requires a supported, explicitly described state tree.
+        return checkpoint
+    return replace(
+        checkpoint,
+        manifest={**checkpoint.manifest, "state_schema": schema},
+    )
 
 
 def restore_state_checkpoint(
@@ -132,6 +145,9 @@ def restore_state_checkpoint(
     *,
     model_checkpoint_id: str,
     strict: bool = True,
+    template: OptimizerStateCheckpoint | None = None,
+    base_model_value_hash: str | None = None,
+    applied_updates: int | None = None,
 ) -> Any:
     """Validate and return the state PyTree from ``checkpoint``."""
 
@@ -155,6 +171,29 @@ def restore_state_checkpoint(
                 f"expected {model_checkpoint_id!r}, got {checkpoint_model_id!r}."
             )
         _validate_manifest_compatibility(bundle, checkpoint.manifest)
+        group_table = checkpoint.manifest.get(
+            "group_table", checkpoint.manifest.get("groups")
+        )
+        if _normalize_json(group_table) != _normalize_json(bundle.report.group_table()):
+            raise OptimizerStateRestoreError(
+                "optimizer-state checkpoint effective group table mismatch."
+            )
+        if (
+            base_model_value_hash is not None
+            and checkpoint.manifest.get("base_model_value_hash")
+            != base_model_value_hash
+        ):
+            raise OptimizerStateRestoreError(
+                "optimizer-state checkpoint base model hash mismatch."
+            )
+        if (
+            applied_updates is not None
+            and checkpoint.manifest.get("counters", {}).get("successful_update")
+            != applied_updates
+        ):
+            raise OptimizerStateRestoreError(
+                "optimizer-state checkpoint applied update mismatch."
+            )
         checkpoint_logical_ids = checkpoint.manifest.get("logical_id_table_hash")
         expected_logical_ids = bundle.report.logical_id_table_hash
         if checkpoint_logical_ids != expected_logical_ids:
@@ -172,12 +211,28 @@ def restore_state_checkpoint(
                 f"expected {expected_model_state_hash!r}, got {checkpoint_model_state_hash!r}."
             )
         if _requires_schedule_free_state(bundle) and not _contains_state_type(
-            checkpoint.state,
-            "ScheduleFreeState",
+            checkpoint.state, "ScheduleFreeState"
         ):
             raise OptimizerStateRestoreError(
                 "checkpoint is missing required schedule-free optimizer state."
             )
+    if "state_schema" in checkpoint.manifest:
+        try:
+            actual_schema, _ = describe_tree(checkpoint_parts(checkpoint))
+            match_tree_schema(actual_schema, checkpoint.manifest["state_schema"])
+        except (TypeError, ValueError) as exc:
+            raise OptimizerStateRestoreError(
+                f"checkpoint state schema mismatch: {exc}"
+            ) from exc
+    if template is not None:
+        try:
+            expected_schema, _ = describe_tree(checkpoint_parts(template))
+            actual_schema, _ = describe_tree(checkpoint_parts(checkpoint))
+            match_tree_schema(actual_schema, expected_schema)
+        except (TypeError, ValueError) as exc:
+            raise OptimizerStateRestoreError(
+                f"checkpoint template mismatch: {exc}"
+            ) from exc
     return checkpoint.state
 
 
@@ -211,8 +266,24 @@ def save_state_checkpoint(
         base_model_value_hash=base_model_value_hash,
         metadata=metadata,
     )
-    with Path(path).open("wb") as handle:
-        pickle.dump(checkpoint, handle)
+    destination = Path(path)
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            pickle.dump(checkpoint, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        _sync_directory(destination.parent)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
     return checkpoint
 
 
@@ -271,6 +342,22 @@ def _validate_checkpoint_schema(checkpoint: OptimizerStateCheckpoint) -> None:
             "checkpoint manifest is missing model_checkpoint_id."
         )
     components = checkpoint.manifest.get("components", {})
+    if components.get("optimizer_state") is not True:
+        raise OptimizerStateRestoreError(
+            "checkpoint is missing optimizer-state component metadata."
+        )
+    for name in (
+        "master_params",
+        "accumulation",
+        "model_state",
+        "loss_scale",
+        "rng",
+        "counters",
+    ):
+        if components.get(name, False) != (getattr(checkpoint, name) is not None):
+            raise OptimizerStateRestoreError(
+                f"checkpoint {name} component presence mismatch."
+            )
     if checkpoint.manifest.get("precision", {}).get(
         "master_params"
     ) == "always" and not components.get("master_params", False):
@@ -300,7 +387,7 @@ def _validate_manifest_compatibility(
     for key in _COMPATIBILITY_FIELDS:
         expected = expected_view[key]
         saved = saved_view[key]
-        if saved == expected:
+        if _normalize_json(saved) == _normalize_json(expected):
             continue
         if key == "sharding_config":
             mismatch = "sharding mismatch (sharding_config)"
@@ -360,6 +447,22 @@ def _contains_state_type(tree: Any, type_name: str) -> bool:
             is_leaf=lambda leaf: type(leaf).__name__ == type_name,
         )
     )
+
+
+def _normalize_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _normalize_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_normalize_json(item) for item in value]
+    return value
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 __all__ = (
