@@ -211,7 +211,7 @@ Runnable examples live under [`examples/`](./examples):
 `trainable`, and each trainable identity must provide a stable `logical_id`. Plan-aware step helpers additionally
 require a `combine(trainable)` method; compiler-only plans do not.
 
-The development integration supports Equimo `>=2.3.0,<3.0.0`. Equimo 1.x does not provide the `equimo.finetune` plan
+The development integration supports Equimo `>=2.4.0,<3.0.0`. Equimo 1.x does not provide the `equimo.finetune` plan
 API, and a future 3.x API must be verified before widening this interval.
 
 ```python
