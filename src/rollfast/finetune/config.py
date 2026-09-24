@@ -526,7 +526,10 @@ class StateQuantizationConfig:
 
 @dataclass(frozen=True)
 class GroupRule:
-    """Rollfast-side override for groups emitted by a fine-tuning plan."""
+    """Rollfast-side override for groups emitted by a fine-tuning plan.
+
+    Set ``required`` when a missing matching group should reject compilation.
+    """
 
     label: str | None = None
     label_prefix: str | None = None
@@ -540,6 +543,7 @@ class GroupRule:
     optimizer: OptimizerName | None = None
     priority: int = 0
     name: str = ""
+    required: bool = False
 
     def __post_init__(self) -> None:
         if self.lr_multiplier <= 0.0:

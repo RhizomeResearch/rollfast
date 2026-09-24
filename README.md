@@ -211,7 +211,7 @@ Runnable examples live under [`examples/`](./examples):
 `trainable`, and each trainable identity must provide a stable `logical_id`. Plan-aware step helpers additionally
 require a `combine(trainable)` method; compiler-only plans do not.
 
-The development integration supports Equimo `>=2.0.0a2,<3.0.0`. Equimo 1.x does not provide the `equimo.finetune` plan
+The development integration supports Equimo `>=2.3.0,<3.0.0`. Equimo 1.x does not provide the `equimo.finetune` plan
 API, and a future 3.x API must be verified before widening this interval.
 
 ```python
@@ -278,10 +278,20 @@ report shows the effective numeric value as each group's `weight_decay_value`. N
 named rules are reported as warnings. Schedule-Free AdamC mode still supports only one nonzero decay coefficient across
 groups.
 
+Set `GroupRule(required=True, name="...")` for a selector that must match at least one trainable group. Compilation
+raises `ValueError` if the selector is absent or matches only an empty group; optional rules continue to warn when named
+and unmatched. Rules select groups, so inspect `plan.report.parameters` and `optim.report.policy_table()` when the exact
+trainable logical IDs matter. A plan with duplicate trainable logical IDs is rejected before optimizer state is created.
+When adding required rules to a recipe, pass `(*recipe.group_rules, *required_rules)` as `group_rules`; supplying
+`group_rules` replaces the recipe's rules.
+
 `ScheduleConfig.warmup_cosine_from_epochs(...)` converts epoch-based training lengths to steps for the fine-tuning
 builders. Rollfast's warmup schedules preserve the existing behavior that step 0 starts at `peak_lr / warmup_steps` when
 warmup is enabled. AdamW fine-tuning defaults keep `eps=1e-6`; pass `eps=1e-8` when mirroring Optax/PyTorch-style AdamW
-settings exactly.
+settings exactly. `optim.manifest()` records the resolved optimizer, schedule, clipping and precision configs and
+representative schedule values. The schedule counter starts at zero for the first applied optimizer update; the final
+planned update uses index `total_steps - 1`. Preview a particular group with
+`preview_schedule(optim.schedule_config, peak_lr=group.effective_lr, steps=(0, optim.schedule_config.total_steps - 1))`.
 
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and checkpoint guidance in
 [`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md) configuration support in

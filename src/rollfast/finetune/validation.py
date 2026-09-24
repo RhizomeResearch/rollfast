@@ -54,20 +54,23 @@ def validate_plan(
     raw_groups = dict(plan.group_specs)
 
     labels_seen: dict[str, dict[str, int]] = {}
+    logical_ids_seen: dict[str, str] = {}
     warnings: list[str] = []
     _validate_group_specs(raw_groups)
 
-    leaves = _tree_leaves(plan.trainable)
+    leaves_with_paths = _tree_leaves_with_path(plan.trainable)
     frozen_leaves = _tree_leaves(plan.frozen)
     label_leaves = _tree_leaves(plan.labels)
     identity_leaves = _tree_leaves(plan.identities)
-    if len(leaves) != len(label_leaves) or len(leaves) != len(frozen_leaves):
+    if len(leaves_with_paths) != len(label_leaves) or len(leaves_with_paths) != len(
+        frozen_leaves
+    ):
         raise ValueError(
             "plan.trainable, plan.frozen, and plan.labels must have the same number of leaves."
         )
 
-    for leaf, frozen_leaf, label, identity in zip(
-        leaves,
+    for (path, leaf), frozen_leaf, label, identity in zip(
+        leaves_with_paths,
         frozen_leaves,
         label_leaves,
         identity_leaves,
@@ -110,6 +113,13 @@ def validate_plan(
                 "every trainable array leaf identity must provide a non-empty "
                 "logical_id string."
             )
+        physical_path = _path_to_string(path)
+        if logical_id in logical_ids_seen:
+            raise ValueError(
+                f"duplicate trainable logical_id {logical_id!r} at "
+                f"{logical_ids_seen[logical_id]!r} and {physical_path!r}."
+            )
+        logical_ids_seen[logical_id] = physical_path
 
         arr = jnp.asarray(leaf)
         stats = labels_seen.setdefault(label, {"params": 0, "bytes": 0, "leaves": 0})

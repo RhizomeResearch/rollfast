@@ -114,6 +114,20 @@ def test_validation_rejects_identity_without_logical_id():
         rfft.validate_plan(bad)
 
 
+def test_validation_rejects_duplicate_trainable_logical_ids():
+    plan = tiny_plan()
+    duplicated = replace(
+        plan.identities["head"]["w"],
+        logical_id=plan.identities["blocks"][0]["w"].logical_id,
+    )
+    bad = replace(plan, identities={**plan.identities, "head": {"w": duplicated}})
+
+    with pytest.raises(
+        ValueError, match="duplicate trainable logical_id.*blocks.0.w.*head.w"
+    ):
+        rfft.validate_plan(bad)
+
+
 def test_validate_tiny_plan_counts_groups_and_fingerprint():
     plan = tiny_plan()
     normalized = rfft.validate_plan(plan)

@@ -14,6 +14,17 @@ def compile_groups(
 ) -> tuple[CompiledGroup, ...]:
     """Resolve plan groups into optimizer groups."""
 
+    rules = tuple(rules)
+    for rule in rules:
+        if rule.required and not any(
+            group.leaf_count > 0 and matches_rule(group, rule)
+            for group in groups.values()
+        ):
+            raise ValueError(
+                f"required group rule {rule.name or repr(rule)!r} matched no "
+                "trainable groups."
+            )
+
     compiled = []
     for label, group in sorted(groups.items()):
         matched = tuple(rule for rule in rules if matches_rule(group, rule))

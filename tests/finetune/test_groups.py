@@ -94,3 +94,48 @@ def test_preview_groups_includes_matched_rule_names():
     rows = {row["label"]: row for row in rfft.preview_groups(groups)}
 
     assert rows["head_decay"]["matched_rules"] == ("head_lr",)
+
+
+def test_required_group_rule_accepts_populated_match_from_iterator():
+    plan = tiny_plan()
+    rules = iter((rfft.GroupRule(label="head_decay", required=True, name="head"),))
+
+    groups = rfft.compile_groups(
+        rfft.validate_plan(plan).groups,
+        rfft.OptimizerConfig(),
+        rules,
+    )
+
+    assert {group.source_label for group in groups} >= {"head_decay"}
+    assert next(
+        group for group in groups if group.source_label == "head_decay"
+    ).matched_rule_names == ("head",)
+
+
+def test_required_group_rule_rejects_missing_and_empty_matches():
+    plan = tiny_plan()
+
+    with pytest.raises(ValueError, match="required group rule 'missing'"):
+        rfft.compile_optimizer(
+            plan,
+            total_steps=2,
+            group_rules=(
+                rfft.GroupRule(label="missing", required=True, name="missing"),
+            ),
+        )
+
+    groups = rfft.validate_plan(plan).groups
+    empty_group = rfft.PlanGroup(
+        label="empty_decay",
+        role="head",
+        depth=None,
+        lr_multiplier=1.0,
+        weight_decay=True,
+        tags=frozenset(),
+    )
+    with pytest.raises(ValueError, match="required group rule 'empty'"):
+        rfft.compile_groups(
+            {**groups, "empty_decay": empty_group},
+            rfft.OptimizerConfig(),
+            (rfft.GroupRule(label="empty_decay", required=True, name="empty"),),
+        )
