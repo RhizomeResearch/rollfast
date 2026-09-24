@@ -1,11 +1,10 @@
 # Stable Release Checklist
 
-Run these gates from a clean checkout of the release commit using the Python
-version declared by the project.
+Run these gates from a clean checkout of the release commit using the Python version declared by the project.
 
-Ruff and ty are pinned in `pyproject.toml` so local checks and fresh CI installs
-use the same versions. Update these pins deliberately and run all static checks
-when doing so; tool upgrades can change default lint rules and formatting.
+Ruff, mdformat, and ty are pinned in `pyproject.toml` so local checks and fresh CI installs use the same versions.
+Update these pins deliberately and run all static checks when doing so; tool upgrades can change default lint rules and
+formatting.
 
 ## Required Gates
 
@@ -13,6 +12,7 @@ when doing so; tool upgrades can change default lint rules and formatting.
 uv sync --group dev
 uv run ruff check .
 uv run ruff format --check .
+uv run mdformat --check --wrap 120 ./*.md benchmarks docs examples src tests
 uv run ty check
 uv run pytest
 XLA_FLAGS=--xla_force_host_platform_device_count=4 uv run pytest tests/test_multidevice_cpu.py
@@ -25,8 +25,7 @@ uv run python benchmarks/finetuning/convergence.py
 uv build
 ```
 
-Install the built wheel into a fresh environment and import Rollfast from a
-directory outside the repository:
+Install the built wheel into a fresh environment and import Rollfast from a directory outside the repository:
 
 ```bash
 uv venv --clear /tmp/rollfast-wheel-venv
@@ -34,17 +33,14 @@ uv pip install --python /tmp/rollfast-wheel-venv/bin/python dist/*.whl
 (cd /tmp && /tmp/rollfast-wheel-venv/bin/python -c "import rollfast")
 ```
 
-CI additionally runs the suite against the minimum supported JAX and Optax
-versions. The release tag, `pyproject.toml`, and `rollfast.__version__` must be
-identical.
+CI additionally runs the suite against the minimum supported JAX and Optax versions. The release tag, `pyproject.toml`,
+and `rollfast.__version__` must be identical.
 
 ## Accelerator Validation
 
-GPU or TPU validation is required before making hardware-specific performance,
-memory, or sharding claims, but is not a prerequisite for the CPU-validated API
-release. Record the accelerator model, JAX/JAXLIB build, dtype, mesh, partition
-specifications, model, batch shape, and benchmark warmup in any published
-result.
+GPU or TPU validation is required before making hardware-specific performance, memory, or sharding claims, but is not a
+prerequisite for the CPU-validated API release. Record the accelerator model, JAX/JAXLIB build, dtype, mesh, partition
+specifications, model, batch shape, and benchmark warmup in any published result.
 
 ## Release Hygiene
 

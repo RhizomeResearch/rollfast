@@ -1,8 +1,7 @@
 # Fine-Tuning Averaging
 
-Rollfast keeps EMA and SWA on the optimizer side. Equimo still owns the model
-tree and frozen/trainable partition; Rollfast maintains extra parameter views
-inside the optimizer state.
+Rollfast keeps EMA and SWA on the optimizer side. Equimo still owns the model tree and frozen/trainable partition;
+Rollfast maintains extra parameter views inside the optimizer state.
 
 ```python
 import rollfast.finetune as rfft
@@ -24,11 +23,11 @@ eval_swa = optim.eval_params(trainable, opt_state, view="swa")
 eval_model = plan.combine(eval_ema)
 ```
 
-`view="optimizer"` returns the ordinary training parameters. Schedule-Free
-bundles additionally expose `view="schedule_free"`.
+`view="optimizer"` returns the ordinary training parameters. Schedule-Free bundles additionally expose
+`view="schedule_free"`.
 
-EMA/SWA state advances only when an optimizer step is actually applied. With
-gradient accumulation, withheld microsteps do not update the averages.
+EMA/SWA state advances only when an optimizer step is actually applied. With gradient accumulation, withheld microsteps
+do not update the averages.
 
 EMA can be restricted to plan groups by tag:
 
@@ -45,6 +44,5 @@ optim = rfft.adamw_from_plan(
 )
 ```
 
-Included leaves use the EMA average in `view="ema"`. Excluded leaves return the
-current optimizer parameters, so evaluation trees keep the same structure as the
-training tree.
+Included leaves use the EMA average in `view="ema"`. Excluded leaves return the current optimizer parameters, so
+evaluation trees keep the same structure as the training tree.
