@@ -23,8 +23,6 @@ def main(address: str, rank: int, path: Path) -> None:
         num_processes=2,
         process_id=rank,
         initialization_timeout=30,
-        heartbeat_timeout_seconds=15,
-        shutdown_timeout_seconds=5,
     )
     try:
         sharding = NamedSharding(Mesh(np.asarray(jax.devices()), ("data",)), P("data"))

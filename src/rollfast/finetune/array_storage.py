@@ -462,7 +462,7 @@ def _place_piece(data: np.ndarray, target: Any, device: Any | None) -> Any:
         return data
     if jax.dtypes.issubdtype(target.dtype, jax.dtypes.prng_key):
         return jax.random.wrap_key_data(
-            jax.device_put(data, device), dtype=target.dtype
+            jax.device_put(data, device), impl=jax.random.key_impl(target)
         )
     return jax.device_put(data, device)
 

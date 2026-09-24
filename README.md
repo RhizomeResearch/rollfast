@@ -293,7 +293,8 @@ representative schedule values. The schedule counter starts at zero for the firs
 planned update uses index `total_steps - 1`. Preview a particular group with
 `preview_schedule(optim.schedule_config, peak_lr=group.effective_lr, steps=(0, optim.schedule_config.total_steps - 1))`.
 
-Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with state and checkpoint guidance in
+Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with compatibility and migration guidance in
+[`docs/finetuning/compatibility.md`](./docs/finetuning/compatibility.md), state and checkpoint guidance in
 [`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md) configuration support in
 [`docs/finetuning/configuration.md`](./docs/finetuning/configuration.md), and averaging guidance in
 [`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md). The checkpoint guide includes bounded, non-executable

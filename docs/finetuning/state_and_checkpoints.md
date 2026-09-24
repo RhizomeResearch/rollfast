@@ -1,5 +1,8 @@
 # Optimizer State And Checkpoints
 
+For reader selection and migration from an application-owned checkpoint format, see
+[fine-tuning compatibility](compatibility.md).
+
 Rollfast optimizer checkpoints are backend-neutral: the logical object contains a serializable manifest and the
 optimizer state PyTree. Use your preferred array checkpoint backend, or the pickle helpers only for trusted local files
 in scripts and tests.

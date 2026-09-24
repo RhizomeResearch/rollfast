@@ -3,6 +3,14 @@
 All notable changes to Rollfast are documented here. Rollfast follows [Semantic Versioning](https://semver.org/) for the
 supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
+## Unreleased
+
+- Document the fine-tuning plan, evaluation-view, update-status, and checkpoint migration contracts, including the
+  distinction between declared dependency ranges and tested combinations.
+- Record the existing added and corrected behavior for required group selectors, strict checkpoint restoration,
+  non-executable array storage, evaluation-view binding, and discarded accumulation windows.
+- Restore typed PRNG keys from array checkpoints on the minimum supported JAX version.
+
 ## [1.1.0] - 2026-09-05
 
 Performance and maintenance improvements with the existing v1 public API, optimizer defaults, and checkpoint layouts
