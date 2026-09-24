@@ -9,6 +9,7 @@ import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 
 from .helpers import TinyGroup, TinyPlan, tiny_plan
 
@@ -55,7 +56,7 @@ def test_discarded_window_does_not_advance_averages_or_poison_next_window(
     for factor in (1.0, 1.0):
         grads = {"w": jnp.full_like(params["w"], factor)}
         updates, state, status = update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
         events.append(status)
     assert bool(events[0].accumulating)
     assert bool(events[1].update_applied)
@@ -67,7 +68,7 @@ def test_discarded_window_does_not_advance_averages_or_poison_next_window(
         factor = jnp.nan if position == bad_position else 1.0
         grads = {"w": jnp.full_like(params["w"], factor)}
         updates, state, status = update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
     assert bool(status.window_discarded)
     assert not bool(status.update_applied)
     assert int(status.microsteps_in_window) == 0
@@ -93,7 +94,7 @@ def test_discarded_window_does_not_advance_averages_or_poison_next_window(
     for position in range(2):
         grads = {"w": jnp.ones_like(params["w"])}
         updates, state, status = update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
         assert bool(status.accumulating) == (position == 0)
     assert bool(status.update_applied)
     assert int(state.step) == int(state.ema_count) == int(state.swa_count) == 2
@@ -127,7 +128,7 @@ def test_status_matches_ordinary_update_and_zero_gradient_decay(use_jit):
     assert int(status.microsteps_in_window) == 0
     assert float(updates["w"][0]) < 0.0
 
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
     updates, state, status = update({"w": jnp.array([jnp.inf])}, state, params)
     assert bool(status.window_discarded)
     np.testing.assert_array_equal(updates["w"], jnp.zeros_like(params["w"]))
@@ -145,7 +146,7 @@ def test_accumulated_mean_matches_optax_adamw(use_jit):
     for value in (1.0, 3.0):
         grads = {"w": jnp.full_like(params["w"], value)}
         updates, state, status = update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
     reference = optax.adamw(learning_rate=0.1, b1=0.0, b2=0.0, weight_decay=0.1)
     reference_updates, _ = reference.update(
         {"w": jnp.array([2.0])}, reference.init(plan.trainable), plan.trainable
@@ -240,7 +241,7 @@ def test_safe_checkpoint_replays_partial_window(tmp_path, first_bad):
             bool(value)
             for value in jax.tree.leaves(jax.tree.map(jnp.array_equal, restored, state))
         )
-        params = optax.apply_updates(params, expected)
+        params = apply_updates(params, expected, stochastic=False)
         loaded = replace(loaded, state=restored)
 
 

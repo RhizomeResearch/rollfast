@@ -6,8 +6,9 @@ import time
 
 import jax
 import jax.numpy as jnp
-import optax
 from _common import benchmark_step, emit, metadata, rfft, tiny_plan, tree_l2_loss
+
+from rollfast import apply_updates
 
 
 def _scaled_loss(model, batch):
@@ -124,7 +125,7 @@ def main() -> None:
         updates, state, status = compiled.update_with_status(
             compiled_grads, state, params
         )
-        return optax.apply_updates(params, updates), state, status
+        return apply_updates(params, updates, stochastic=False), state, status
 
     compiled_params = plan.trainable
     compiled_state = compiled.init(compiled_params)

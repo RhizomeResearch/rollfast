@@ -7,6 +7,7 @@ import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 from rollfast.finetune.transforms import (
     AlwaysSkipNonFiniteState,
     always_skip_nonfinite,
@@ -78,7 +79,7 @@ def test_nonfinite_skip_rejects_every_bad_update_and_recovers(use_jit):
     for rejected_count in range(1, 4):
         previous_inner_state = state.inner_state
         updates, state = update(nan_grads, state, params)
-        next_params = optax.apply_updates(params, updates)
+        next_params = apply_updates(params, updates, stochastic=False)
 
         assert jnp.array_equal(updates["w"], jnp.zeros_like(updates["w"]))
         assert jnp.array_equal(next_params["w"], params["w"])
@@ -529,7 +530,7 @@ def test_plain_adamw_jit_update_preserves_complex_values():
         bundle.init(plan.trainable),
         plan.trainable,
     )
-    updated = optax.apply_updates(plan.trainable, updates)
+    updated = apply_updates(plan.trainable, updates, stochastic=False)
 
     assert updated["w"].dtype == jnp.complex64
     assert jnp.all(jnp.isfinite(updated["w"]))

@@ -5,10 +5,10 @@ import equimo.finetune.vision as eqv
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 from rollfast.integrations import equimo
 from tests.finetune.helpers import tiny_plan
 
@@ -38,7 +38,7 @@ def test_real_equimo_plan_compiles_and_updates_finitely():
 
     loss, grads = jax.value_and_grad(loss_fn)(plan.trainable)
     updates, _ = optimizer.update(grads, opt_state, plan.trainable)
-    updated = optax.apply_updates(plan.trainable, updates)
+    updated = apply_updates(plan.trainable, updates, stochastic=False)
 
     assert jnp.isfinite(loss)
     assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves(updated))
@@ -145,7 +145,7 @@ def test_safe_checkpoint_resumes_equimo_probe_plans(tmp_path, task, trainability
     grads = jax.grad(loss_fn)(plan.trainable)
     state = bundle.init(plan.trainable)
     updates, state = bundle.update(grads, state, plan.trainable)
-    trainable = optax.apply_updates(plan.trainable, updates)
+    trainable = apply_updates(plan.trainable, updates, stochastic=False)
     assert plan.combine(trainable)(image).shape == (
         (2,) if task == "classification" else (3, 2, 2)
     )

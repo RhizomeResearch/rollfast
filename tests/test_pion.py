@@ -2,9 +2,9 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
+from rollfast import apply_updates
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.optim.pion import ScaleByPionState, pion, scale_by_pion
 
@@ -166,6 +166,8 @@ def test_pion_update_preserves_spectrum_to_second_order():
     tx = pion(learning_rate=1e-3)
     state = tx.init(params)
     updates, state = tx.update({"w": grad}, state, params)
-    new_params = cast(dict[str, jax.Array], optax.apply_updates(params, updates))
+    new_params = cast(
+        dict[str, jax.Array], apply_updates(params, updates, stochastic=False)
+    )
     new_w = new_params["w"]
     assert jnp.allclose(jnp.linalg.svd(new_w, compute_uv=False), jnp.ones(4), atol=1e-3)

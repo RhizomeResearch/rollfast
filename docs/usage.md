@@ -6,14 +6,14 @@ PyTrees, and low-precision update helpers. Plan-aware fine-tuning utilities are 
 
 ## Optimizer Shape
 
-Rollfast optimizers are Optax gradient transformations. They consume a parameter PyTree, return update PyTrees with the
-same structure, and are usually applied with `optax.apply_updates`.
+Rollfast optimizers are Optax gradient transformations. They consume a parameter PyTree and return update PyTrees with
+the same structure. Apply those updates with `rollfast.apply_updates`, explicitly choosing `stochastic=False` for
+deterministic rounding.
 
 ```python
 import jax
 import jax.numpy as jnp
-import optax
-from rollfast import adamw
+from rollfast import adamw, apply_updates
 
 params = {"w": jnp.ones((4, 3)), "b": jnp.zeros((4,))}
 grads = jax.tree.map(lambda x: jnp.full_like(x, 0.1), params)
@@ -21,7 +21,7 @@ grads = jax.tree.map(lambda x: jnp.full_like(x, 0.1), params)
 optimizer = adamw(learning_rate=1e-2, weight_decay=0.01)
 state = optimizer.init(params)
 updates, state = optimizer.update(grads, state, params)
-params = optax.apply_updates(params, updates)
+params = apply_updates(params, updates, stochastic=False)
 ```
 
 ## Structured Matrix Optimizers
@@ -54,27 +54,30 @@ Schedule-Free optimizers maintain training parameters and an averaged evaluation
 parameters, then call `schedule_free_eval_params` for validation or checkpointing.
 
 ```python
-import optax
-from rollfast import schedule_free_adam, schedule_free_eval_params
+from rollfast import apply_updates, schedule_free_adam, schedule_free_eval_params
 
 optimizer = schedule_free_adam(learning_rate=1e-2, total_steps=20)
 state = optimizer.init(params)
 
 updates, state = optimizer.update(grads, state, params)
-params = optax.apply_updates(params, updates)
+params = apply_updates(params, updates, stochastic=False)
 eval_params = schedule_free_eval_params(state, params)
 ```
 
 ## Low-Precision Updates
 
-`apply_updates` and `apply_updates_prefix` support stochastic rounding for pure BF16 parameter updates. Pass a PRNG key
-when `stochastic=True`.
+`apply_updates` and `apply_updates_prefix` support stochastic rounding for pure BF16 parameter updates. They default to
+`stochastic=True`, which requires a PRNG key. Use `stochastic=False` for deterministic updates without a key, as in the
+examples above. For stochastic rounding, split a fresh key on each invocation and retain its stream in training
+checkpoints.
 
 ```python
 import jax.random as jr
 from rollfast import apply_updates
 
-params = apply_updates(params, updates, jr.PRNGKey(0), stochastic=True)
+rounding_key = jr.PRNGKey(0)  # Initialize once, outside the training loop.
+rounding_key, step_key = jr.split(rounding_key)
+params = apply_updates(params, updates, key=step_key, stochastic=True)
 ```
 
 Use `apply_updates_prefix` when updates are a prefix of an Equinox model PyTree.

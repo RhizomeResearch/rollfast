@@ -17,7 +17,9 @@ optim = rfft.adamw_from_plan(
 Use named views when validating or checkpointing:
 
 ```python
-trainable = optax.apply_updates(trainable, updates)
+from rollfast import apply_updates
+
+trainable = apply_updates(trainable, updates, stochastic=False)
 eval_ema = optim.eval_params(trainable, opt_state, view="ema")
 eval_swa = optim.eval_params(trainable, opt_state, view="swa")
 eval_model = plan.combine(eval_ema)
@@ -61,6 +63,9 @@ also raises `ValueError`. Select an averaged view outside `jax.jit`; optimizer u
 
 EMA/SWA state advances only when an optimizer step is actually applied. With gradient accumulation, withheld microsteps
 do not update the averages.
+
+These wrappers reconstruct the updated training parameters using deterministic rounding. Apply returned updates with
+`stochastic=False` so that the training parameters and the parameter values used for averaging agree.
 
 EMA can be restricted to plan groups by tag:
 

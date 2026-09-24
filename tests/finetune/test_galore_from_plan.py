@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 from rollfast.optim.galore import GaLoreLeafState, galore_adamw
 
 from .helpers import ones_like_trainable, tiny_plan
@@ -38,7 +38,7 @@ def test_galore_from_plan_updates_and_reports_projected_state():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     groups = {group.source_label: group for group in bundle.report.groups}
     projected_states = [leaf for leaf in _galore_leaf_states(state) if leaf.projected]
 

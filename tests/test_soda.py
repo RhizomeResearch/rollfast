@@ -6,7 +6,7 @@ from optax._src import base
 
 import rollfast
 import rollfast.optim.soda as soda_module
-from rollfast import schedules
+from rollfast import apply_updates, schedules
 from rollfast.optim.soda import (
     soda,
     soda_adam,
@@ -48,7 +48,7 @@ def test_soda_adds_initialization_anchor():
     updates = as_array_dict(updates)
     assert jnp.allclose(updates["w"], -0.001)
 
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
     updates, state = tx.update(grads, state, params)
     updates = as_array_dict(updates)
     expected_anchor = (1.0 - 0.999) / 3.0
@@ -114,7 +114,7 @@ def test_soda_mixed_dtypes_remain_finite_across_two_updates():
         for name, param in params.items():
             assert updates[name].dtype == param.dtype
             assert jnp.all(jnp.isfinite(updates[name]))
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
 
 
 def test_soda_implicit_fp32_state_matches_explicit_fp32_reference():
@@ -135,8 +135,12 @@ def test_soda_implicit_fp32_state_matches_explicit_fp32_reference():
             grads, explicit_state, explicit_params
         )
         assert jnp.array_equal(implicit_updates["w"], explicit_updates["w"])
-        implicit_params = optax.apply_updates(implicit_params, implicit_updates)
-        explicit_params = optax.apply_updates(explicit_params, explicit_updates)
+        implicit_params = apply_updates(
+            implicit_params, implicit_updates, stochastic=False
+        )
+        explicit_params = apply_updates(
+            explicit_params, explicit_updates, stochastic=False
+        )
 
 
 def test_soda_requires_params():

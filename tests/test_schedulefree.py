@@ -9,7 +9,7 @@ from optax._src import base
 
 import rollfast
 import rollfast.schedules.schedulefree as schedulefree_module
-from rollfast import schedules
+from rollfast import apply_updates, schedules
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.schedules.schedulefree import (
     ScheduleFreeState,
@@ -103,7 +103,7 @@ def test_schedule_free_mixed_dtypes_remain_finite_across_two_updates():
         for name, param in params.items():
             assert updates[name].dtype == param.dtype
             assert jnp.all(jnp.isfinite(updates[name]))
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
 
 
 def test_schedule_free_implicit_fp32_state_matches_explicit_fp32_reference():
@@ -128,8 +128,12 @@ def test_schedule_free_implicit_fp32_state_matches_explicit_fp32_reference():
             grads, explicit_state, explicit_params
         )
         assert jnp.array_equal(implicit_updates["w"], explicit_updates["w"])
-        implicit_params = optax.apply_updates(implicit_params, implicit_updates)
-        explicit_params = optax.apply_updates(explicit_params, explicit_updates)
+        implicit_params = apply_updates(
+            implicit_params, implicit_updates, stochastic=False
+        )
+        explicit_params = apply_updates(
+            explicit_params, explicit_updates, stochastic=False
+        )
 
 
 def test_public_schedule_free_exports():

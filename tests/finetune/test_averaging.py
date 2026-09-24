@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 
 from .helpers import ones_like_trainable, tiny_plan
 
@@ -47,7 +47,7 @@ def test_compilers_preserve_accumulation_guards_and_eval_views(family, clip):
     for _ in range(2):
         for microstep in range(2):
             updates, state = update(grads, state, params)
-            params = optax.apply_updates(params, updates)
+            params = apply_updates(params, updates, stochastic=False)
             if microstep == 1:
                 expected_count += 1
             assert state.ema_count == expected_count
@@ -63,7 +63,7 @@ def test_compilers_preserve_accumulation_guards_and_eval_views(family, clip):
     nonfinite_grads = jax.tree.map(lambda a: a * jnp.inf, grads)
     for _ in range(2):
         updates, state = update(nonfinite_grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
     for actual, previous in zip(
         jax.tree.leaves(params), jax.tree.leaves(before), strict=True
     ):
@@ -99,7 +99,7 @@ def test_ema_view_updates_after_optimizer_step():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     ema_params = bundle.eval_params(params, state, view="ema")
 
     assert bundle.default_eval_view == "ema"
@@ -123,12 +123,12 @@ def test_swa_view_starts_at_resolved_fraction():
     grads = ones_like_trainable(params)
 
     updates, state = bundle.update(grads, state, params)
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
     with pytest.raises(ValueError, match="no recorded averages"):
         bundle.eval_params(params, state, view="swa")
 
     updates, state = bundle.update(grads, state, params)
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
     swa_params = bundle.eval_params(params, state, view="swa")
 
     assert "swa" in bundle.eval_views
@@ -149,13 +149,13 @@ def test_averaging_does_not_advance_on_withheld_accumulation_microstep():
     grads = ones_like_trainable(plan.trainable)
 
     updates, state = bundle.update(grads, state, plan.trainable)
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     assert state.ema_count == 0
     with pytest.raises(ValueError, match="no recorded averages"):
         bundle.eval_params(params, state, view="ema")
 
     updates, state = bundle.update(grads, state, params)
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
     assert state.ema_count == 1
     assert not jnp.allclose(
         bundle.eval_params(params, state, view="ema")["head"]["w"],
@@ -178,7 +178,7 @@ def test_schedule_free_keeps_named_eval_views_with_ema():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
 
     assert bundle.default_eval_view == "ema"
     assert {"optimizer", "schedule_free", "ema"} <= set(bundle.eval_views)
@@ -210,7 +210,7 @@ def test_schedule_free_ema_defaults_to_schedule_free_eval_source():
             state,
             params,
         )
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
     schedule_free_params = bundle.eval_params(params, state, view="schedule_free")
     ema_params = bundle.eval_params(params, state, view="ema")
 
@@ -233,7 +233,7 @@ def test_schedule_free_ema_can_use_optimizer_source_explicitly():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     ema_params = bundle.eval_params(params, state, view="ema")
 
     assert bundle.manifest()["ema"]["source_view"] == "optimizer"
@@ -268,7 +268,7 @@ def test_ema_tag_filters_average_included_groups_only():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     ema_params = bundle.eval_params(params, state, view="ema")
 
     assert not jnp.allclose(ema_params["head"]["w"], params["head"]["w"])

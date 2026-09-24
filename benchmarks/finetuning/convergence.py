@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import optax
 from _common import emit, metadata
 
 import rollfast
+from rollfast import apply_updates
 
 
 def _loss(params):
@@ -21,7 +21,7 @@ def _run(tx, params, *, steps: int):
     for _ in range(steps):
         value, grads = value_and_grad(params)
         updates, state = tx.update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
     return {
         "initial_loss": float(initial),
         "final_loss": float(value),

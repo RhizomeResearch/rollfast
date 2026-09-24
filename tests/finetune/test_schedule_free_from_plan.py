@@ -1,8 +1,8 @@
 import jax.numpy as jnp
-import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 
 from .helpers import (
     ones_like_trainable,
@@ -93,13 +93,13 @@ def test_schedule_free_adam_updates_and_returns_eval_params():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     updates, state = bundle.update(
         ones_like_trainable(params),
         state,
         params,
     )
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
     eval_params = bundle.eval_params(params, state)
 
     assert eval_params["embed"] is None
@@ -119,9 +119,9 @@ def test_schedule_free_eval_params_unwraps_accumulation_and_finite_guard_state()
     state = bundle.init(plan.trainable)
     grads = ones_like_trainable(plan.trainable)
     updates, state = bundle.update(grads, state, plan.trainable)
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     updates, state = bundle.update(grads, state, params)
-    params = optax.apply_updates(params, updates)
+    params = apply_updates(params, updates, stochastic=False)
 
     eval_params = bundle.eval_params(params, state)
 

@@ -11,7 +11,7 @@ import pytest
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from rollfast import adamw
+from rollfast import adamw, apply_updates
 from rollfast.finetune.transforms import clip_by_global_norm
 from rollfast.optim.sam import global_l2_norm, sam_perturbation
 
@@ -61,11 +61,12 @@ def test_collective_norm_clipping_and_sam_use_all_devices():
     np.testing.assert_allclose(perturbation_norms, 0.5, rtol=1e-6)
 
 
-def test_adamw_state_and_updates_preserve_multi_device_sharding():
+@pytest.mark.parametrize("dtype", (jnp.float32, jnp.bfloat16))
+def test_adamw_state_and_updates_preserve_multi_device_sharding(dtype):
     mesh = Mesh(np.asarray(jax.devices()), ("data",))
     sharding = NamedSharding(mesh, P("data", None))
     shape = (jax.local_device_count() * 2, 2)
-    params = {"w": jax.device_put(jnp.ones(shape, dtype=jnp.float32), sharding)}
+    params = {"w": jax.device_put(jnp.ones(shape, dtype=dtype), sharding)}
     grads = {"w": jax.device_put(jnp.full(shape, 0.25, dtype=jnp.float32), sharding)}
 
     tx = adamw(learning_rate=1e-2)
@@ -82,7 +83,7 @@ def test_adamw_state_and_updates_preserve_multi_device_sharding():
     )
 
     updates, state = tx.update(grads, state, params)
-    updated = optax.apply_updates(params, updates)
+    updated = apply_updates(params, updates, stochastic=False)
 
     assert updates["w"].sharding.is_equivalent_to(sharding, updates["w"].ndim)
     assert updated["w"].sharding.is_equivalent_to(sharding, updated["w"].ndim)

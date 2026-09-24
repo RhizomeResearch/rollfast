@@ -1,9 +1,8 @@
 """Train with Schedule-Free Adam and read the averaged eval parameters."""
 
 import jax.numpy as jnp
-import optax
 
-from rollfast import schedule_free_adam, schedule_free_eval_params
+from rollfast import apply_updates, schedule_free_adam, schedule_free_eval_params
 
 
 def main() -> None:
@@ -20,7 +19,7 @@ def main() -> None:
 
     for _ in range(5):
         updates, state = optimizer.update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
 
     eval_params = schedule_free_eval_params(state, params)
 

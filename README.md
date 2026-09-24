@@ -499,9 +499,8 @@ current `params`, because Schedule-Free interpolates between the averaged iterat
 
 ```python
 import jax.numpy as jnp
-import optax
 
-from rollfast import schedule_free_eval_params, schedule_free_prism
+from rollfast import apply_updates, schedule_free_eval_params, schedule_free_prism
 
 optimizer = schedule_free_prism(
     learning_rate=1.0,  # Peak LR for internal steps
@@ -518,7 +517,7 @@ opt_state = optimizer.init(params)
 
 # During training, apply updates to the z-sequence parameters.
 updates, opt_state = optimizer.update(grads, opt_state, params)
-params = optax.apply_updates(params, updates)
+params = apply_updates(params, updates, stochastic=False)
 
 # For evaluation/validation, use the averaged x-sequence parameters:
 eval_params = schedule_free_eval_params(opt_state, params)

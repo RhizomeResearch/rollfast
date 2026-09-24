@@ -3,10 +3,10 @@ from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 
 from .helpers import ones_like_trainable, tiny_plan
 
@@ -50,7 +50,7 @@ def test_raw_view_binds_checkpoint_without_averaging():
     updates, state = bundle.update(
         ones_like_trainable(plan.trainable), state, plan.trainable
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     checkpoint = rfft.make_state_checkpoint(
         bundle,
         state,
@@ -88,7 +88,7 @@ def test_divergent_views_survive_checkpoint_round_trip_with_model_state():
     state = bundle.init(params)
     for _ in range(2):
         updates, state = bundle.update(ones_like_trainable(params), state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
     state = state._replace(
         ema_params=jax.tree.map(
             lambda x: None if x is None else jnp.full_like(x, 2.0),

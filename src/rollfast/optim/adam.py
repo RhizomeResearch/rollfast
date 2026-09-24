@@ -342,11 +342,11 @@ def adamw(
         The corresponding :class:`optax.GradientTransformationExtraArgs`.
 
     Examples:
-        >>> import optax
         >>> import jax
         >>> import jax.numpy as jnp
+        >>> from rollfast import adamw, apply_updates
         >>> def f(x): return jnp.sum(x ** 2)  # simple quadratic function
-        >>> solver = optax.adamw(learning_rate=0.003)
+        >>> solver = adamw(learning_rate=0.003)
         >>> params = jnp.array([1., 2., 3.])
         >>> print('Objective function: ', f(params))
         Objective function:  14.0
@@ -354,7 +354,7 @@ def adamw(
         >>> for _ in range(5):
         ...  grad = jax.grad(f)(params)
         ...  updates, opt_state = solver.update(grad, opt_state, params)
-        ...  params = optax.apply_updates(params, updates)
+        ...  params = apply_updates(params, updates, stochastic=False)
         ...  print('Objective function: {:.2E}'.format(f(params)))
         Objective function: 1.40E+01
         Objective function: 1.39E+01

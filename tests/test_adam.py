@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import optax
 import pytest
 
+from rollfast import apply_updates
 from rollfast.optim.adam import ScaleByAdamState, adamw, scale_by_adam
 from tests._typing import as_array_dict
 
@@ -114,7 +115,7 @@ def test_adamw_matches_optax_masked_decoupled_weight_decay():
         )
         optax_updates, optax_state = optax_tx.update(grads, optax_state, params)
         _assert_tree_allclose(rollfast_updates, optax_updates)
-        params = optax.apply_updates(params, rollfast_updates)
+        params = apply_updates(params, rollfast_updates, stochastic=False)
 
 
 def test_adamw_magma_applies_weight_decay_before_masking():

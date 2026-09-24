@@ -1,8 +1,8 @@
 import jax.numpy as jnp
-import optax
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 
 from .helpers import ones_like_trainable, tiny_plan, zeros_like_trainable
 
@@ -27,7 +27,7 @@ def test_hybrid_from_plan_updates_and_reports_groups(builder, optimizer_name):
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     groups = {group.source_label: group for group in bundle.report.groups}
 
     assert state is not None
@@ -75,7 +75,7 @@ def test_hybrid_supports_ema_eval_view_and_manifest():
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
 
     assert bundle.eval_params(params, state, view="ema")["head"]["w"].shape == (
         2,
@@ -191,7 +191,7 @@ def test_p2_matrix_builders_update_and_manifest(builder, optimizer_name, kwargs)
         state,
         plan.trainable,
     )
-    params = optax.apply_updates(plan.trainable, updates)
+    params = apply_updates(plan.trainable, updates, stochastic=False)
     manifest = bundle.manifest()
 
     assert state is not None

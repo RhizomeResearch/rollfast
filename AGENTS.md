@@ -64,6 +64,9 @@ most focused relevant test, then the full applicable checks above. Report any ch
   policy. Do not promote unrelated operations without a numerical reason.
 - Preserve dtype, complex-number, masking, sharding, and PRNG semantics. Reuse the shared helpers in
   `src/rollfast/utils.py` and `src/rollfast/optim/_matrix_runtime.py` instead of duplicating tree logic.
+- Apply parameter updates with Rollfast's `apply_updates`, explicitly passing `stochastic=False` for deterministic
+  paths. Use `apply_updates_prefix` for prefix update trees. Keep `optax.apply_updates` only in independent reference or
+  Optax compatibility tests; stochastic rounding requires explicit PRNG ownership.
 - Validate static user-facing arguments at construction time where practical. Keep update paths compatible with
   `jax.jit`; do not convert traced values to Python scalars or booleans.
 - Maintain Optax-compatible behavior for transformation `init` and `update` functions, including the handling of

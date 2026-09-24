@@ -8,6 +8,7 @@ import pytest
 
 import rollfast
 import rollfast.optim.hyperball as hyperball_module
+from rollfast import apply_updates
 from rollfast.optim.hyperball import (
     HyperballState,
     adamw_hyperball,
@@ -59,7 +60,7 @@ def _assert_shapes_and_matrix_norm(
     updates: object, params: ArrayDict
 ) -> tuple[ArrayDict, ArrayDict]:
     updates = as_array_dict(updates)
-    next_params = as_array_dict(optax.apply_updates(params, updates))
+    next_params = as_array_dict(apply_updates(params, updates, stochastic=False))
 
     assert "w" in updates
     assert "b" in updates
@@ -396,7 +397,7 @@ def test_hyperball_adam_fallback_matches_optax(optimizer_fn, kwargs, nesterov):
         updates, state = update(grads, state, params)
         expected, reference_state = reference.update(grad, reference_state, params["b"])
         np.testing.assert_allclose(updates["b"], expected, rtol=1e-5, atol=1e-7)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
 
 
 def test_muon_hyperball_keeps_external_shape_scaling_without_magma(monkeypatch):

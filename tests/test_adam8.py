@@ -3,9 +3,9 @@ import hashlib
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 import pytest
 
+from rollfast import apply_updates
 from rollfast.optim.adam import adamw
 from rollfast.optim.adam8 import (
     DYNAMIC_SIGNED_CODEBOOK_ID,
@@ -159,8 +159,8 @@ def test_adamw8_second_step_is_close_to_fp32_adamw():
     q_state = quantized.init(params)
     fp32_updates, fp32_state = fp32.update(grads, fp32_state, params)
     q_updates, q_state = quantized.update(grads, q_state, params)
-    fp32_params = optax.apply_updates(params, fp32_updates)
-    q_params = optax.apply_updates(params, q_updates)
+    fp32_params = apply_updates(params, fp32_updates, stochastic=False)
+    q_params = apply_updates(params, q_updates, stochastic=False)
 
     fp32_updates, _ = fp32.update(grads, fp32_state, fp32_params)
     q_updates, _ = quantized.update(grads, q_state, q_params)

@@ -2,9 +2,8 @@
 
 import jax
 import jax.numpy as jnp
-import optax
 
-from rollfast import adamw
+from rollfast import adamw, apply_updates
 
 
 def main() -> None:
@@ -26,7 +25,7 @@ def main() -> None:
 
     for _ in range(3):
         updates, state = optimizer.update(grads, state, params)
-        params = optax.apply_updates(params, updates)
+        params = apply_updates(params, updates, stochastic=False)
 
     print("weight_mean:", params["linear"]["w"].mean())
     print("bias_mean:", params["linear"]["b"].mean())

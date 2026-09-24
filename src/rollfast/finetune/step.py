@@ -11,7 +11,11 @@ import jax.numpy as jnp
 import optax
 
 from rollfast.optim.sam import add_perturbation, global_l2_norm, sam_perturbation
-from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
+from rollfast.utils import (
+    apply_updates,
+    astype_preserving_sharding,
+    zeros_like_preserving_sharding,
+)
 
 from ._protocols import CombinableFineTunePlanProtocol, FineTunePlanProtocol
 from .config import (
@@ -90,7 +94,7 @@ def make_update_step(
     def step(trainable, opt_state, *args, **kwargs):
         value, grads = value_and_grad(trainable, *args, **kwargs)
         updates, opt_state = optimizer.update(grads, opt_state, trainable)
-        trainable = optax.apply_updates(trainable, updates)
+        trainable = apply_updates(trainable, updates, stochastic=False)
         return trainable, opt_state, value
 
     return step
@@ -273,7 +277,7 @@ def make_master_update_step(
         value, grads = value_and_grad(master_params, visible_params, *args, **kwargs)
         grads = _cast_gradient_tree(grads, optimizer.precision_config.gradient_dtype)
         updates, opt_state = optimizer.update(grads, opt_state, master_params)
-        master_params = optax.apply_updates(master_params, updates)
+        master_params = apply_updates(master_params, updates, stochastic=False)
         visible_params = _cast_tree_like(master_params, visible_params)
         return visible_params, master_params, opt_state, value
 
@@ -298,7 +302,7 @@ def _apply_scaled_master_grads(
 
     def propose():
         updates, candidate_opt_state = optimizer.update(grads, opt_state, master_params)
-        candidate_master = optax.apply_updates(master_params, updates)
+        candidate_master = apply_updates(master_params, updates, stochastic=False)
         candidate_visible = _cast_tree_like(candidate_master, visible_params)
         return candidate_visible, candidate_master, candidate_opt_state
 
@@ -627,7 +631,7 @@ def make_loss_bundle_update_step(
         )
         grads = _tree_divide(grads, bundle.normalizer)
         updates, opt_state = optimizer.update(grads, opt_state, trainable)
-        trainable = optax.apply_updates(trainable, updates)
+        trainable = apply_updates(trainable, updates, stochastic=False)
         return trainable, opt_state, _normalized_loss_bundle(bundle)
 
     return step
@@ -694,7 +698,7 @@ def make_accumulating_loss_bundle_update_step(
             )
             applied = _update_status(current_opt_state, next_opt_state).update_applied
             return (
-                optax.apply_updates(current_trainable, updates),
+                apply_updates(current_trainable, updates, stochastic=False),
                 next_opt_state,
                 applied,
             )
@@ -829,7 +833,7 @@ def make_sam_step(
             opt_state,
             trainable,
         )
-        trainable = optax.apply_updates(trainable, updates)
+        trainable = apply_updates(trainable, updates, stochastic=False)
         info = SAMStepInfo(
             loss=loss,
             perturbed_loss=perturbed_loss,
@@ -945,7 +949,9 @@ def make_stateful_sam_step(
                 opt_state,
                 trainable,
             )
-            return optax.apply_updates(trainable, updates), candidate_opt_state
+            return apply_updates(
+                trainable, updates, stochastic=False
+            ), candidate_opt_state
 
         trainable, opt_state = _commit_finite_optimizer_result(
             all_finite, propose, (trainable, opt_state), base_optimizer

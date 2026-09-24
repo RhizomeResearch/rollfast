@@ -10,7 +10,11 @@ import jax.numpy as jnp
 import optax
 from jax.core import Tracer
 
-from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
+from rollfast.utils import (
+    apply_updates,
+    astype_preserving_sharding,
+    zeros_like_preserving_sharding,
+)
 
 from .config import AveragingSourceView, EMAConfig, SWAConfig
 from .update_status import _update_status
@@ -126,7 +130,7 @@ def wrap_with_averaging(
         else:
             base_updates, inner_state = tx.update(updates, state.inner_state, params)
 
-        next_params = optax.apply_updates(params, base_updates)
+        next_params = apply_updates(params, base_updates, stochastic=False)
         applied = _update_status(state.inner_state, inner_state).update_applied
         next_step = state.step + applied.astype(jnp.int32)
         ema_source_params = _averaging_source_params(

@@ -2,9 +2,9 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
+from rollfast import apply_updates
 from rollfast.optim.dimension_numbers import MatrixDimensionNumbers
 from rollfast.optim.trasmuon import ScaleByTrasMuonState, scale_by_trasmuon, trasmuon
 
@@ -196,7 +196,9 @@ def test_trasmuon_applies_weight_decay_to_matrix_branch():
     )
     state = tx.init(params)
     updates, state = tx.update(grads, state, params)
-    next_params = cast(dict[str, jax.Array], optax.apply_updates(params, updates))
+    next_params = cast(
+        dict[str, jax.Array], apply_updates(params, updates, stochastic=False)
+    )
 
     assert jnp.all(next_params["w"] < params["w"])
 

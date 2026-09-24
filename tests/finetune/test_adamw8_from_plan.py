@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
-import optax
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 from rollfast.optim.adam8 import (
     DYNAMIC_SIGNED_CODEBOOK_ID,
     DYNAMIC_UNSIGNED_CODEBOOK_ID,
@@ -164,8 +164,8 @@ def test_adamw8_from_plan_update_stays_close_to_fp32_after_quantized_storage():
     q_state = q_bundle.init(plan.trainable)
     fp32_updates, fp32_state = fp32_bundle.update(grads, fp32_state, plan.trainable)
     q_updates, q_state = q_bundle.update(grads, q_state, plan.trainable)
-    fp32_params = optax.apply_updates(plan.trainable, fp32_updates)
-    q_params = optax.apply_updates(plan.trainable, q_updates)
+    fp32_params = apply_updates(plan.trainable, fp32_updates, stochastic=False)
+    q_params = apply_updates(plan.trainable, q_updates, stochastic=False)
 
     fp32_updates, _ = fp32_bundle.update(grads, fp32_state, fp32_params)
     q_updates, _ = q_bundle.update(grads, q_state, q_params)

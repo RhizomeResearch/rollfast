@@ -5,11 +5,11 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import rollfast.finetune as rfft
+from rollfast import apply_updates
 from rollfast.optim.adam8 import QuantizedBlocks
 
 from .helpers import TinyGroup, TinyPlan
@@ -79,7 +79,7 @@ def test_adamw_moments_and_updates_preserve_named_sharding():
 
     grads = {"w": jax.device_put(jnp.ones((4, 4), dtype=jnp.float32), sharding)}
     updates, state = bundle.update(grads, state, plan.trainable)
-    updated = optax.apply_updates(plan.trainable, updates)
+    updated = apply_updates(plan.trainable, updates, stochastic=False)
 
     assert updates["w"].sharding == sharding
     assert updated["w"].sharding == sharding

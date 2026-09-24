@@ -3,9 +3,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import optax
 import pytest
 
+from rollfast import apply_updates
 from rollfast.optim.adam import adamw
 from rollfast.optim.aurora import aurora, get_equinox_aurora_spec
 from rollfast.optim.hyperball import (
@@ -62,7 +62,7 @@ def run_opt_step(model, tx, x, y, key):
     loss, grads = loss_fn(model, x, y, key)
     updates, opt_state = tx.update(grads, opt_state, params)
     del opt_state
-    updated_params = optax.apply_updates(params, updates)
+    updated_params = apply_updates(params, updates, stochastic=False)
     model = eqx.combine(updated_params, static)
 
     update_leaves = jax.tree.leaves(updates, is_leaf=lambda x: x is None)

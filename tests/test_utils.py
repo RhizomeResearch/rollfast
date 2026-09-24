@@ -2,6 +2,7 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import optax
 import pytest
 from optax.transforms import _masking
 
@@ -45,6 +46,41 @@ def test_apply_updates_allows_missing_key_when_deterministic():
     next_params = as_array_dict(next_params)
 
     assert jnp.allclose(next_params["w"], jnp.array([2.0, 2.0], dtype=jnp.bfloat16))
+
+
+@pytest.mark.parametrize("use_jit", (False, True))
+@pytest.mark.parametrize(
+    ("param_dtype", "update_dtype"),
+    (
+        (jnp.float32, jnp.float32),
+        (jnp.bfloat16, jnp.bfloat16),
+        (jnp.bfloat16, jnp.float32),
+        (jnp.float16, jnp.float32),
+        (jnp.complex64, jnp.complex64),
+    ),
+)
+def test_deterministic_apply_updates_matches_optax(param_dtype, update_dtype, use_jit):
+    values = jnp.asarray([1.0, -2.0, 0.03125], dtype=param_dtype)
+    changes = jnp.asarray([2.0**-9, 0.125, -0.01], dtype=update_dtype)
+    if jnp.issubdtype(param_dtype, jnp.complexfloating):
+        values = values * (1.0 + 0.5j)
+        changes = changes * (1.0 - 0.25j)
+    params = {"w": values, "nested": (values * 2, None)}
+    updates = {"w": changes, "nested": (changes * -2, None)}
+
+    def apply(params, updates):
+        return apply_updates(params, updates, stochastic=False)
+
+    actual = (jax.jit(apply) if use_jit else apply)(params, updates)
+    reference = jax.jit(optax.apply_updates) if use_jit else optax.apply_updates
+    expected = reference(params, updates)
+
+    assert jax.tree.structure(actual) == jax.tree.structure(expected)
+    for left, right in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        assert left.dtype == right.dtype
+        assert jnp.array_equal(left, right)
 
 
 def test_apply_updates_prefix_allows_missing_key_when_deterministic():
