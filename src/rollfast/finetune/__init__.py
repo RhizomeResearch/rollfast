@@ -150,6 +150,7 @@ from .step import (
     make_update_step,
     sam_cost_report,
 )
+from .update_status import UpdateStatus, validate_accumulation_complete
 from .validation import NormalizedPlan, plan_fingerprint, validate_plan
 
 __all__ = (
@@ -215,6 +216,7 @@ __all__ = (
     "StatefulSAMStepInfo",
     "StatefulStepInfo",
     "StepCounters",
+    "UpdateStatus",
     "adalora_triplet_importance",
     "adamw8_from_plan",
     "adamw_from_plan",
@@ -282,6 +284,7 @@ __all__ = (
     "state_offload_manifest",
     "transfer_optimizer_state",
     "unmatched_rule_warnings",
+    "validate_accumulation_complete",
     "validate_plan",
     "with_state_offload",
 )

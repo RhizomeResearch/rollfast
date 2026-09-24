@@ -20,6 +20,8 @@ from rollfast.optim.adam8 import (
 )
 from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
+from .update_status import UpdateStatus, _update_status
+
 SCHEMA_VERSION = 1
 
 ScheduleKind = Literal[
@@ -1391,6 +1393,18 @@ class OptimizerBundle:
         **extra_args: Any,
     ) -> tuple[Any, optax.OptState]:
         return self.tx.update(grads, state, params, **extra_args)
+
+    def update_with_status(
+        self,
+        grads: Any,
+        state: optax.OptState,
+        params: Any | None = None,
+        **extra_args: Any,
+    ) -> tuple[Any, optax.OptState, UpdateStatus]:
+        """Update once and report whether work accumulated, applied, or discarded."""
+
+        updates, next_state = self.update(grads, state, params, **extra_args)
+        return updates, next_state, _update_status(state, next_state)
 
     def eval_params(
         self,

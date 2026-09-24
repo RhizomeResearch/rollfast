@@ -51,7 +51,11 @@ from .config import (
 from .groups import compile_groups, unmatched_rule_warnings
 from .schedules import build_schedule, preview_schedule
 from .state_estimation import estimate_adamw8_moment_leaves, quantize_group_state
-from .transforms import always_skip_nonfinite, clip_by_global_norm
+from .transforms import (
+    always_skip_nonfinite,
+    clear_completed_accumulation,
+    clip_by_global_norm,
+)
 from .validation import validate_plan
 
 
@@ -290,11 +294,13 @@ def _with_guard_and_accumulation(
     if accumulation.steps > 1:
         return cast(
             optax.GradientTransformation,
-            optax.MultiSteps(
-                tx,
-                every_k_schedule=accumulation.steps,
-                use_grad_mean=_multisteps_use_grad_mean(accumulation),
-                accumulator_dtype=accumulation.accumulate_dtype,
+            clear_completed_accumulation(
+                optax.MultiSteps(
+                    tx,
+                    every_k_schedule=accumulation.steps,
+                    use_grad_mean=_multisteps_use_grad_mean(accumulation),
+                    accumulator_dtype=accumulation.accumulate_dtype,
+                )
             ),
         )
     return tx

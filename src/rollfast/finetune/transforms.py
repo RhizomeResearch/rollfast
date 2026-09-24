@@ -67,7 +67,7 @@ def always_skip_nonfinite(
                 updates,
                 is_leaf=lambda x: x is None,
             )
-            _, canonical_state = inner.update(
+            canonical_updates, canonical_state = inner.update(
                 zero_updates,
                 state.inner_state,
                 params,
@@ -88,7 +88,11 @@ def always_skip_nonfinite(
                 state.inner_state,
                 canonical_state,
             )
-            return zero_updates, preserved_state
+            return jax.tree.map(
+                lambda leaf: None if leaf is None else jnp.zeros_like(leaf),
+                canonical_updates,
+                is_leaf=lambda leaf: leaf is None,
+            ), preserved_state
 
         guarded_updates, inner_state = jax.lax.cond(
             finite,
@@ -116,6 +120,25 @@ def always_skip_nonfinite(
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def clear_completed_accumulation(
+    inner: optax.MultiSteps,
+) -> optax.GradientTransformationExtraArgs:
+    """Clear a completed MultiSteps window even when it contains NaNs."""
+
+    def update_fn(updates, state, params=None, **extra_args):
+        result, next_state = inner.update(updates, state, params, **extra_args)
+        # MultiSteps clears with multiplication by zero, which retains NaNs.
+        cleared = jax.tree.map(
+            lambda grad: jnp.where(
+                next_state.mini_step == 0, jnp.zeros_like(grad), grad
+            ),
+            next_state.acc_grads,
+        )
+        return result, next_state._replace(acc_grads=cleared)
+
+    return optax.GradientTransformationExtraArgs(inner.init, update_fn)
 
 
 def clip_by_global_norm(

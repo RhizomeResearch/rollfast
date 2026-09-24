@@ -6,6 +6,7 @@ import time
 
 import jax
 import jax.numpy as jnp
+import optax
 from _common import benchmark_step, emit, metadata, rfft, tiny_plan, tree_l2_loss
 
 
@@ -109,6 +110,39 @@ def main() -> None:
     jax.block_until_ready(accumulation_params)
     accumulation_seconds = (time.perf_counter() - started) / measured_steps
 
+    compiled = rfft.adamw_from_plan(
+        plan,
+        total_steps=100,
+        schedule="constant",
+        clip_global_norm=None,
+        accumulation_steps=accumulation_factor,
+    )
+    compiled_grads = jax.tree.map(jnp.ones_like, plan.trainable)
+
+    @jax.jit
+    def compiled_step(params, state):
+        updates, state, status = compiled.update_with_status(
+            compiled_grads, state, params
+        )
+        return optax.apply_updates(params, updates), state, status
+
+    compiled_params = plan.trainable
+    compiled_state = compiled.init(compiled_params)
+    for _ in range(warmup_steps * accumulation_factor):
+        compiled_params, compiled_state, compiled_status = compiled_step(
+            compiled_params, compiled_state
+        )
+    jax.block_until_ready(compiled_params)
+
+    started = time.perf_counter()
+    for _ in range(measured_steps * accumulation_factor):
+        compiled_params, compiled_state, compiled_status = compiled_step(
+            compiled_params, compiled_state
+        )
+    jax.block_until_ready(compiled_params)
+    compiled_seconds = (time.perf_counter() - started) / measured_steps
+    assert bool(compiled_status.update_applied)
+
     emit(
         {
             "metadata": metadata(
@@ -124,6 +158,7 @@ def main() -> None:
                 "sam_microbatches": int(batch["target"].shape[0]),
                 "accumulation_factor": accumulation_factor,
                 "accumulation_seconds_per_applied_update": accumulation_seconds,
+                "compiled_accumulation_seconds_per_applied_update": compiled_seconds,
                 "accumulation_final_loss": float(
                     accumulation_info.loss_bundle.loss_sum
                 ),

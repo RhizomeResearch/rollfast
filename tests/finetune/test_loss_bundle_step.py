@@ -354,6 +354,7 @@ def test_stateful_loss_bundle_accumulation_discards_nonfinite_window():
     assert accumulation_state.aux_sums["penalty"] == 0.0
     assert accumulation_state.aux_normalizers["penalty"] == 0.0
     assert not bool(accumulation_state.pending_model_state_valid)
+
     assert jnp.allclose(params["w"], plan.trainable["w"])
     for left, right in zip(
         jax.tree.leaves(state), jax.tree.leaves(old_state), strict=True
@@ -376,6 +377,55 @@ def test_stateful_loss_bundle_accumulation_discards_nonfinite_window():
     assert info.loss_bundle.aux_sums["penalty"] == 1.0
     assert info.loss_bundle.new_model_state["count"] == 2
     assert not bool(accumulation_state.pending_model_state_valid)
+
+
+@pytest.mark.parametrize("use_jit", (False, True))
+def test_accumulated_overflow_reports_discard_and_recovers(use_jit):
+    plan = _single_weight_plan()
+    optimizer = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        weight_decay=0.0,
+        clip_global_norm=None,
+    )
+    accumulation = rfft.AccumulationConfig(steps=2)
+
+    def loss(params, factor):
+        return rfft.LossBundle(
+            loss_sum=params["w"] * factor,
+            normalizer=jnp.asarray(1.0),
+            metrics_sums={},
+            metric_normalizers={},
+            new_model_state=None,
+        )
+
+    step = rfft.make_accumulating_loss_bundle_update_step(
+        loss, optimizer, accumulation=accumulation
+    )
+    if use_jit:
+        step = jax.jit(step)
+    params = plan.trainable
+    state = optimizer.init(params)
+    accumulator = rfft.init_accumulation_state(params, accumulation)
+    original = params["w"]
+    for _ in range(2):
+        params, state, accumulator, info = step(
+            params, state, accumulator, jnp.asarray(3e38, dtype=jnp.float32)
+        )
+    assert not bool(info.update_applied)
+    assert not bool(info.all_finite)
+    assert int(accumulator.microsteps_in_window) == 0
+    assert jnp.array_equal(params["w"], original)
+    rfft.validate_accumulation_complete(accumulator, accumulation)
+
+    for _ in range(2):
+        params, state, accumulator, info = step(
+            params, state, accumulator, jnp.asarray(1.0)
+        )
+    assert bool(info.update_applied)
+    assert bool(info.all_finite)
+    assert not jnp.array_equal(params["w"], original)
 
 
 def test_jitted_accumulation_replaces_invalid_model_state_payload():

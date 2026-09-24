@@ -93,6 +93,51 @@ def test_adamw_state_and_updates_preserve_multi_device_sharding():
     )
 
 
+def test_discarded_accumulation_preserves_sharding_and_recovers():
+    import rollfast.finetune as rfft
+    from tests.finetune.helpers import TinyGroup, TinyPlan
+
+    mesh = Mesh(np.asarray(jax.devices()), ("data",))
+    sharding = NamedSharding(
+        mesh,
+        P(
+            "data",
+        ),
+    )
+    params = {
+        "w": jax.device_put(
+            jnp.ones((jax.local_device_count() * 2,), dtype=jnp.float32),
+            sharding,
+        )
+    }
+    plan = TinyPlan(
+        trainable=params,
+        labels={"w": "head"},
+        group_specs={"head": TinyGroup("head", "head", None, 1.0, False)},
+    )
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=8,
+        schedule="constant",
+        clip_global_norm=None,
+        accumulation_steps=2,
+    )
+    state = bundle.init(params)
+    update = jax.jit(bundle.update_with_status)
+    bad = {"w": jax.device_put(jnp.full(params["w"].shape, jnp.nan), sharding)}
+    for _ in range(2):
+        _, state, status = update(bad, state, params)
+    assert bool(status.window_discarded)
+    assert state.acc_grads["w"].sharding.is_equivalent_to(sharding, 1)
+    assert bool(jnp.all(jnp.isfinite(state.acc_grads["w"])))
+
+    good = {"w": jax.device_put(jnp.ones(params["w"].shape), sharding)}
+    for _ in range(2):
+        updates, state, status = update(good, state, params)
+    assert bool(status.update_applied)
+    assert updates["w"].sharding.is_equivalent_to(sharding, 1)
+
+
 @pytest.mark.parametrize("spec", [P("devices", None), P(None, "devices"), P()])
 @pytest.mark.parametrize("block_size", [8, 32])
 def test_quantized_zero_initialization_preserves_derived_sharding(spec, block_size):

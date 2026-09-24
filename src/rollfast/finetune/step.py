@@ -27,6 +27,7 @@ from .config import (
     SAMConfig,
     StepCounters,
 )
+from .update_status import _update_status
 
 
 class SAMStepInfo(NamedTuple):
@@ -666,25 +667,42 @@ def make_accumulating_loss_bundle_update_step(
         )
         accumulated_bundle = _loss_bundle_from_accumulation(next_accumulation)
         boundary = next_accumulation.microsteps_in_window >= accumulation.steps
-        update_applied = jnp.logical_and(boundary, next_accumulation.all_finite)
+        averaged_grads = _tree_divide(
+            next_accumulation.grad_numerator,
+            next_accumulation.normalizer,
+        )
+        window_finite = jnp.logical_and(
+            next_accumulation.all_finite,
+            _tree_all_finite(
+                (
+                    next_accumulation.grad_numerator,
+                    next_accumulation.loss_sum,
+                    next_accumulation.normalizer,
+                    averaged_grads,
+                )
+            ),
+        )
+        window_finite = jnp.logical_and(window_finite, next_accumulation.normalizer > 0)
+        attempt_update = jnp.logical_and(boundary, window_finite)
 
         def apply_accumulated_update(operand):
             current_trainable, current_opt_state = operand
-            averaged_grads = _tree_divide(
-                next_accumulation.grad_numerator,
-                next_accumulation.normalizer,
-            )
             updates, next_opt_state = optimizer.update(
                 averaged_grads,
                 current_opt_state,
                 current_trainable,
             )
-            return optax.apply_updates(current_trainable, updates), next_opt_state
+            applied = _update_status(current_opt_state, next_opt_state).update_applied
+            return (
+                optax.apply_updates(current_trainable, updates),
+                next_opt_state,
+                applied,
+            )
 
-        trainable, opt_state = jax.lax.cond(
-            update_applied,
+        trainable, opt_state, update_applied = jax.lax.cond(
+            attempt_update,
             apply_accumulated_update,
-            lambda operand: operand,
+            lambda operand: (*operand, jnp.asarray(False)),
             (trainable, opt_state),
         )
         reset_accumulation = init_accumulation_state(trainable, accumulation)
@@ -696,7 +714,11 @@ def make_accumulating_loss_bundle_update_step(
         info = AccumulatingLossBundleInfo(
             loss_bundle=_normalized_loss_bundle(accumulated_bundle),
             update_applied=update_applied,
-            all_finite=next_accumulation.all_finite,
+            all_finite=jnp.where(
+                boundary,
+                jnp.logical_and(window_finite, update_applied),
+                next_accumulation.all_finite,
+            ),
         )
         return trainable, opt_state, accumulation_state, info
 

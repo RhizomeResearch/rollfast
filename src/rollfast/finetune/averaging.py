@@ -13,6 +13,7 @@ from jax.core import Tracer
 from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
 
 from .config import AveragingSourceView, EMAConfig, SWAConfig
+from .update_status import _update_status
 
 
 class AveragingState(NamedTuple):
@@ -126,7 +127,7 @@ def wrap_with_averaging(
             base_updates, inner_state = tx.update(updates, state.inner_state, params)
 
         next_params = optax.apply_updates(params, base_updates)
-        applied = _update_applied(state.inner_state, inner_state)
+        applied = _update_status(state.inner_state, inner_state).update_applied
         next_step = state.step + applied.astype(jnp.int32)
         ema_source_params = _averaging_source_params(
             ema.source_view,
@@ -442,18 +443,6 @@ def _ema_include_label(
     included = not include_tags or bool(terms & include_tags)
     excluded = bool(terms & exclude_tags)
     return included and not excluded
-
-
-def _update_applied(old_state: Any, new_state: Any) -> jax.Array:
-    if hasattr(old_state, "gradient_step") and hasattr(new_state, "gradient_step"):
-        return new_state.gradient_step > old_state.gradient_step
-    if hasattr(new_state, "last_finite"):
-        return jnp.asarray(new_state.last_finite, dtype=jnp.bool_)
-    if hasattr(old_state, "inner_opt_state") and hasattr(new_state, "inner_opt_state"):
-        return _update_applied(old_state.inner_opt_state, new_state.inner_opt_state)
-    if hasattr(old_state, "inner_state") and hasattr(new_state, "inner_state"):
-        return _update_applied(old_state.inner_state, new_state.inner_state)
-    return jnp.asarray(True, dtype=jnp.bool_)
 
 
 __all__ = (
