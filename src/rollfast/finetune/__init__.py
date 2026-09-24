@@ -73,6 +73,7 @@ from .diagnostics import (
     estimate_optimizer_state_memory,
     optimizer_state_memory_summary,
 )
+from .evaluation import EvaluationView, bind_evaluation_view
 from .groups import (
     compile_groups,
     matches_rule,
@@ -166,6 +167,7 @@ __all__ = (
     "CompiledPolicyTrees",
     "CounterPolicy",
     "EMAConfig",
+    "EvaluationView",
     "FineTuneOptimizerRecipe",
     "FineTunePlanProtocol",
     "FineTuneStepState",
@@ -213,6 +215,7 @@ __all__ = (
     "adapters_adamw",
     "allocate_rank_mask",
     "apollo_adamw_from_plan",
+    "bind_evaluation_view",
     "bitfit_adamw",
     "build_schedule",
     "compile_groups",

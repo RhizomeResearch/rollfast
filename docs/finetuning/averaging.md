@@ -26,6 +26,39 @@ eval_model = plan.combine(eval_ema)
 `view="optimizer"` returns the ordinary training parameters. Schedule-Free bundles additionally expose
 `view="schedule_free"`.
 
+Select a view explicitly when creating an evaluated model from a checkpoint. Use `"optimizer"` for ordinary training
+parameters, even when EMA or SWA is enabled:
+
+```python
+checkpoint = rfft.make_state_checkpoint(
+    optim,
+    opt_state,
+    model_checkpoint_id=model_checkpoint_id,
+    model_state=model_state,
+    counters={"successful_update": applied_updates},
+)
+evaluated = rfft.bind_evaluation_view(
+    optim,
+    plan,
+    trainable,
+    checkpoint,
+    view="optimizer",
+    model_checkpoint_id=model_checkpoint_id,
+    optimizer_checkpoint_id=optimizer_checkpoint_id,
+    applied_updates=applied_updates,
+)
+```
+
+`evaluated.model` contains the selected trainable leaves combined with the plan's frozen leaves. Use it with
+`evaluated.model_state` for validation and export. The result also records the requested view, both checkpoint IDs,
+optimizer fingerprint, applied-update position and, for EMA/SWA, the number of recorded averages. Keep that result with
+the evaluated artifact so a different view has a distinct identity. The caller must load `plan` and `trainable` from
+`model_checkpoint_id`; Rollfast validates the optimizer checkpoint against that ID and checks stored counters when
+available. A plan with mutable model state requires a model-state snapshot in the checkpoint.
+
+EMA and SWA views raise `ValueError` until their first average is recorded. A view unavailable in the compiled bundle
+also raises `ValueError`. Select an averaged view outside `jax.jit`; optimizer updates remain JIT compatible.
+
 EMA/SWA state advances only when an optimizer step is actually applied. With gradient accumulation, withheld microsteps
 do not update the averages.
 

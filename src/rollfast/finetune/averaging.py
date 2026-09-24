@@ -8,6 +8,7 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import optax
+from jax.core import Tracer
 
 from rollfast.utils import astype_preserving_sharding, zeros_like_preserving_sharding
 
@@ -335,6 +336,7 @@ def _update_swa(
 
 
 def _eval_ema(params: Any, state: AveragingState, config: EMAConfig) -> Any:
+    _require_initialized(state.ema_count, "EMA")
     if not config.debias:
         return _where_mask_tree(state.ema_mask, state.ema_params, params)
     correction = 1.0 - jnp.power(
@@ -351,7 +353,16 @@ def _eval_ema(params: Any, state: AveragingState, config: EMAConfig) -> Any:
 
 
 def _eval_swa(params: Any, state: AveragingState) -> Any:
+    _require_initialized(state.swa_count, "SWA")
     return _where_tree(state.swa_count > 0, state.swa_params, params)
+
+
+def _require_initialized(count: jax.Array, name: str) -> None:
+    # View selection is a host-side decision; updates remain JIT compatible.
+    if isinstance(count, Tracer):
+        raise TypeError(f"{name} evaluation view must be selected outside jax.jit.")
+    if int(jax.device_get(count)) == 0:
+        raise ValueError(f"{name} evaluation view has no recorded averages yet.")
 
 
 def _cast_tree(tree: Any, dtype: Any) -> Any:

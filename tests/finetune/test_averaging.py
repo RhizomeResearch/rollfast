@@ -124,14 +124,8 @@ def test_swa_view_starts_at_resolved_fraction():
 
     updates, state = bundle.update(grads, state, params)
     params = optax.apply_updates(params, updates)
-    assert bundle.eval_params(params, state, view="swa")["head"]["w"].shape == (
-        2,
-        1,
-    )
-    assert jnp.allclose(
-        bundle.eval_params(params, state, view="swa")["head"]["w"],
-        params["head"]["w"],
-    )
+    with pytest.raises(ValueError, match="no recorded averages"):
+        bundle.eval_params(params, state, view="swa")
 
     updates, state = bundle.update(grads, state, params)
     params = optax.apply_updates(params, updates)
@@ -157,10 +151,8 @@ def test_averaging_does_not_advance_on_withheld_accumulation_microstep():
     updates, state = bundle.update(grads, state, plan.trainable)
     params = optax.apply_updates(plan.trainable, updates)
     assert state.ema_count == 0
-    assert jnp.allclose(
-        bundle.eval_params(params, state, view="ema")["head"]["w"],
-        plan.trainable["head"]["w"],
-    )
+    with pytest.raises(ValueError, match="no recorded averages"):
+        bundle.eval_params(params, state, view="ema")
 
     updates, state = bundle.update(grads, state, params)
     params = optax.apply_updates(params, updates)

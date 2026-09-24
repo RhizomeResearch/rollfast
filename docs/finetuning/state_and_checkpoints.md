@@ -53,3 +53,8 @@ pickle helpers.
 
 Equimo model/delta serialization remains separate. Save the Equimo model or fine-tuning bundle with Equimo, and save the
 Rollfast optimizer state alongside it with the same training step metadata.
+
+For evaluation, retain the matching model-state snapshot and successful-update count in the checkpoint. Pass the loaded
+checkpoint to `bind_evaluation_view` with an explicit view and both artifact IDs; the returned model, model state and
+view metadata can then travel together to validation or export. See [Fine-Tuning Averaging](averaging.md) for an
+example.
