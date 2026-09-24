@@ -5,11 +5,34 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
-- Document the fine-tuning plan, evaluation-view, update-status, and checkpoint migration contracts, including the
-  distinction between declared dependency ranges and tested combinations.
-- Record the existing added and corrected behavior for required group selectors, strict checkpoint restoration,
-  non-executable array storage, evaluation-view binding, and discarded accumulation windows.
+## [1.2.0] - 2026-09-24
+
+Fine-tuning state, checkpoint, and update coordination improvements. Detailed release notes are available in
+[`docs/releases/1.2.0.md`](./docs/releases/1.2.0.md).
+
+### Added
+
+- Add bounded, non-executable array checkpoints with checksum and layout validation, including distributed saves and
+  restores on a shared filesystem.
+- Add checkpoint-bound optimizer and EMA evaluation views, explicit update outcomes for accumulation windows, and a
+  host-side check for incomplete accumulation.
+
+### Changed
+
+- Check logical checkpoint state structure and component presence, effective optimizer groups, and optional model
+  identity and update position during restore. Existing schema-version-1 checkpoints remain readable using a matching
+  restore template when needed.
+- Qualify full-encoder and frozen-encoder query-model plans, stateful updates, and checkpoint replay with Equimo 2.4.0;
+  require Equimo `>=2.4.0,<3.0.0` for the optional development integration.
+- Document plan compilation, checkpoint migration, loss normalization, and evaluation-view ownership.
+
+### Fixed
+
+- Reject required group rules that select no trainable parameters, and report discarded accumulation windows without
+  advancing their applied-update counters.
 - Restore typed PRNG keys from array checkpoints on the minimum supported JAX version.
+- Preserve model normalization state on rejected stateful steps, including SAM, and reject gradients that overflow when
+  cast to the configured precision.
 
 ## [1.1.0] - 2026-09-05
 
@@ -72,3 +95,4 @@ The first stable API release. Detailed release notes are available in
 
 [1.0.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/releases/v1.0.0
 [1.1.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/releases/v1.1.0
+[1.2.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/releases/v1.2.0
