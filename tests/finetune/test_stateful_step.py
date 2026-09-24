@@ -316,6 +316,143 @@ def test_finetune_update_step_skips_success_counters_on_nonfinite_update():
     assert_rng_equal(step_state.rng, old_rng)
 
 
+def test_gradient_cast_overflow_rolls_back_then_accepts_next_step():
+    plan = tiny_plan()
+    precision = rfft.PrecisionConfig(
+        master_params="always",
+        gradient_dtype=jnp.float16,
+        loss_scale="dynamic",
+        static_loss_scale=8.0,
+    )
+    bundle = rfft.compile_optimizer(
+        plan,
+        optimizer=rfft.OptimizerConfig(base_lr=1e-3, weight_decay=0.0),
+        schedule=rfft.ScheduleConfig(kind="constant", total_steps=10),
+        gradient_policy=rfft.GradientPolicy(clip_global_norm=None),
+        precision=precision,
+        ema=rfft.EMAConfig(enabled=True, decay=0.5),
+    )
+    initial = rfft.init_finetune_step_state(
+        bundle,
+        plan.trainable,
+        model_state={"updates": jnp.asarray(0)},
+        rng_seed=42,
+    )
+
+    def loss(model, model_state, key, factor):
+        del key
+        return (
+            jnp.sum(model["head"]["w"]) * factor,
+            {"updates": model_state["updates"] + 1},
+        )
+
+    step = rfft.make_finetune_update_step(
+        plan, loss, bundle, state_policy="microbatch_sequential"
+    )
+    rejected_params, rejected, info = step(plan.trainable, initial, jnp.asarray(1e10))
+    assert jnp.isfinite(info.value)
+    assert not bool(info.all_finite)
+    assert_tree_allclose(rejected_params, plan.trainable)
+    assert_tree_allclose(rejected.optimizer_state, initial.optimizer_state)
+    assert rejected.model_state["updates"] == 0
+    assert_rng_equal(rejected.rng, initial.rng)
+    assert rejected.counters.attempted_update == 1
+    assert rejected.counters.successful_update == 0
+    assert rejected.counters.schedule_step == 0
+    assert rejected.optimizer_state.ema_count == 0
+    assert rejected.loss_scale.loss_scale == 4.0
+
+    accepted_params, accepted, info = step(rejected_params, rejected, jnp.asarray(1.0))
+    assert bool(info.all_finite)
+    assert not jnp.array_equal(
+        accepted_params["head"]["w"], plan.trainable["head"]["w"]
+    )
+    assert accepted.model_state["updates"] == 1
+    assert accepted.counters.attempted_update == 2
+    assert accepted.counters.successful_update == 1
+    assert accepted.counters.schedule_step == 1
+    assert accepted.optimizer_state.ema_count == 1
+    assert not jnp.array_equal(accepted.rng.forward, initial.rng.forward)
+
+
+def test_jitted_stateful_step_rejects_gradient_cast_overflow():
+    plan = tiny_plan()
+    precision = rfft.PrecisionConfig(gradient_dtype=jnp.float16)
+    bundle = _bundle(plan, precision)
+    step = jax.jit(
+        rfft.make_stateful_loss_scaled_master_update_step(
+            plan,
+            lambda model, state, key, factor: (
+                jnp.sum(model["head"]["w"]) * factor,
+                {"updates": state["updates"] + 1},
+            ),
+            bundle,
+            state_policy="microbatch_sequential",
+        )
+    )
+    initial_model_state = {"updates": jnp.asarray(0)}
+    initial_opt_state = bundle.init(plan.trainable)
+    result = step(
+        plan.trainable,
+        None,
+        initial_opt_state,
+        initial_model_state,
+        None,
+        None,
+        jnp.asarray(1e10),
+    )
+    visible, _, opt_state, model_state, _, _, info = result
+    assert not bool(info.all_finite)
+    assert_tree_allclose(visible, plan.trainable)
+    assert_tree_allclose(opt_state, initial_opt_state)
+    assert model_state["updates"] == 0
+
+
+def test_equinox_state_is_preserved_for_forward_rollback():
+    eqx = pytest.importorskip("equinox")
+    batch_norm, initial_state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(
+        1, axis_name="batch", mode="batch"
+    )
+    plan = tiny_plan()
+    bundle = _bundle(plan, rfft.PrecisionConfig())
+
+    def loss(model, model_state, key, factor):
+        del key
+        values, next_state = jax.vmap(
+            lambda value: batch_norm(value, model_state),
+            axis_name="batch",
+            out_axes=(0, None),
+        )(jnp.asarray([[1.0], [3.0]]))
+        return jnp.sum(model["head"]["w"]) * jnp.mean(values**2) * factor, next_state
+
+    step = rfft.make_stateful_loss_scaled_master_update_step(
+        plan, loss, bundle, state_policy="microbatch_sequential"
+    )
+    initial_opt_state = bundle.init(plan.trainable)
+    rejected = step(
+        plan.trainable,
+        None,
+        initial_opt_state,
+        initial_state,
+        None,
+        None,
+        jnp.asarray(jnp.inf),
+    )
+    assert not bool(rejected[-1].all_finite)
+    assert_tree_allclose(rejected[3], initial_state)
+    assert len(jax.tree.leaves(initial_state)) == 3
+
+    accepted = step(*rejected[:6], jnp.asarray(1.0))
+    assert bool(accepted[-1].all_finite)
+    assert len(jax.tree.leaves(accepted[3])) == 3
+    assert any(
+        not jnp.array_equal(before, after)
+        for before, after in zip(
+            jax.tree.leaves(initial_state), jax.tree.leaves(accepted[3]), strict=True
+        )
+    )
+
+
 def test_finetune_update_step_rejects_internal_accumulation_until_stateful_path_exists():
     plan = tiny_plan()
     bundle = rfft.compile_optimizer(

@@ -296,9 +296,9 @@ def _apply_scaled_master_grads(
     """Commit parameters and optimizer state together only for finite gradients."""
     precision = optimizer.precision_config
     grads = _tree_divide(scaled_grads, scale)
+    grads = _cast_gradient_tree(grads, precision.gradient_dtype)
     all_finite = _tree_all_finite((loss, grads))
     grads = _select_tree(all_finite, grads, _tree_zeros_like(grads))
-    grads = _cast_gradient_tree(grads, precision.gradient_dtype)
 
     def propose():
         updates, candidate_opt_state = optimizer.update(grads, opt_state, master_params)
@@ -418,7 +418,7 @@ def make_stateful_loss_scaled_master_update_step(
         return _scale_stateful_loss_value(
             loss_fn(
                 plan.combine(visible),
-                model_state,
+                _clone_model_state(model_state),
                 forward_key,
                 *args,
                 **kwargs,
@@ -888,7 +888,7 @@ def make_stateful_sam_step(
         return _scale_stateful_loss_value(
             loss_fn(
                 plan.combine(trainable),
-                model_state,
+                _clone_model_state(model_state),
                 sam_key,
                 *args,
                 **kwargs,
@@ -1493,6 +1493,12 @@ def _scale_loss_value(value: Any, loss_scale: Any, *, has_aux: bool) -> tuple[An
         loss, _ = value
         return loss * loss_scale, value
     return value * loss_scale, value
+
+
+def _clone_model_state(model_state: Any | None) -> Any | None:
+    # A stateful forward may consume its container; retain the original for rollback.
+    # Rebuild only the PyTree structure, sharing the array leaves.
+    return jax.tree.map(lambda leaf: leaf, model_state)
 
 
 def _scale_stateful_loss_value(

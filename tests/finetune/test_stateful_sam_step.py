@@ -117,6 +117,37 @@ def test_stateful_sam_skips_transaction_when_second_pass_is_nonfinite():
     assert_rng_equal(rng_after, rng)
 
 
+def test_stateful_sam_reuses_equinox_state_across_both_passes():
+    eqx = pytest.importorskip("equinox")
+    batch_norm, initial_state = eqx.nn.make_with_state(eqx.nn.BatchNorm)(
+        1, axis_name="batch", mode="batch"
+    )
+    plan = tiny_plan()
+    bundle = _bundle(plan)
+
+    def loss(model, model_state, key):
+        del key
+        values, next_state = jax.vmap(
+            lambda value: batch_norm(value, model_state),
+            axis_name="batch",
+            out_axes=(0, None),
+        )(jnp.asarray([[1.0], [3.0]]))
+        return jnp.sum(model["head"]["w"]) * jnp.mean(values**2), next_state
+
+    step = rfft.make_stateful_sam_step(plan=plan, base_optimizer=bundle, loss_fn=loss)
+    params, opt_state, next_state, rng, info = step(
+        plan.trainable,
+        bundle.init(plan.trainable),
+        initial_state,
+        rfft.init_rng_streams(42),
+    )
+    assert bool(info.all_finite)
+    assert len(jax.tree.leaves(initial_state)) == 3
+    assert len(jax.tree.leaves(next_state)) == 3
+    _, _, _, _, next_info = step(params, opt_state, next_state, rng)
+    assert bool(next_info.all_finite)
+
+
 def test_stateful_sam_aggregate_policy_commits_first_pass_via_hook():
     plan = tiny_plan()
     bundle = _bundle(plan)

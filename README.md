@@ -295,7 +295,8 @@ planned update uses index `total_steps - 1`. Preview a particular group with
 
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with compatibility and migration guidance in
 [`docs/finetuning/compatibility.md`](./docs/finetuning/compatibility.md), state and checkpoint guidance in
-[`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md) configuration support in
+[`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md), query-model and mutable-state
+guidance in [`docs/finetuning/query_models.md`](./docs/finetuning/query_models.md), configuration support in
 [`docs/finetuning/configuration.md`](./docs/finetuning/configuration.md), and averaging guidance in
 [`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md). The checkpoint guide includes bounded, non-executable
 array storage for shared POSIX filesystems; a runnable example is in
