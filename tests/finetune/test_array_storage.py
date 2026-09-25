@@ -1,6 +1,7 @@
 """Strict optimizer checkpoint restoration and non-executable storage tests."""
 
 import hashlib
+import io
 import json
 import os
 import socket
@@ -183,6 +184,65 @@ def test_safe_reader_rejects_wrong_identity_and_limits(tmp_path):
             template=template,
             model_checkpoint_id="training-model-1",
             limits=replace(LIMITS, max_total_bytes=1),
+        )
+
+
+def test_array_shards_are_plain_npy_byte_files(tmp_path):
+    from rollfast.finetune import array_storage
+    from rollfast.finetune._checkpoint_tree import checkpoint_parts, describe_tree
+
+    plan, bundle = _bundle()
+    saved, _ = _checkpoints(plan, bundle)
+    path = tmp_path / "optimizer.rfarr"
+    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    pointer = json.loads(path.read_text())
+    generation = array_storage._generation_root(path) / pointer["generation"]
+    index = json.loads((generation / "index.json").read_bytes())
+    index_digest = hashlib.sha256((generation / "index.json").read_bytes())
+    assert index_digest.hexdigest() == pointer["sha256"]
+    _, leaves = describe_tree(checkpoint_parts(saved))
+
+    entries = index["records"][0]["arrays"]
+    assert len(entries) == len(leaves)
+    for leaf, entry in zip(leaves, entries, strict=True):
+        (chunk,) = entry["chunks"]
+        stored = (generation / "rank-00000" / chunk["file"]).read_bytes()
+        expected = np.asarray(
+            jax.random.key_data(leaf)
+            if jnp.issubdtype(leaf.dtype, jax.dtypes.prng_key)
+            else leaf
+        ).tobytes()
+        reference = io.BytesIO()
+        np.save(reference, np.frombuffer(expected, dtype=np.uint8), allow_pickle=False)
+        assert stored == reference.getvalue()
+        assert chunk["size"] == len(stored)
+        assert chunk["sha256"] == hashlib.sha256(stored).hexdigest()
+
+
+def test_array_checkpoint_paths_reject_symlinked_directories(tmp_path):
+    plan, bundle = _bundle()
+    saved, template = _checkpoints(plan, bundle)
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(
+        rfft.OptimizerStateRestoreError, match="write failed.*traverses a symlink"
+    ):
+        rfft.save_array_state_checkpoint(
+            linked / "optimizer.rfarr", saved, limits=LIMITS
+        )
+    assert not (real / "optimizer.rfarr").exists()
+
+    rfft.save_array_state_checkpoint(real / "optimizer.rfarr", saved, limits=LIMITS)
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="traverses a symlink"):
+        rfft.load_array_state_checkpoint(
+            linked / "optimizer.rfarr",
+            bundle,
+            template=template,
+            model_checkpoint_id="training-model-1",
+            limits=LIMITS,
         )
 
 

@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import stat
-import tempfile
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, NamedTuple, cast
 
 import jax
 import numpy as np
@@ -29,6 +29,7 @@ from .config import OptimizerBundle
 from .serialization import (
     OptimizerStateCheckpoint,
     OptimizerStateRestoreError,
+    _atomic_write,
     _sync_directory,
     _validate_checkpoint_schema,
     restore_state_checkpoint,
@@ -102,8 +103,7 @@ def save_array_state_checkpoint(
             chunks = []
             shards = (
                 array.addressable_shards
-                if isinstance(array, jax.Array)
-                and array_nodes[index]["scope"] == "global"
+                if _is_global_array(array, array_nodes[index])
                 else (None,)
             )
             for number, shard in enumerate(shards):
@@ -117,24 +117,25 @@ def save_array_state_checkpoint(
                 if shard_count > limits.max_shards:
                     raise ValueError("checkpoint shard allocation exceeds limit.")
                 filename = f"leaf-{index:06d}-shard-{number:06d}.npy"
-                filename_path = rank_dir / filename
-                with filename_path.open("xb") as handle:
-                    np.save(handle, raw, allow_pickle=False)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                stored_size = filename_path.stat().st_size
+                stored_size, sha256 = _write_shard(rank_dir / filename, raw)
                 total_bytes += stored_size
                 if total_bytes > limits.max_total_bytes:
                     raise ValueError("checkpoint shard allocation exceeds limit.")
+                shard_index = (
+                    _encode_index(shard.index, array.shape)
+                    if shard is not None
+                    else None
+                )
+                if shard_count == 1:
+                    # Fail at save time on paths the reader would refuse.
+                    _reject_symlinked_parents(rank_dir / filename)
                 chunks.append(
                     {
                         "file": filename,
                         "shape": logical_shape,
-                        "index": _encode_index(shard.index, array.shape)
-                        if shard is not None
-                        else None,
+                        "index": shard_index,
                         "size": stored_size,
-                        "sha256": _file_hash(filename_path),
+                        "sha256": sha256,
                     }
                 )
             records.append({"chunks": chunks})
@@ -173,15 +174,16 @@ def save_array_state_checkpoint(
                 "metadata": checkpoint.metadata,
                 "records": records,
             }
-            index_file = generation_dir / "index.json"
-            _write_json(index_file, index, limits.max_manifest_bytes)
+            index_sha256 = _write_json(
+                generation_dir / "index.json", index, limits.max_manifest_bytes
+            )
             _sync_directory(generation_dir)
             _sync_directory(_generation_root(destination))
             pointer = {
                 "format": _FORMAT,
                 "version": _VERSION,
                 "generation": generation,
-                "sha256": _file_hash(index_file),
+                "sha256": index_sha256,
             }
             _atomic_json(destination, pointer, limits.max_manifest_bytes)
         except Exception as exc:  # noqa: BLE001 - publish failures must reach every process
@@ -208,17 +210,7 @@ def load_array_state_checkpoint(
     checkpoint identity. The restored arrays retain the template's sharding.
     """
     error: Exception | None = None
-    prepared: (
-        tuple[
-            str,
-            dict[str, Any],
-            dict[str, Any],
-            list[Any],
-            list[dict[str, Any]],
-            list[list[np.ndarray]],
-        ]
-        | None
-    ) = None
+    prepared: _PreparedLoad | None = None
     try:
         prepared = _prepare_array_load(
             Path(path),
@@ -236,18 +228,10 @@ def load_array_state_checkpoint(
             f"checkpoint read failed on a participant: {error or 'another process failed'}."
         ) from error
     assert prepared is not None
-    (
-        generation,
-        index,
-        local_schema,
-        expected_arrays,
-        expected_nodes,
-        prepared_pieces,
-    ) = prepared
     if jax.process_count() > 1:
         generations = np.asarray(
             multihost_utils.process_allgather(
-                np.frombuffer(bytes.fromhex(generation), dtype=np.uint8)
+                np.frombuffer(bytes.fromhex(prepared.generation), dtype=np.uint8)
             )
         )
         if not np.all(generations == generations[0]):
@@ -256,9 +240,9 @@ def load_array_state_checkpoint(
             )
     arrays = []
     for target, node, pieces in zip(
-        expected_arrays, expected_nodes, prepared_pieces, strict=True
+        prepared.targets, prepared.nodes, prepared.pieces, strict=True
     ):
-        if isinstance(target, jax.Array) and node["scope"] == "global":
+        if _is_global_array(target, node):
             shards = [
                 _place_piece(piece, shard.data, shard.device)
                 for piece, shard in zip(pieces, target.addressable_shards, strict=True)
@@ -276,11 +260,11 @@ def load_array_state_checkpoint(
                     target.device if isinstance(target, jax.Array) else None,
                 )
             )
-    parts = restore_tree(checkpoint_parts(template), local_schema, arrays)
+    parts = restore_tree(checkpoint_parts(template), prepared.schema, arrays)
     loaded = replace(
         template,
-        manifest=index["manifest"],
-        metadata=index["metadata"],
+        manifest=prepared.index["manifest"],
+        metadata=prepared.index["metadata"],
         **parts,
     )
     restore_state_checkpoint(
@@ -294,6 +278,17 @@ def load_array_state_checkpoint(
     return loaded
 
 
+class _PreparedLoad(NamedTuple):
+    """Validated host data for one process, ready for device placement."""
+
+    generation: str
+    index: dict[str, Any]
+    schema: dict[str, Any]
+    targets: list[Any]
+    nodes: list[dict[str, Any]]
+    pieces: list[list[np.ndarray]]
+
+
 def _prepare_array_load(
     destination: Path,
     bundle: OptimizerBundle,
@@ -302,14 +297,7 @@ def _prepare_array_load(
     limits: ArrayCheckpointLimits,
     base_model_value_hash: str | None,
     applied_updates: int | None,
-) -> tuple[
-    str,
-    dict[str, Any],
-    dict[str, Any],
-    list[Any],
-    list[dict[str, Any]],
-    list[list[np.ndarray]],
-]:
+) -> _PreparedLoad:
     pointer = _read_json(destination, limits.max_manifest_bytes)
     if (
         pointer.get("format") != _FORMAT
@@ -340,8 +328,6 @@ def _prepare_array_load(
             raise ValueError("checkpoint manifest differs from process records.")
         if records[0]["metadata_sha256"] != _json_hash(index["metadata"], limits):
             raise ValueError("checkpoint metadata differs from process records.")
-        for record in records:
-            match_tree_schema(record["schema"], expected_schema)
         match_tree_schema(index["manifest"]["state_schema"], expected_schema)
     except (KeyError, TypeError, ValueError) as exc:
         raise OptimizerStateRestoreError(
@@ -359,10 +345,7 @@ def _prepare_array_load(
     prepared_pieces: list[list[np.ndarray]] = []
     for number, target in enumerate(expected_arrays):
         chunks = records[rank]["arrays"][number]["chunks"]
-        if (
-            isinstance(target, jax.Array)
-            and expected_nodes[number]["scope"] == "global"
-        ):
+        if _is_global_array(target, expected_nodes[number]):
             target_shards = target.addressable_shards
             if len(chunks) != len(target_shards):
                 raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
@@ -383,20 +366,28 @@ def _prepare_array_load(
             prepared_pieces.append(
                 [_load_piece(generation_dir, rank, chunks[0], target, limits)]
             )
-    return (
-        pointer["generation"],
-        index,
-        records[rank]["schema"],
-        expected_arrays,
-        expected_nodes,
-        prepared_pieces,
+    return _PreparedLoad(
+        generation=pointer["generation"],
+        index=index,
+        schema=records[rank]["schema"],
+        targets=expected_arrays,
+        nodes=expected_nodes,
+        pieces=prepared_pieces,
     )
 
 
+def _is_key_array(value: Any) -> bool:
+    return isinstance(value, jax.Array) and jax.dtypes.issubdtype(
+        value.dtype, jax.dtypes.prng_key
+    )
+
+
+def _is_global_array(value: Any, node: dict[str, Any]) -> bool:
+    return isinstance(value, jax.Array) and node["scope"] == "global"
+
+
 def _storage_bytes(array: Any) -> np.ndarray:
-    if isinstance(array, jax.Array) and jax.dtypes.issubdtype(
-        array.dtype, jax.dtypes.prng_key
-    ):
+    if _is_key_array(array):
         array = jax.random.key_data(array)
     data = np.asarray(array)
     if data.dtype.hasobject:
@@ -419,60 +410,51 @@ def _load_piece(
     path = generation_dir / f"rank-{rank:05d}" / name
     if chunk.get("shape") != list(target.shape):
         raise OptimizerStateRestoreError("checkpoint shard shape mismatch.")
-    expected_bytes = _array_storage_nbytes(target)
+    # Typed PRNG keys are stored as their raw key data.
+    stored = jax.random.key_data(target) if _is_key_array(target) else target
+    stored_dtype = np.dtype(stored.dtype)
+    expected_bytes = stored.size * stored_dtype.itemsize
     if expected_bytes > limits.max_array_bytes:
         raise OptimizerStateRestoreError("checkpoint array exceeds per-array limit.")
     with _open_checkpoint_file(path) as handle:
         size = os.fstat(handle.fileno()).st_size
         if size != chunk.get("size") or size > limits.max_array_bytes + _HEADER_LIMIT:
             raise OptimizerStateRestoreError("checkpoint shard size mismatch.")
-        digest = hashlib.sha256()
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-        if digest.hexdigest() != chunk.get("sha256"):
-            raise OptimizerStateRestoreError("checkpoint shard checksum mismatch.")
-        handle.seek(0)
-        version = np.lib.format.read_magic(handle)
-        if version == (1, 0):
-            shape, _, dtype = np.lib.format.read_array_header_1_0(
-                handle, max_header_size=_HEADER_LIMIT
-            )
-        elif version in ((2, 0), (3, 0)):
-            shape, _, dtype = np.lib.format.read_array_header_2_0(
-                handle, max_header_size=_HEADER_LIMIT
-            )
-        else:
-            raise OptimizerStateRestoreError("unsupported NPY version.")
-        if dtype != np.dtype("uint8") or shape != (expected_bytes,):
-            raise OptimizerStateRestoreError("checkpoint shard header mismatch.")
-        if size != handle.tell() + expected_bytes:
-            raise OptimizerStateRestoreError(
-                "checkpoint shard payload length mismatch."
-            )
-        data = np.frombuffer(handle.read(expected_bytes), dtype=np.uint8).copy()
-    if isinstance(target, jax.Array) and jax.dtypes.issubdtype(
-        target.dtype, jax.dtypes.prng_key
-    ):
-        return data.view(np.uint32).reshape(jax.random.key_data(target).shape)
-    return data.view(np.dtype(target.dtype)).reshape(target.shape)
+        # Read once so the checksummed bytes are exactly the decoded bytes.
+        payload = handle.read(size + 1)
+    if len(payload) != size:
+        raise OptimizerStateRestoreError("checkpoint shard size mismatch.")
+    if hashlib.sha256(payload).hexdigest() != chunk.get("sha256"):
+        raise OptimizerStateRestoreError("checkpoint shard checksum mismatch.")
+    stream = io.BytesIO(payload)
+    version = np.lib.format.read_magic(stream)
+    if version == (1, 0):
+        shape, _, dtype = np.lib.format.read_array_header_1_0(
+            stream, max_header_size=_HEADER_LIMIT
+        )
+    elif version in ((2, 0), (3, 0)):
+        shape, _, dtype = np.lib.format.read_array_header_2_0(
+            stream, max_header_size=_HEADER_LIMIT
+        )
+    else:
+        raise OptimizerStateRestoreError("unsupported NPY version.")
+    if dtype != np.dtype("uint8") or shape != (expected_bytes,):
+        raise OptimizerStateRestoreError("checkpoint shard header mismatch.")
+    if size != stream.tell() + expected_bytes:
+        raise OptimizerStateRestoreError("checkpoint shard payload length mismatch.")
+    data = np.frombuffer(
+        payload, dtype=np.uint8, count=expected_bytes, offset=stream.tell()
+    ).copy()
+    return data.view(stored_dtype).reshape(stored.shape)
 
 
 def _place_piece(data: np.ndarray, target: Any, device: Any | None) -> Any:
     if not isinstance(target, jax.Array):
         return data
-    if jax.dtypes.issubdtype(target.dtype, jax.dtypes.prng_key):
-        return jax.random.wrap_key_data(
-            jax.device_put(data, device), impl=jax.random.key_impl(target)
-        )
-    return jax.device_put(data, device)
-
-
-def _array_storage_nbytes(target: Any) -> int:
-    if isinstance(target, jax.Array) and jax.dtypes.issubdtype(
-        target.dtype, jax.dtypes.prng_key
-    ):
-        return int(jax.random.key_data(target).size * np.dtype(np.uint32).itemsize)
-    return int(np.prod(target.shape, dtype=np.int64) * np.dtype(target.dtype).itemsize)
+    placed = jax.device_put(data, device)
+    if _is_key_array(target):
+        return jax.random.wrap_key_data(placed, impl=jax.random.key_impl(target))
+    return placed
 
 
 def _encode_index(
@@ -598,28 +580,36 @@ def _schema_without_scalar_values(schema: Any) -> Any:
     return schema
 
 
-def _write_json(path: Path, value: Any, limit: int) -> None:
+def _write_shard(path: Path, raw: np.ndarray) -> tuple[int, str]:
+    """Durably create an NPY file for ``raw`` and return its size and SHA-256."""
+    # Same bytes as ``np.save``; hashing while writing avoids reading the shard back.
+    header = io.BytesIO()
+    np.lib.format.write_array_header_1_0(
+        header, np.lib.format.header_data_from_array_1_0(raw)
+    )
+    digest = hashlib.sha256()
     with path.open("xb") as handle:
-        handle.write(_json_bytes(value, limit))
+        for block in (header.getvalue(), raw.data):
+            handle.write(block)
+            digest.update(block)
         handle.flush()
         os.fsync(handle.fileno())
+        return handle.tell(), digest.hexdigest()
+
+
+def _write_json(path: Path, value: Any, limit: int) -> str:
+    """Durably create ``path`` with canonical JSON and return its SHA-256."""
+    encoded = _json_bytes(value, limit)
+    with path.open("xb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _atomic_json(path: Path, value: Any, limit: int) -> None:
-    temporary: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
-        ) as handle:
-            temporary = handle.name
-            handle.write(_json_bytes(value, limit))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _sync_directory(path.parent)
-    finally:
-        if temporary is not None and os.path.exists(temporary):
-            os.unlink(temporary)
+    with _atomic_write(path) as handle:
+        handle.write(_json_bytes(value, limit))
 
 
 def _read_json(
@@ -652,25 +642,15 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}.")
 
 
-def _file_hash(path: Path) -> str:
-    _regular_file_size(path)
-    digest = hashlib.sha256()
-    with _open_checkpoint_file(path) as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _regular_file_size(path: Path) -> int:
-    with _open_checkpoint_file(path) as handle:
-        return os.fstat(handle.fileno()).st_size
+def _reject_symlinked_parents(path: Path) -> None:
+    for parent in path.parents:
+        if parent.exists() and parent.is_symlink():
+            raise OptimizerStateRestoreError("checkpoint path traverses a symlink.")
 
 
 @contextmanager
 def _open_checkpoint_file(path: Path) -> Iterator[BinaryIO]:
-    for parent in path.parents:
-        if parent.exists() and parent.is_symlink():
-            raise OptimizerStateRestoreError("checkpoint path traverses a symlink.")
+    _reject_symlinked_parents(path)
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import jax
@@ -45,10 +46,9 @@ def _update_status(old_state: Any, new_state: Any) -> UpdateStatus:
             window_discarded=jnp.logical_not(applied),
             microsteps_in_window=jnp.asarray(0, dtype=jnp.int32),
         )
-    if hasattr(new_state, "inner_state"):
-        return _update_status(old_state.inner_state, new_state.inner_state)
-    if hasattr(new_state, "inner_opt_state"):
-        return _update_status(old_state.inner_opt_state, new_state.inner_opt_state)
+    name = _inner_state_name(new_state)
+    if name is not None:
+        return _update_status(getattr(old_state, name), getattr(new_state, name))
     return UpdateStatus(
         accumulating=jnp.asarray(False),
         update_applied=jnp.asarray(True),
@@ -58,13 +58,28 @@ def _update_status(old_state: Any, new_state: Any) -> UpdateStatus:
 
 
 def _last_finite(state: Any) -> jax.Array:
-    if hasattr(state, "last_finite"):
-        return jnp.asarray(state.last_finite, dtype=jnp.bool_)
-    if hasattr(state, "inner_state"):
-        return _last_finite(state.inner_state)
-    if hasattr(state, "inner_opt_state"):
-        return _last_finite(state.inner_opt_state)
+    for wrapped in _wrapped_states(state):
+        if hasattr(wrapped, "last_finite"):
+            return jnp.asarray(wrapped.last_finite, dtype=jnp.bool_)
     return jnp.asarray(True)
+
+
+def _inner_state_name(state: Any) -> str | None:
+    """Return the attribute holding the state wrapped by ``state``, if any."""
+    for name in ("inner_state", "inner_opt_state"):
+        if hasattr(state, name):
+            return name
+    return None
+
+
+def _wrapped_states(state: Any) -> Iterator[Any]:
+    """Yield ``state`` and each optimizer state it wraps, outermost first."""
+    while True:
+        yield state
+        name = _inner_state_name(state)
+        if name is None:
+            return
+        state = getattr(state, name)
 
 
 def validate_accumulation_complete(
@@ -79,20 +94,14 @@ def validate_accumulation_complete(
 
     if accumulation_config.steps == 1:
         return
-    current = state
-    while True:
+    for current in _wrapped_states(state):
         if hasattr(current, "microsteps_in_window"):
             pending = current.microsteps_in_window
             break
         if hasattr(current, "mini_step"):
             pending = current.mini_step
             break
-        if hasattr(current, "inner_state"):
-            current = current.inner_state
-            continue
-        if hasattr(current, "inner_opt_state"):
-            current = current.inner_opt_state
-            continue
+    else:
         raise ValueError("state has no accumulation window for the supplied config.")
     pending_count = int(jax.device_get(pending))
     if pending_count:

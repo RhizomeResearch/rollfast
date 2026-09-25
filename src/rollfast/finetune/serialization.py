@@ -5,14 +5,20 @@ from __future__ import annotations
 import os
 import pickle
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import jax
 
-from ._checkpoint_tree import checkpoint_parts, describe_tree, match_tree_schema
+from ._checkpoint_tree import (
+    OPTIONAL_COMPONENTS,
+    checkpoint_parts,
+    describe_tree,
+    match_tree_schema,
+)
 from .config import SCHEMA_VERSION, OptimizerBundle
 
 _CHECKPOINT_FORMAT = "rollfast.finetune.optimizer_state"
@@ -266,24 +272,8 @@ def save_state_checkpoint(
         base_model_value_hash=base_model_value_hash,
         metadata=metadata,
     )
-    destination = Path(path)
-    temporary: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
-            delete=False,
-        ) as handle:
-            temporary = handle.name
-            pickle.dump(checkpoint, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-        _sync_directory(destination.parent)
-    finally:
-        if temporary is not None and os.path.exists(temporary):
-            os.unlink(temporary)
+    with _atomic_write(Path(path)) as handle:
+        pickle.dump(checkpoint, handle)
     return checkpoint
 
 
@@ -346,14 +336,7 @@ def _validate_checkpoint_schema(checkpoint: OptimizerStateCheckpoint) -> None:
         raise OptimizerStateRestoreError(
             "checkpoint is missing optimizer-state component metadata."
         )
-    for name in (
-        "master_params",
-        "accumulation",
-        "model_state",
-        "loss_scale",
-        "rng",
-        "counters",
-    ):
+    for name in OPTIONAL_COMPONENTS:
         if components.get(name, False) != (getattr(checkpoint, name) is not None):
             raise OptimizerStateRestoreError(
                 f"checkpoint {name} component presence mismatch."
@@ -455,6 +438,28 @@ def _normalize_json(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [_normalize_json(item) for item in value]
     return value
+
+
+@contextmanager
+def _atomic_write(destination: Path) -> Iterator[IO[bytes]]:
+    """Yield a temporary file that durably replaces ``destination`` on success."""
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        _sync_directory(destination.parent)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _sync_directory(path: Path) -> None:

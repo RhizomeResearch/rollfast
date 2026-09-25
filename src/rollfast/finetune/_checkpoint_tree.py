@@ -4,27 +4,25 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Mapping
 from typing import Any
 
 import jax
 import numpy as np
 
+# Optional checkpoint components whose presence the manifest records.
+OPTIONAL_COMPONENTS = (
+    "master_params",
+    "accumulation",
+    "model_state",
+    "loss_scale",
+    "rng",
+    "counters",
+)
+
 
 def checkpoint_parts(checkpoint: Any) -> dict[str, Any]:
     """Return the mutable components stored by an optimizer checkpoint."""
-    return {
-        name: getattr(checkpoint, name)
-        for name in (
-            "state",
-            "master_params",
-            "accumulation",
-            "model_state",
-            "loss_scale",
-            "rng",
-            "counters",
-        )
-    }
+    return {name: getattr(checkpoint, name) for name in ("state", *OPTIONAL_COMPONENTS)}
 
 
 def describe_tree(value: Any) -> tuple[dict[str, Any], list[Any]]:
@@ -58,7 +56,7 @@ def describe_tree(value: Any) -> tuple[dict[str, Any], list[Any]]:
             if isinstance(node, float) and not math.isfinite(node):
                 raise ValueError("nonfinite Python checkpoint scalar is unsupported.")
             return {"kind": "scalar", "type": type(node).__name__, "value": node}
-        if isinstance(node, Mapping) and type(node) is dict:
+        if type(node) is dict:
             keys = sorted(node, key=lambda key: (type(key).__name__, str(key)))
             if any(type(key) not in (str, int) for key in keys):
                 raise TypeError(
@@ -114,10 +112,10 @@ def match_tree_schema(actual: Any, expected: Any, *, path: str = "checkpoint") -
         raise TypeError(f"{path} has malformed state schema.")
     if actual.keys() != expected.keys():
         raise ValueError(f"{path} state schema fields mismatch.")
-    fields = set(expected) - {"value"}
-    if {key: actual.get(key) for key in fields if key != "children"} != {
-        key: expected[key] for key in fields if key != "children"
-    }:
+    # Scalar values come from the checkpoint; children are matched recursively.
+    if any(
+        actual[key] != expected[key] for key in expected.keys() - {"value", "children"}
+    ):
         raise ValueError(f"{path} state schema mismatch.")
     if "children" in expected:
         actual_children = actual.get("children")
