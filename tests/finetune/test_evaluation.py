@@ -90,16 +90,8 @@ def test_divergent_views_survive_checkpoint_round_trip_with_model_state():
         updates, state = bundle.update(ones_like_trainable(params), state, params)
         params = apply_updates(params, updates, stochastic=False)
     state = state._replace(
-        ema_params=jax.tree.map(
-            lambda x: None if x is None else jnp.full_like(x, 2.0),
-            params,
-            is_leaf=lambda x: x is None,
-        ),
-        swa_params=jax.tree.map(
-            lambda x: None if x is None else jnp.full_like(x, 3.0),
-            params,
-            is_leaf=lambda x: x is None,
-        ),
+        ema_params=jax.tree.map(lambda x: jnp.full_like(x, 2.0), params),
+        swa_params=jax.tree.map(lambda x: jnp.full_like(x, 3.0), params),
     )
     checkpoint = rfft.make_state_checkpoint(
         bundle,
@@ -139,7 +131,7 @@ def test_divergent_views_survive_checkpoint_round_trip_with_model_state():
     assert results["ema"].average_updates == 2
     assert results["swa"].average_updates == 2
     assert all(result.model_state is loaded.model_state for result in results.values())
-    assert len({result.view for result in results.values()}) == 3
+    assert all(result.view == view for view, result in results.items())
 
 
 @pytest.mark.parametrize("view", ["ema", "swa"])

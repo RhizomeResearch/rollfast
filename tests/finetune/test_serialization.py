@@ -7,7 +7,7 @@ import pytest
 
 import rollfast.finetune as rfft
 
-from .helpers import ones_like_trainable, tiny_lora_plan, tiny_plan
+from .helpers import ARRAY_LIMITS, ones_like_trainable, tiny_lora_plan, tiny_plan
 
 
 def _assert_tree_allclose(left, right):
@@ -493,15 +493,18 @@ def test_state_checkpoint_rejects_wrong_object_after_trusted_load(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "model_state",
+    ("model_state", "cause"),
     [
-        {"scale": float("inf")},
-        functools.reduce(lambda tree, _: [tree], range(70), jnp.zeros(())),
+        ({"scale": float("inf")}, "nonfinite Python checkpoint scalar"),
+        (
+            functools.reduce(lambda tree, _: [tree], range(70), jnp.zeros(())),
+            "maximum depth",
+        ),
     ],
     ids=["nonfinite-scalar", "deep-tree"],
 )
 def test_state_checkpoint_keeps_trees_array_storage_cannot_describe(
-    tmp_path, model_state
+    tmp_path, model_state, cause
 ):
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(plan, total_steps=5, schedule="constant")
@@ -521,16 +524,9 @@ def test_state_checkpoint_keeps_trees_array_storage_cannot_describe(
 
     assert "state_schema" not in checkpoint.manifest
     assert jax.tree.structure(restored) == jax.tree.structure(state)
-    limits = rfft.ArrayCheckpointLimits(
-        max_manifest_bytes=1_000_000,
-        max_arrays=1_000,
-        max_shards=1_000,
-        max_array_bytes=1_000_000,
-        max_total_bytes=10_000_000,
-    )
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="write failed"):
+    with pytest.raises(rfft.OptimizerStateRestoreError, match=f"write failed.*{cause}"):
         rfft.save_array_state_checkpoint(
-            tmp_path / "optimizer.rfarr", checkpoint, limits=limits
+            tmp_path / "optimizer.rfarr", checkpoint, limits=ARRAY_LIMITS
         )
 
 

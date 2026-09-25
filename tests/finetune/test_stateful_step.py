@@ -392,7 +392,7 @@ def test_jitted_stateful_step_rejects_gradient_cast_overflow():
     )
     initial_model_state = {"updates": jnp.asarray(0)}
     initial_opt_state = bundle.init(plan.trainable)
-    result = step(
+    visible, _, opt_state, model_state, _, _, info = step(
         plan.trainable,
         None,
         initial_opt_state,
@@ -401,7 +401,6 @@ def test_jitted_stateful_step_rejects_gradient_cast_overflow():
         None,
         jnp.asarray(1e10),
     )
-    visible, _, opt_state, model_state, _, _, info = result
     assert not bool(info.all_finite)
     assert_tree_allclose(visible, plan.trainable)
     assert_tree_allclose(opt_state, initial_opt_state)
@@ -429,7 +428,7 @@ def test_equinox_state_is_preserved_for_forward_rollback():
         plan, loss, bundle, state_policy="microbatch_sequential"
     )
     initial_opt_state = bundle.init(plan.trainable)
-    rejected = step(
+    visible, master, opt_state, model_state, loss_scale, rng, info = step(
         plan.trainable,
         None,
         initial_opt_state,
@@ -438,17 +437,21 @@ def test_equinox_state_is_preserved_for_forward_rollback():
         None,
         jnp.asarray(jnp.inf),
     )
-    assert not bool(rejected[-1].all_finite)
-    assert_tree_allclose(rejected[3], initial_state)
+    assert not bool(info.all_finite)
+    assert_tree_allclose(model_state, initial_state)
     assert len(jax.tree.leaves(initial_state)) == 3
 
-    accepted = step(*rejected[:6], jnp.asarray(1.0))
-    assert bool(accepted[-1].all_finite)
-    assert len(jax.tree.leaves(accepted[3])) == 3
+    _, _, _, accepted_state, _, _, info = step(
+        visible, master, opt_state, model_state, loss_scale, rng, jnp.asarray(1.0)
+    )
+    assert bool(info.all_finite)
+    assert len(jax.tree.leaves(accepted_state)) == 3
     assert any(
         not jnp.array_equal(before, after)
         for before, after in zip(
-            jax.tree.leaves(initial_state), jax.tree.leaves(accepted[3]), strict=True
+            jax.tree.leaves(initial_state),
+            jax.tree.leaves(accepted_state),
+            strict=True,
         )
     )
 

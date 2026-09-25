@@ -1,5 +1,6 @@
 """Strict optimizer checkpoint restoration and non-executable storage tests."""
 
+import copy
 import hashlib
 import io
 import json
@@ -17,46 +18,37 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import rollfast.finetune as rfft
+from rollfast.finetune import array_storage
+from rollfast.finetune._checkpoint_tree import checkpoint_parts, describe_tree
 from rollfast.utils import zeros_like_preserving_sharding
 
-from .helpers import TinyGroup, TinyPlan, ones_like_trainable, tiny_plan
+from .helpers import ARRAY_LIMITS, TinyGroup, TinyPlan, ones_like_trainable, tiny_plan
 
-LIMITS = rfft.ArrayCheckpointLimits(
-    max_manifest_bytes=2_000_000,
-    max_arrays=10_000,
-    max_shards=20_000,
-    max_array_bytes=10_000_000,
-    max_total_bytes=100_000_000,
+requires_four_devices = pytest.mark.skipif(
+    jax.local_device_count() < 4, reason="requires four devices"
 )
 
 
 def _bundle(*, averaging=False, dtype=jnp.float32):
     plan = tiny_plan()
-    if dtype != jnp.float32:
-        plan = replace(
-            plan,
-            trainable=jax.tree.map(
-                lambda x: x.astype(dtype) if x is not None else None,
-                plan.trainable,
-                is_leaf=lambda x: x is None,
-            ),
-        )
+    averages = {
+        "ema": rfft.EMAConfig(enabled=averaging),
+        "swa": rfft.SWAConfig(enabled=averaging, start_step=0 if averaging else None),
+    }
     if dtype == jnp.float32:
         bundle = rfft.adamw_from_plan(
-            plan,
-            total_steps=5,
-            schedule="constant",
-            ema=rfft.EMAConfig(enabled=averaging),
-            swa=rfft.SWAConfig(enabled=averaging, start_step=0 if averaging else None),
+            plan, total_steps=5, schedule="constant", **averages
         )
     else:
+        plan = replace(
+            plan, trainable=jax.tree.map(lambda x: x.astype(dtype), plan.trainable)
+        )
         bundle = rfft.compile_optimizer(
             plan,
             optimizer=rfft.OptimizerConfig(),
             schedule=rfft.ScheduleConfig(kind="constant", total_steps=5),
             gradient_policy=rfft.GradientPolicy(nonfinite="none"),
-            ema=rfft.EMAConfig(enabled=averaging),
-            swa=rfft.SWAConfig(enabled=averaging, start_step=0 if averaging else None),
+            **averages,
         )
     return plan, bundle
 
@@ -83,6 +75,83 @@ def _checkpoints(plan, bundle):
     return saved, template
 
 
+def _shape_only(tree):
+    return jax.tree.map(
+        lambda leaf: jax.ShapeDtypeStruct(
+            leaf.shape, leaf.dtype, sharding=leaf.sharding
+        ),
+        tree,
+    )
+
+
+def _assert_restored_onto(restored, expected, template):
+    for actual, value, target in zip(
+        jax.tree.leaves(restored),
+        jax.tree.leaves(expected),
+        jax.tree.leaves(template),
+        strict=True,
+    ):
+        assert actual.sharding == target.sharding
+        # Check every device's copy; ``np.asarray`` would read a single replica.
+        expected_value = np.asarray(value)
+        for shard in actual.addressable_shards:
+            np.testing.assert_array_equal(shard.data, expected_value[shard.index])
+
+
+def _placement_checkpoint(bundle, state, updates):
+    return rfft.make_state_checkpoint(
+        bundle,
+        state,
+        model_checkpoint_id="placement-model-0",
+        counters={"successful_update": updates},
+    )
+
+
+def _load_placement(path, bundle, template_state):
+    return rfft.load_array_state_checkpoint(
+        path,
+        bundle,
+        template=_placement_checkpoint(bundle, template_state, 0),
+        model_checkpoint_id="placement-model-0",
+        limits=ARRAY_LIMITS,
+    )
+
+
+def _trained_placement_state(trainable):
+    plan = TinyPlan(
+        trainable=trainable,
+        labels={name: "head" for name in trainable},
+        group_specs={"head": TinyGroup("head", "head", None, 1.0, True)},
+    )
+    bundle = rfft.adamw_from_plan(
+        plan, total_steps=4, schedule="constant", clip_global_norm=None
+    )
+    state = bundle.init(plan.trainable)
+    # Updates replicate scalar counters that init leaves on one device.
+    _, state = bundle.update(plan.trainable, state, plan.trainable)
+    return plan, bundle, state
+
+
+def _read_index(path):
+    """Return the published generation directory and its index."""
+    pointer = json.loads(path.read_text())
+    generation = array_storage._generation_root(path) / pointer["generation"]
+    payload = (generation / "index.json").read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == pointer["sha256"]
+    return generation, json.loads(payload)
+
+
+def _publish_index(path, index):
+    """Replace the published index and update the pointer checksum to match."""
+    pointer = json.loads(path.read_text())
+    index_file = (
+        array_storage._generation_root(path) / pointer["generation"] / "index.json"
+    )
+    index_file.write_text(json.dumps(index))
+    pointer["sha256"] = hashlib.sha256(index_file.read_bytes()).hexdigest()
+    path.write_text(json.dumps(pointer))
+
+
 @pytest.mark.parametrize("averaging", [False, True])
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
 def test_safe_adamw_round_trip_preserves_next_update(tmp_path, averaging, dtype):
@@ -90,7 +159,7 @@ def test_safe_adamw_round_trip_preserves_next_update(tmp_path, averaging, dtype)
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
 
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
     loaded = rfft.load_array_state_checkpoint(
         path,
         bundle,
@@ -98,7 +167,7 @@ def test_safe_adamw_round_trip_preserves_next_update(tmp_path, averaging, dtype)
         model_checkpoint_id="training-model-1",
         base_model_value_hash="model-digest",
         applied_updates=1,
-        limits=LIMITS,
+        limits=ARRAY_LIMITS,
     )
 
     assert loaded.manifest["counters"]["successful_update"] == 1
@@ -156,13 +225,17 @@ def test_safe_reader_rejects_wrong_identity_and_limits(tmp_path):
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
 
     with pytest.raises(
         rfft.OptimizerStateRestoreError, match="model checkpoint mismatch"
     ):
         rfft.load_array_state_checkpoint(
-            path, bundle, template=template, model_checkpoint_id="wrong", limits=LIMITS
+            path,
+            bundle,
+            template=template,
+            model_checkpoint_id="wrong",
+            limits=ARRAY_LIMITS,
         )
 
     with pytest.raises(
@@ -174,7 +247,7 @@ def test_safe_reader_rejects_wrong_identity_and_limits(tmp_path):
             template=template,
             model_checkpoint_id="training-model-1",
             base_model_value_hash="wrong",
-            limits=LIMITS,
+            limits=ARRAY_LIMITS,
         )
     with pytest.raises(
         rfft.OptimizerStateRestoreError, match="allocation exceeds limit"
@@ -184,23 +257,16 @@ def test_safe_reader_rejects_wrong_identity_and_limits(tmp_path):
             bundle,
             template=template,
             model_checkpoint_id="training-model-1",
-            limits=replace(LIMITS, max_total_bytes=1),
+            limits=replace(ARRAY_LIMITS, max_total_bytes=1),
         )
 
 
 def test_array_shards_are_plain_npy_byte_files(tmp_path):
-    from rollfast.finetune import array_storage
-    from rollfast.finetune._checkpoint_tree import checkpoint_parts, describe_tree
-
     plan, bundle = _bundle()
     saved, _ = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
-    pointer = json.loads(path.read_text())
-    generation = array_storage._generation_root(path) / pointer["generation"]
-    index = json.loads((generation / "index.json").read_bytes())
-    index_digest = hashlib.sha256((generation / "index.json").read_bytes())
-    assert index_digest.hexdigest() == pointer["sha256"]
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
+    generation, index = _read_index(path)
     _, leaves = describe_tree(checkpoint_parts(saved))
 
     entries = index["records"][0]["arrays"]
@@ -232,18 +298,20 @@ def test_array_checkpoint_paths_reject_symlinked_directories(tmp_path):
         rfft.OptimizerStateRestoreError, match="write failed.*traverses a symlink"
     ):
         rfft.save_array_state_checkpoint(
-            linked / "optimizer.rfarr", saved, limits=LIMITS
+            linked / "optimizer.rfarr", saved, limits=ARRAY_LIMITS
         )
     assert not (real / "optimizer.rfarr").exists()
 
-    rfft.save_array_state_checkpoint(real / "optimizer.rfarr", saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(
+        real / "optimizer.rfarr", saved, limits=ARRAY_LIMITS
+    )
     with pytest.raises(rfft.OptimizerStateRestoreError, match="traverses a symlink"):
         rfft.load_array_state_checkpoint(
             linked / "optimizer.rfarr",
             bundle,
             template=template,
             model_checkpoint_id="training-model-1",
-            limits=LIMITS,
+            limits=ARRAY_LIMITS,
         )
 
 
@@ -281,14 +349,14 @@ def test_safe_round_trip_preserves_accumulation_and_precision_parts(tmp_path):
         counters={"successful_update": 0},
     )
     path = tmp_path / "precision.rfarr"
-    rfft.save_array_state_checkpoint(path, checkpoint, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, checkpoint, limits=ARRAY_LIMITS)
     loaded = rfft.load_array_state_checkpoint(
         path,
         bundle,
         template=template,
         model_checkpoint_id="training-model-0",
         applied_updates=0,
-        limits=LIMITS,
+        limits=ARRAY_LIMITS,
     )
 
     assert int(loaded.accumulation.microsteps_in_window) == 1
@@ -311,7 +379,7 @@ def test_strict_restore_rejects_missing_declared_component():
         )
 
 
-@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+@requires_four_devices
 @pytest.mark.parametrize(
     ("mesh_shape", "spec", "distinct_shards"),
     [((4,), P(), 1), ((2, 2), P("data", None), 2)],
@@ -320,42 +388,17 @@ def test_strict_restore_rejects_missing_declared_component():
 def test_replicated_shards_are_written_once_and_restored_to_every_replica(
     tmp_path, mesh_shape, spec, distinct_shards
 ):
-    from rollfast.finetune import array_storage
-    from rollfast.finetune._checkpoint_tree import checkpoint_parts, describe_tree
-
     devices = np.asarray(jax.devices()[:4]).reshape(mesh_shape)
     mesh = Mesh(devices, ("data", "model")[: len(mesh_shape)])
     weight = jnp.arange(32, dtype=jnp.float32).reshape(8, 4)
-    plan = TinyPlan(
-        trainable={"w": jax.device_put(weight, NamedSharding(mesh, spec))},
-        labels={"w": "head"},
-        group_specs={"head": TinyGroup("head", "head", None, 1.0, True)},
+    _, bundle, state = _trained_placement_state(
+        {"w": jax.device_put(weight, NamedSharding(mesh, spec))}
     )
-    bundle = rfft.adamw_from_plan(
-        plan, total_steps=4, schedule="constant", clip_global_norm=None
-    )
-    state = bundle.init(plan.trainable)
-    _, state = bundle.update(plan.trainable, state, plan.trainable)
-    saved = rfft.make_state_checkpoint(
-        bundle,
-        state,
-        model_checkpoint_id="replicated-model-0",
-        counters={"successful_update": 1},
-    )
-    # Updated counters are replicated across the mesh, so zero the saved layout.
-    template = rfft.make_state_checkpoint(
-        bundle,
-        jax.tree.map(zeros_like_preserving_sharding, state),
-        model_checkpoint_id="replicated-model-0",
-        counters={"successful_update": 0},
-    )
+    saved = _placement_checkpoint(bundle, state, 1)
     path = tmp_path / "replicated.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
 
-    pointer = json.loads(path.read_text())
-    generation = array_storage._generation_root(path) / pointer["generation"]
-    index_file = generation / "index.json"
-    index = json.loads(index_file.read_text())
+    generation, index = _read_index(path)
     (record,) = index["records"]
     _, leaves = describe_tree(checkpoint_parts(saved))
     moment_chunks = [
@@ -371,65 +414,23 @@ def test_replicated_shards_are_written_once_and_restored_to_every_replica(
         len(entry["chunks"]) for entry in record["arrays"]
     )
 
-    restored = rfft.load_array_state_checkpoint(
-        path,
-        bundle,
-        template=template,
-        model_checkpoint_id="replicated-model-0",
-        applied_updates=1,
-        limits=LIMITS,
-    )
-    for actual, expected in zip(
-        jax.tree.leaves(restored.state), jax.tree.leaves(state), strict=True
-    ):
-        assert actual.sharding == expected.sharding
-        for actual_shard, expected_shard in zip(
-            actual.addressable_shards, expected.addressable_shards, strict=True
-        ):
-            assert actual_shard.index == expected_shard.index
-            np.testing.assert_array_equal(actual_shard.data, expected_shard.data)
+    # Restoring onto the saved layout must fill every replica from one stored copy.
+    template = jax.tree.map(zeros_like_preserving_sharding, state)
+    restored = _load_placement(path, bundle, template)
+    _assert_restored_onto(restored.state, state, template)
 
     # A repeated shard index, as in per-replica layouts, is ambiguous.
     moment_chunks[0].append(dict(moment_chunks[0][0]))
-    index_file.write_text(json.dumps(index))
-    pointer["sha256"] = hashlib.sha256(index_file.read_bytes()).hexdigest()
-    path.write_text(json.dumps(pointer))
+    _publish_index(path, index)
     with pytest.raises(rfft.OptimizerStateRestoreError, match="shard layout mismatch"):
-        rfft.load_array_state_checkpoint(
-            path,
-            bundle,
-            template=template,
-            model_checkpoint_id="replicated-model-0",
-            applied_updates=1,
-            limits=LIMITS,
-        )
-
-
-def _shape_only(tree):
-    return jax.tree.map(
-        lambda leaf: jax.ShapeDtypeStruct(
-            leaf.shape, leaf.dtype, sharding=leaf.sharding
-        ),
-        tree,
-    )
-
-
-def _assert_restored_onto(restored, expected, template):
-    for actual, value, target in zip(
-        jax.tree.leaves(restored),
-        jax.tree.leaves(expected),
-        jax.tree.leaves(template),
-        strict=True,
-    ):
-        assert actual.sharding.is_equivalent_to(target.sharding, actual.ndim)
-        np.testing.assert_array_equal(np.asarray(actual), np.asarray(value))
+        _load_placement(path, bundle, template)
 
 
 def test_shape_only_templates_restore_without_template_arrays(tmp_path):
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
 
     abstract = replace(template, state=_shape_only(template.state))
     loaded = rfft.load_array_state_checkpoint(
@@ -438,7 +439,7 @@ def test_shape_only_templates_restore_without_template_arrays(tmp_path):
         template=abstract,
         model_checkpoint_id="training-model-1",
         applied_updates=1,
-        limits=LIMITS,
+        limits=ARRAY_LIMITS,
     )
     _assert_restored_onto(loaded.state, saved.state, template.state)
 
@@ -451,49 +452,15 @@ def test_shape_only_templates_restore_without_template_arrays(tmp_path):
                 rng=replace(template.rng, forward=_shape_only(template.rng.forward)),
             ),
             model_checkpoint_id="training-model-1",
-            limits=LIMITS,
+            limits=ARRAY_LIMITS,
         )
     with pytest.raises(rfft.OptimizerStateRestoreError, match="shape-only arrays"):
         rfft.save_array_state_checkpoint(
-            tmp_path / "abstract.rfarr", abstract, limits=LIMITS
+            tmp_path / "abstract.rfarr", abstract, limits=ARRAY_LIMITS
         )
 
 
-def _placement_checkpoint(bundle, state, updates):
-    return rfft.make_state_checkpoint(
-        bundle,
-        state,
-        model_checkpoint_id="placement-model-0",
-        counters={"successful_update": updates},
-    )
-
-
-def _load_placement(path, bundle, template_state):
-    return rfft.load_array_state_checkpoint(
-        path,
-        bundle,
-        template=_placement_checkpoint(bundle, template_state, 0),
-        model_checkpoint_id="placement-model-0",
-        limits=LIMITS,
-    )
-
-
-def _trained_placement_state(trainable):
-    plan = TinyPlan(
-        trainable=trainable,
-        labels={name: "head" for name in trainable},
-        group_specs={"head": TinyGroup("head", "head", None, 1.0, True)},
-    )
-    bundle = rfft.adamw_from_plan(
-        plan, total_steps=4, schedule="constant", clip_global_norm=None
-    )
-    state = bundle.init(plan.trainable)
-    # Updates replicate scalar counters that init leaves on one device.
-    _, state = bundle.update(plan.trainable, state, plan.trainable)
-    return plan, bundle, state
-
-
-@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+@requires_four_devices
 def test_trained_state_restores_onto_eager_init_and_shape_only_templates(tmp_path):
     mesh = Mesh(np.asarray(jax.devices()[:4]), ("data",))
     plan, bundle, state = _trained_placement_state(
@@ -509,7 +476,7 @@ def test_trained_state_restores_onto_eager_init_and_shape_only_templates(tmp_pat
     )
     saved = _placement_checkpoint(bundle, state, 1)
     path = tmp_path / "trained.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
     init_state = bundle.init(plan.trainable)
 
     for template_state in (init_state, _shape_only(init_state)):
@@ -530,7 +497,7 @@ def test_trained_state_restores_onto_eager_init_and_shape_only_templates(tmp_pat
     _assert_restored_onto(restored.state, state, single_device)
 
 
-@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+@requires_four_devices
 def test_replicated_and_single_device_placements_are_interchangeable(tmp_path):
     mesh = Mesh(np.asarray(jax.devices()[:4]), ("data",))
     _, bundle, replicated = _trained_placement_state(
@@ -540,20 +507,20 @@ def test_replicated_and_single_device_placements_are_interchangeable(tmp_path):
         lambda leaf: jax.device_put(leaf, jax.devices()[1]), replicated
     )
 
-    for saved, target in ((replicated, single_device), (single_device, replicated)):
-        path = tmp_path / f"{len(list(tmp_path.iterdir()))}.rfarr"
+    for number, (saved, target) in enumerate(
+        ((replicated, single_device), (single_device, replicated))
+    ):
+        path = tmp_path / f"direction-{number}.rfarr"
         rfft.save_array_state_checkpoint(
-            path, _placement_checkpoint(bundle, saved, 1), limits=LIMITS
+            path, _placement_checkpoint(bundle, saved, 1), limits=ARRAY_LIMITS
         )
         template = jax.tree.map(zeros_like_preserving_sharding, target)
         restored = _load_placement(path, bundle, template)
         _assert_restored_onto(restored.state, saved, template)
 
 
-@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+@requires_four_devices
 def test_sharded_state_restores_onto_a_different_partition(tmp_path):
-    from rollfast.finetune import array_storage
-
     devices = np.asarray(jax.devices()[:4])
     rows = Mesh(devices, ("data",))
     grid = Mesh(devices.reshape(2, 2), ("data", "model"))
@@ -563,7 +530,7 @@ def test_sharded_state_restores_onto_a_different_partition(tmp_path):
     )
     path = tmp_path / "sharded.rfarr"
     rfft.save_array_state_checkpoint(
-        path, _placement_checkpoint(bundle, state, 1), limits=LIMITS
+        path, _placement_checkpoint(bundle, state, 1), limits=ARRAY_LIMITS
     )
 
     # Each target piece overlaps several stored row shards or a part of one.
@@ -584,10 +551,7 @@ def test_sharded_state_restores_onto_a_different_partition(tmp_path):
         _assert_restored_onto(restored.state, state, template)
 
     # Stored shards must tile each array exactly once.
-    pointer = json.loads(path.read_text())
-    index_file = array_storage._generation_root(path) / pointer["generation"]
-    index_file = index_file / "index.json"
-    original = json.loads(index_file.read_text())
+    _, original = _read_index(path)
     moment = next(
         number
         for number, entry in enumerate(original["records"][0]["arrays"])
@@ -597,26 +561,22 @@ def test_sharded_state_restores_onto_a_different_partition(tmp_path):
         lambda chunks: chunks.pop(),
         lambda chunks: chunks[1].update(index=[[1, 3], [0, 8]]),
     ):
-        index = json.loads(json.dumps(original))
+        index = copy.deepcopy(original)
         tamper(index["records"][0]["arrays"][moment]["chunks"])
-        index_file.write_text(json.dumps(index))
-        pointer["sha256"] = hashlib.sha256(index_file.read_bytes()).hexdigest()
-        path.write_text(json.dumps(pointer))
+        _publish_index(path, index)
         with pytest.raises(
             rfft.OptimizerStateRestoreError, match="shard layout mismatch"
         ):
             _load_placement(path, bundle, state)
 
 
-def test_corruption_and_failed_publication_preserve_last_complete_checkpoint(
+def test_failed_publication_keeps_last_checkpoint_and_truncated_shard_is_rejected(
     tmp_path, monkeypatch
 ):
-    from rollfast.finetune import array_storage
-
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
     original_pointer = path.read_bytes()
 
     def fail_publish(*args, **kwargs):
@@ -625,49 +585,38 @@ def test_corruption_and_failed_publication_preserve_last_complete_checkpoint(
     with monkeypatch.context() as patch:
         patch.setattr(array_storage, "_atomic_json", fail_publish)
         with pytest.raises(rfft.OptimizerStateRestoreError, match="publication failed"):
-            rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+            rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
     assert path.read_bytes() == original_pointer
     loaded = rfft.load_array_state_checkpoint(
         path,
         bundle,
         template=template,
         model_checkpoint_id="training-model-1",
-        limits=LIMITS,
+        limits=ARRAY_LIMITS,
     )
     assert loaded.manifest["counters"]["successful_update"] == 1
 
-    pointer = array_storage._read_json(path, LIMITS.max_manifest_bytes)
-    generation = array_storage._generation_root(path) / pointer["generation"]
+    generation, _ = _read_index(path)
     shard = next(generation.glob("rank-00000/*.npy"))
     shard.write_bytes(shard.read_bytes()[:-1])
-    with pytest.raises(
-        rfft.OptimizerStateRestoreError, match="size mismatch|checksum mismatch"
-    ):
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="shard size mismatch"):
         rfft.load_array_state_checkpoint(
             path,
             bundle,
             template=template,
             model_checkpoint_id="training-model-1",
-            limits=LIMITS,
+            limits=ARRAY_LIMITS,
         )
 
 
 def test_safe_reader_rejects_unsafe_shard_name(tmp_path):
-    from rollfast.finetune import array_storage
-
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
-    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
-    pointer = json.loads(path.read_text())
-    index_file = (
-        array_storage._generation_root(path) / pointer["generation"] / "index.json"
-    )
-    index = json.loads(index_file.read_text())
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
+    _, index = _read_index(path)
     index["records"][0]["arrays"][0]["chunks"][0]["file"] = "../../outside.npy"
-    index_file.write_text(json.dumps(index))
-    pointer["sha256"] = hashlib.sha256(index_file.read_bytes()).hexdigest()
-    path.write_text(json.dumps(pointer))
+    _publish_index(path, index)
 
     with pytest.raises(rfft.OptimizerStateRestoreError, match="filename is invalid"):
         rfft.load_array_state_checkpoint(
@@ -675,7 +624,7 @@ def test_safe_reader_rejects_unsafe_shard_name(tmp_path):
             bundle,
             template=template,
             model_checkpoint_id="training-model-1",
-            limits=LIMITS,
+            limits=ARRAY_LIMITS,
         )
 
 

@@ -10,7 +10,7 @@ import pytest
 import rollfast.finetune as rfft
 from rollfast import apply_updates
 from rollfast.integrations import equimo
-from tests.finetune.helpers import tiny_plan
+from tests.finetune.helpers import ARRAY_LIMITS, tiny_plan
 
 
 @pytest.mark.integration
@@ -162,18 +162,15 @@ def test_safe_checkpoint_resumes_equimo_probe_plans(tmp_path, task, trainability
         model_checkpoint_id="training-model-1",
         counters={"successful_update": 0},
     )
-    limits = rfft.ArrayCheckpointLimits(
-        2_000_000, 10_000, 20_000, 10_000_000, 100_000_000
-    )
     path = tmp_path / "optimizer.rfarr"
-    rfft.save_array_state_checkpoint(path, checkpoint, limits=limits)
+    rfft.save_array_state_checkpoint(path, checkpoint, limits=ARRAY_LIMITS)
     restored = rfft.load_array_state_checkpoint(
         path,
         bundle,
         template=template,
         model_checkpoint_id="training-model-1",
         applied_updates=1,
-        limits=limits,
+        limits=ARRAY_LIMITS,
     )
 
     next_grads = jax.grad(loss_fn)(trainable)

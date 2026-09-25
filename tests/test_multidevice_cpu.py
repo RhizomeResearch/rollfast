@@ -11,9 +11,11 @@ import pytest
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+import rollfast.finetune as rfft
 from rollfast import adamw, apply_updates
 from rollfast.finetune.transforms import clip_by_global_norm
 from rollfast.optim.sam import global_l2_norm, sam_perturbation
+from tests.finetune.helpers import TinyGroup, TinyPlan
 
 pytestmark = pytest.mark.skipif(
     jax.local_device_count() < 2,
@@ -95,16 +97,8 @@ def test_adamw_state_and_updates_preserve_multi_device_sharding(dtype):
 
 
 def test_discarded_accumulation_preserves_sharding_and_recovers():
-    import rollfast.finetune as rfft
-    from tests.finetune.helpers import TinyGroup, TinyPlan
-
     mesh = Mesh(np.asarray(jax.devices()), ("data",))
-    sharding = NamedSharding(
-        mesh,
-        P(
-            "data",
-        ),
-    )
+    sharding = NamedSharding(mesh, P("data"))
     params = {
         "w": jax.device_put(
             jnp.ones((jax.local_device_count() * 2,), dtype=jnp.float32),
@@ -225,9 +219,6 @@ def test_rejected_master_steps_keep_collective_participation(declared_axis):
 
 
 def test_eager_bundle_init_places_parameter_state_like_parameters():
-    import rollfast.finetune as rfft
-    from tests.finetune.helpers import TinyGroup, TinyPlan
-
     mesh = Mesh(np.asarray(jax.devices()), ("data",))
     sharding = NamedSharding(mesh, P("data", None))
     params = {

@@ -18,7 +18,7 @@ import rollfast.finetune as rfft
 from rollfast.finetune import array_storage
 from rollfast.utils import zeros_like_preserving_sharding
 
-from .helpers import TinyGroup, TinyPlan
+from .helpers import ARRAY_LIMITS, TinyGroup, TinyPlan
 
 
 def _assert_state_on(actual_tree, expected_tree, template_tree) -> None:
@@ -85,10 +85,7 @@ def main(address: str, rank: int, path: Path) -> None:
             counters={"successful_update": 0},
             rng=rfft.init_rng_streams(jax.random.key(0)),
         )
-        limits = rfft.ArrayCheckpointLimits(
-            2_000_000, 10_000, 20_000, 10_000_000, 100_000_000
-        )
-        rfft.save_array_state_checkpoint(path, saved, limits=limits)
+        rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
         pointer_before_failure = path.read_bytes()
         generation = json.loads(pointer_before_failure)["generation"]
         index = json.loads(
@@ -110,7 +107,7 @@ def main(address: str, rank: int, path: Path) -> None:
             else saved
         )
         try:
-            rfft.save_array_state_checkpoint(path, invalid, limits=limits)
+            rfft.save_array_state_checkpoint(path, invalid, limits=ARRAY_LIMITS)
         except rfft.OptimizerStateRestoreError as error:
             assert "participant" in str(error)
         else:
@@ -122,17 +119,10 @@ def main(address: str, rank: int, path: Path) -> None:
             template=template,
             model_checkpoint_id="distributed-model-0",
             applied_updates=1,
-            limits=limits,
+            limits=ARRAY_LIMITS,
         )
         assert jnp.array_equal(loaded.rng.forward, rng.forward)
-        for actual, expected in zip(
-            jax.tree.leaves(loaded.state), jax.tree.leaves(state), strict=True
-        ):
-            for actual_shard, expected_shard in zip(
-                actual.addressable_shards, expected.addressable_shards, strict=True
-            ):
-                np.testing.assert_array_equal(actual_shard.data, expected_shard.data)
-                assert actual_shard.index == expected_shard.index
+        _assert_state_on(loaded.state, state, template.state)
 
         # Eager init keeps counters on one device per process; the stored
         # counters are replicated across processes, so every process slices them.
@@ -143,7 +133,7 @@ def main(address: str, rank: int, path: Path) -> None:
             template=replace(template, state=init_state),
             model_checkpoint_id="distributed-model-0",
             applied_updates=1,
-            limits=limits,
+            limits=ARRAY_LIMITS,
         )
         _assert_state_on(restored.state, state, init_state)
 
@@ -160,7 +150,7 @@ def main(address: str, rank: int, path: Path) -> None:
                 counters={"successful_update": 0},
                 rng=rng,
             ),
-            limits=limits,
+            limits=ARRAY_LIMITS,
         )
         shared_template = replace(template, accumulation={"value": jnp.zeros((1,))})
         restored = rfft.load_array_state_checkpoint(
@@ -168,7 +158,7 @@ def main(address: str, rank: int, path: Path) -> None:
             bundle,
             template=shared_template,
             model_checkpoint_id="distributed-model-0",
-            limits=limits,
+            limits=ARRAY_LIMITS,
         )
         _assert_state_on(restored.state, init_state, template.state)
         np.testing.assert_array_equal(restored.accumulation["value"], [rank])
@@ -181,7 +171,7 @@ def main(address: str, rank: int, path: Path) -> None:
                 bundle,
                 template=replace(shared_template, accumulation={"value": shared_value}),
                 model_checkpoint_id="distributed-model-0",
-                limits=limits,
+                limits=ARRAY_LIMITS,
             )
         except rfft.OptimizerStateRestoreError as error:
             assert "per-process values differ" in str(error), error

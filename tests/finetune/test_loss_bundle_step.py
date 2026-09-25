@@ -354,7 +354,6 @@ def test_stateful_loss_bundle_accumulation_discards_nonfinite_window():
     assert accumulation_state.aux_sums["penalty"] == 0.0
     assert accumulation_state.aux_normalizers["penalty"] == 0.0
     assert not bool(accumulation_state.pending_model_state_valid)
-
     assert jnp.allclose(params["w"], plan.trainable["w"])
     for left, right in zip(
         jax.tree.leaves(state), jax.tree.leaves(old_state), strict=True

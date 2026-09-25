@@ -8,6 +8,17 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 
+from rollfast.finetune import ArrayCheckpointLimits
+
+# Generous reader and writer bounds for small test checkpoints.
+ARRAY_LIMITS = ArrayCheckpointLimits(
+    max_manifest_bytes=2_000_000,
+    max_arrays=10_000,
+    max_shards=20_000,
+    max_array_bytes=10_000_000,
+    max_total_bytes=100_000_000,
+)
+
 
 @dataclass(frozen=True)
 class TinyGroup:
