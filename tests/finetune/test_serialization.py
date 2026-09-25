@@ -1,3 +1,4 @@
+import functools
 import pickle
 
 import jax
@@ -489,6 +490,48 @@ def test_state_checkpoint_rejects_wrong_object_after_trusted_load(tmp_path):
         match="does not contain a Rollfast checkpoint",
     ):
         rfft.load_state_checkpoint(path, trusted=True)
+
+
+@pytest.mark.parametrize(
+    "model_state",
+    [
+        {"scale": float("inf")},
+        functools.reduce(lambda tree, _: [tree], range(70), jnp.zeros(())),
+    ],
+    ids=["nonfinite-scalar", "deep-tree"],
+)
+def test_state_checkpoint_keeps_trees_array_storage_cannot_describe(
+    tmp_path, model_state
+):
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=5, schedule="constant")
+    state = bundle.init(plan.trainable)
+    path = tmp_path / "optimizer.rfopt"
+
+    checkpoint = rfft.save_state_checkpoint(
+        path,
+        bundle,
+        state,
+        model_checkpoint_id="model-step-1",
+        model_state=model_state,
+    )
+    restored = rfft.load_state_checkpoint(
+        path, bundle, model_checkpoint_id="model-step-1", trusted=True
+    )
+
+    assert "state_schema" not in checkpoint.manifest
+    assert jax.tree.structure(restored) == jax.tree.structure(state)
+    limits = rfft.ArrayCheckpointLimits(
+        max_manifest_bytes=1_000_000,
+        max_arrays=1_000,
+        max_shards=1_000,
+        max_array_bytes=1_000_000,
+        max_total_bytes=10_000_000,
+    )
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="write failed"):
+        rfft.save_array_state_checkpoint(
+            tmp_path / "optimizer.rfarr", checkpoint, limits=limits
+        )
 
 
 def test_schedule_free_checkpoint_rejects_missing_schedule_free_state():

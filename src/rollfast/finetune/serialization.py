@@ -135,8 +135,9 @@ def make_state_checkpoint(
     )
     try:
         schema, _ = describe_tree(checkpoint_parts(checkpoint))
-    except TypeError:
-        # The logical checkpoint remains backend-neutral for existing callers.
+    except (TypeError, ValueError):
+        # The logical checkpoint remains backend-neutral for existing callers,
+        # including unsupported nodes, nonfinite Python scalars, and deep trees.
         # Array storage requires a supported, explicitly described state tree.
         return checkpoint
     return replace(
