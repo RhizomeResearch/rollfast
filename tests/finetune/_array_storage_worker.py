@@ -10,6 +10,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
@@ -18,6 +19,24 @@ from rollfast.finetune import array_storage
 from rollfast.utils import zeros_like_preserving_sharding
 
 from .helpers import TinyGroup, TinyPlan
+
+
+def _assert_state_on(actual_tree, expected_tree, template_tree) -> None:
+    for actual, expected, target in zip(
+        jax.tree.leaves(actual_tree),
+        jax.tree.leaves(expected_tree),
+        jax.tree.leaves(template_tree),
+        strict=True,
+    ):
+        assert actual.sharding.is_equivalent_to(target.sharding, actual.ndim)
+        # Every process reaches this collective for the same leaves in order.
+        value = np.asarray(
+            expected
+            if expected.is_fully_addressable
+            else multihost_utils.process_allgather(expected, tiled=True)
+        )
+        for shard in actual.addressable_shards:
+            np.testing.assert_array_equal(shard.data, value[shard.index])
 
 
 def main(address: str, rank: int, path: Path) -> None:
@@ -114,6 +133,60 @@ def main(address: str, rank: int, path: Path) -> None:
             ):
                 np.testing.assert_array_equal(actual_shard.data, expected_shard.data)
                 assert actual_shard.index == expected_shard.index
+
+        # Eager init keeps counters on one device per process; the stored
+        # counters are replicated across processes, so every process slices them.
+        init_state = bundle.init(plan.trainable)
+        restored = rfft.load_array_state_checkpoint(
+            path,
+            bundle,
+            template=replace(template, state=init_state),
+            model_checkpoint_id="distributed-model-0",
+            applied_updates=1,
+            limits=limits,
+        )
+        _assert_state_on(restored.state, state, init_state)
+
+        # Per-process values may fill a shared array only when every process
+        # stored the same bytes: init counters agree, the accumulation does not.
+        per_process_path = path.with_name("per-process.rfarr")
+        rfft.save_array_state_checkpoint(
+            per_process_path,
+            rfft.make_state_checkpoint(
+                bundle,
+                init_state,
+                model_checkpoint_id="distributed-model-0",
+                accumulation={"value": jnp.asarray([float(rank)])},
+                counters={"successful_update": 0},
+                rng=rng,
+            ),
+            limits=limits,
+        )
+        shared_template = replace(template, accumulation={"value": jnp.zeros((1,))})
+        restored = rfft.load_array_state_checkpoint(
+            per_process_path,
+            bundle,
+            template=shared_template,
+            model_checkpoint_id="distributed-model-0",
+            limits=limits,
+        )
+        _assert_state_on(restored.state, init_state, template.state)
+        np.testing.assert_array_equal(restored.accumulation["value"], [rank])
+        shared_value = jax.make_array_from_process_local_data(
+            NamedSharding(mesh, P()), np.zeros((1,), dtype=np.float32)
+        )
+        try:
+            rfft.load_array_state_checkpoint(
+                per_process_path,
+                bundle,
+                template=replace(shared_template, accumulation={"value": shared_value}),
+                model_checkpoint_id="distributed-model-0",
+                limits=limits,
+            )
+        except rfft.OptimizerStateRestoreError as error:
+            assert "per-process values differ" in str(error), error
+        else:
+            raise AssertionError("differing per-process values must be rejected")
         print(f"rank {rank} restored", flush=True)
     finally:
         jax.distributed.shutdown()

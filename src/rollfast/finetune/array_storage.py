@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import io
+import itertools
 import json
+import math
 import os
 import re
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -39,6 +42,8 @@ _FORMAT = "rollfast.finetune.array_state"
 _VERSION = 1
 _GENERATION = re.compile(r"[0-9a-f]{32}\Z")
 _HEADER_LIMIT = 16_384
+# Per-axis [start, stop) bounds of one shard or restore piece.
+_Bounds = tuple[tuple[int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,8 @@ def save_array_state_checkpoint(
     try:
         _validate_checkpoint_schema(checkpoint)
         schema, arrays = describe_tree(checkpoint_parts(checkpoint))
+        if any(isinstance(array, jax.ShapeDtypeStruct) for array in arrays):
+            raise TypeError("shape-only arrays cannot be saved; pass concrete arrays.")
         array_nodes = _schema_array_nodes(schema)
         if "state_schema" not in checkpoint.manifest:
             raise ValueError("array storage requires a checkpoint state schema.")
@@ -211,7 +218,10 @@ def load_array_state_checkpoint(
 
     Distributed processes call this function together with the same path and
     checkpoint identity. A process may read shards written by another process.
-    The restored arrays retain the template's sharding.
+    Each restored array takes its template leaf's placement, assembled from the
+    stored shards that overlap each piece, so the template may use another mesh
+    or partition. Template leaves may be ``jax.ShapeDtypeStruct`` values with a
+    sharding, so no template state is allocated; typed PRNG keys stay concrete.
     """
     error: Exception | None = None
     prepared: _PreparedLoad | None = None
@@ -242,28 +252,12 @@ def load_array_state_checkpoint(
             raise OptimizerStateRestoreError(
                 "checkpoint generation changed across participating processes."
             )
-    arrays = []
-    for target, node, pieces in zip(
-        prepared.targets, prepared.nodes, prepared.pieces, strict=True
-    ):
-        if _is_global_array(target, node):
-            shards = [
-                _place_piece(piece, shard.data, shard.device)
-                for piece, shard in zip(pieces, target.addressable_shards, strict=True)
-            ]
-            arrays.append(
-                jax.make_array_from_single_device_arrays(
-                    target.shape, target.sharding, shards, dtype=target.dtype
-                )
-            )
-        else:
-            arrays.append(
-                _place_piece(
-                    pieces[0],
-                    target,
-                    target.device if isinstance(target, jax.Array) else None,
-                )
-            )
+    arrays = [
+        _assemble_array(target, placement, pieces)
+        for target, placement, pieces in zip(
+            prepared.targets, prepared.placements, prepared.pieces, strict=True
+        )
+    ]
     parts = restore_tree(checkpoint_parts(template), prepared.schema, arrays)
     loaded = replace(
         template,
@@ -289,7 +283,7 @@ class _PreparedLoad(NamedTuple):
     index: dict[str, Any]
     schema: dict[str, Any]
     targets: list[Any]
-    nodes: list[dict[str, Any]]
+    placements: list[list[tuple[Any, tuple[Any, ...]]]]
     pieces: list[list[np.ndarray]]
 
 
@@ -346,68 +340,246 @@ def _prepare_array_load(
         applied_updates=applied_updates,
     )
     rank = jax.process_index()
-    prepared_pieces: list[list[np.ndarray]] = []
+    stored_nodes = _schema_array_nodes(records[rank]["schema"])
+    placements = []
+    prepared_pieces = []
     for number, target in enumerate(expected_arrays):
-        if _is_global_array(target, expected_nodes[number]):
-            prepared_pieces.append(
-                _load_global_pieces(generation_dir, records, number, target, limits)
+        if isinstance(target, jax.ShapeDtypeStruct) and _is_key_array(target):
+            raise OptimizerStateRestoreError(
+                "typed PRNG key template leaves must be concrete arrays."
             )
-        else:
-            chunks = records[rank]["arrays"][number]["chunks"]
-            if len(chunks) != 1 or chunks[0].get("index") is not None:
-                raise OptimizerStateRestoreError(
-                    "checkpoint local array layout mismatch."
-                )
-            prepared_pieces.append(
-                [_load_piece(generation_dir, rank, chunks[0], target, limits)]
+        placement = _target_placement(target)
+        placements.append(placement)
+        prepared_pieces.append(
+            _load_target_pieces(
+                generation_dir,
+                records,
+                number,
+                stored_nodes[number]["scope"],
+                target,
+                expected_nodes[number]["scope"],
+                placement,
+                limits,
             )
+        )
     return _PreparedLoad(
         generation=pointer["generation"],
         index=index,
         schema=records[rank]["schema"],
         targets=expected_arrays,
-        nodes=expected_nodes,
+        placements=placements,
         pieces=prepared_pieces,
     )
 
 
-def _load_global_pieces(
+def _target_placement(target: Any) -> list[tuple[Any, tuple[Any, ...]]]:
+    """Return ``(device, index)`` for each addressable piece of a template leaf."""
+    sharding = getattr(target, "sharding", None)
+    if sharding is None:
+        # Host arrays and unsharded shape-only leaves take one whole piece.
+        return [(None, tuple(slice(None) for _ in target.shape))]
+    return list(sharding.addressable_devices_indices_map(target.shape).items())
+
+
+def _load_target_pieces(
     generation_dir: Path,
     records: list[dict[str, Any]],
     number: int,
-    target: jax.Array,
+    stored_scope: str,
+    target: Any,
+    target_scope: str,
+    placement: list[tuple[Any, tuple[Any, ...]]],
     limits: ArrayCheckpointLimits,
 ) -> list[np.ndarray]:
-    """Return one host piece per addressable shard of ``target``.
+    """Return host data for each piece of ``placement``.
 
-    Each distinct shard is stored once, possibly by another process, so chunks
-    are matched by logical index; local replicas share one loaded piece.
+    Pieces are assembled from the stored shards that overlap them, so the
+    template may use any partition of a sharded array.
     """
-    # JSON text is a canonical, hashable key for untrusted index records.
-    chunks: dict[str, tuple[int, dict[str, Any]]] = {}
+    layout = _storage_layout(target)
+    if stored_scope == "local":
+        # Each process stored its own whole value.
+        chunks = records[jax.process_index()]["arrays"][number]["chunks"]
+        if len(chunks) != 1 or chunks[0].get("index") is not None:
+            raise OptimizerStateRestoreError("checkpoint local array layout mismatch.")
+        if target_scope == "global" and any(
+            [chunk.get("sha256") for chunk in record["arrays"][number]["chunks"]]
+            != [chunks[0].get("sha256")]
+            for record in records
+        ):
+            raise OptimizerStateRestoreError(
+                "checkpoint per-process values differ and cannot fill a shared array."
+            )
+        whole = _load_piece(
+            generation_dir,
+            jax.process_index(),
+            chunks[0],
+            target.shape,
+            layout,
+            limits,
+        )
+        return [whole[index] for _, index in placement]
+
+    # Each distinct shard is stored once, possibly by another process.
+    shards, intervals = _stored_shard_grid(records, number, target.shape)
+    loaded: dict[_Bounds, np.ndarray] = {}
+
+    def load(bounds: _Bounds) -> np.ndarray:
+        if bounds not in loaded:
+            owner, chunk = shards[bounds]
+            shape = tuple(stop - start for start, stop in bounds)
+            loaded[bounds] = _load_piece(
+                generation_dir, owner, chunk, shape, layout, limits
+            )
+        return loaded[bounds]
+
+    return [
+        _stitch_piece(_index_bounds(index, target.shape), intervals, load, layout)
+        for _, index in placement
+    ]
+
+
+def _index_bounds(index: tuple[Any, ...], shape: tuple[int, ...]) -> _Bounds:
+    return tuple((start, stop) for start, stop in _encode_index(index, shape))
+
+
+def _stored_shard_grid(
+    records: list[dict[str, Any]], number: int, shape: tuple[int, ...]
+) -> tuple[dict[_Bounds, tuple[int, dict[str, Any]]], list[list[tuple[int, int]]]]:
+    """Index one array's stored shards and check that they tile it exactly once.
+
+    JAX shards form a grid: each axis is cut into contiguous intervals and every
+    combination of intervals is one shard. Returns the shards by bounds, with
+    their writing process, and the sorted intervals of each axis.
+    """
+    shards: dict[_Bounds, tuple[int, dict[str, Any]]] = {}
     for owner, record in enumerate(records):
         for chunk in record["arrays"][number]["chunks"]:
-            key = json.dumps(chunk.get("index"))
-            if key in chunks:
+            bounds = _chunk_bounds(chunk.get("index"), shape)
+            if bounds in shards:
                 raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
-            chunks[key] = (owner, chunk)
-    loaded: dict[str, np.ndarray] = {}
-    pieces = []
-    for shard in target.addressable_shards:
-        key = json.dumps(_encode_index(shard.index, target.shape))
-        if key not in loaded:
-            if key not in chunks:
-                raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
-            owner, chunk = chunks[key]
-            loaded[key] = _load_piece(generation_dir, owner, chunk, shard.data, limits)
-        pieces.append(loaded[key])
-    return pieces
+            shards[bounds] = (owner, chunk)
+    intervals = [
+        sorted({bounds[axis] for bounds in shards}) for axis in range(len(shape))
+    ]
+    for axis_intervals, dimension in zip(intervals, shape, strict=True):
+        if (
+            not axis_intervals
+            or axis_intervals[0][0] != 0
+            or axis_intervals[-1][1] != dimension
+            or any(
+                previous[1] != current[0]
+                for previous, current in itertools.pairwise(axis_intervals)
+            )
+        ):
+            raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
+    if len(shards) != math.prod(len(axis_intervals) for axis_intervals in intervals):
+        raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
+    return shards, intervals
+
+
+def _chunk_bounds(index: Any, shape: tuple[int, ...]) -> _Bounds:
+    """Validate an untrusted shard index against the target shape."""
+    if not isinstance(index, list) or len(index) != len(shape):
+        raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
+    bounds = []
+    for pair, dimension in zip(index, shape, strict=True):
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(type(value) is not int for value in pair)
+            or not (
+                0 <= pair[0] < pair[1] <= dimension
+                or (pair == [0, 0] and dimension == 0)
+            )
+        ):
+            raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
+        bounds.append((pair[0], pair[1]))
+    return tuple(bounds)
+
+
+def _stitch_piece(
+    bounds: _Bounds,
+    intervals: list[list[tuple[int, int]]],
+    load: Callable[[_Bounds], np.ndarray],
+    layout: tuple[np.dtype, tuple[int, ...]],
+) -> np.ndarray:
+    """Return the stored data for ``bounds``, copying only across shard edges."""
+    cells = list(
+        itertools.product(
+            *(
+                _overlapping(axis_intervals, start, stop)
+                for axis_intervals, (start, stop) in zip(intervals, bounds, strict=True)
+            )
+        )
+    )
+    if len(cells) == 1:
+        (cell,) = cells
+        data = load(cell)
+        return data if cell == bounds else data[_relative(bounds, cell)]
+    stored_dtype, trailing = layout
+    shape = tuple(stop - start for start, stop in bounds)
+    piece = np.empty((*shape, *trailing), dtype=stored_dtype)
+    for cell in cells:
+        overlap = tuple(
+            (max(start, cell_start), min(stop, cell_stop))
+            for (start, stop), (cell_start, cell_stop) in zip(bounds, cell, strict=True)
+        )
+        piece[_relative(overlap, bounds)] = load(cell)[_relative(overlap, cell)]
+    return piece
+
+
+def _overlapping(
+    axis_intervals: list[tuple[int, int]], start: int, stop: int
+) -> list[tuple[int, int]]:
+    if start == stop:
+        # A zero-length axis has the single interval (0, 0).
+        return axis_intervals
+    first = bisect.bisect_right(axis_intervals, start, key=lambda interval: interval[0])
+    last = bisect.bisect_left(axis_intervals, stop, key=lambda interval: interval[0])
+    return axis_intervals[first - 1 : last]
+
+
+def _relative(inner: _Bounds, outer: _Bounds) -> tuple[slice, ...]:
+    """Slice ``inner`` bounds out of an array covering ``outer`` bounds."""
+    return tuple(
+        slice(start - origin, stop - origin)
+        for (start, stop), (origin, _) in zip(inner, outer, strict=True)
+    )
+
+
+def _assemble_array(
+    target: Any,
+    placement: list[tuple[Any, tuple[Any, ...]]],
+    pieces: list[np.ndarray],
+) -> Any:
+    """Place host pieces with the template leaf's sharding."""
+    if isinstance(target, np.ndarray):
+        return pieces[0]
+    sharding = getattr(target, "sharding", None)
+    if sharding is None:
+        return _place_piece(pieces[0], target, None)
+    arrays = [
+        _place_piece(piece, target, device)
+        for (device, _), piece in zip(placement, pieces, strict=True)
+    ]
+    return jax.make_array_from_single_device_arrays(
+        target.shape, sharding, arrays, dtype=target.dtype
+    )
 
 
 def _is_key_array(value: Any) -> bool:
-    return isinstance(value, jax.Array) and jax.dtypes.issubdtype(
-        value.dtype, jax.dtypes.prng_key
+    return isinstance(value, (jax.Array, jax.ShapeDtypeStruct)) and (
+        jax.dtypes.issubdtype(value.dtype, jax.dtypes.prng_key)
     )
+
+
+def _storage_layout(target: Any) -> tuple[np.dtype, tuple[int, ...]]:
+    """Return the stored dtype and the trailing dimensions of raw key data."""
+    if not _is_key_array(target):
+        return np.dtype(target.dtype), ()
+    stored = jax.eval_shape(jax.random.key_data, target)
+    return np.dtype(stored.dtype), tuple(stored.shape[len(target.shape) :])
 
 
 def _is_global_array(value: Any, node: dict[str, Any]) -> bool:
@@ -427,21 +599,22 @@ def _load_piece(
     generation_dir: Path,
     rank: int,
     chunk: dict[str, Any],
-    target: Any,
+    shape: tuple[int, ...],
+    layout: tuple[np.dtype, tuple[int, ...]],
     limits: ArrayCheckpointLimits,
-) -> Any:
+) -> np.ndarray:
     name = chunk.get("file")
     if not isinstance(name, str) or not re.fullmatch(
         r"leaf-\d{6}-shard-\d{6}\.npy", name
     ):
         raise OptimizerStateRestoreError("checkpoint shard filename is invalid.")
     path = generation_dir / f"rank-{rank:05d}" / name
-    if chunk.get("shape") != list(target.shape):
+    if chunk.get("shape") != list(shape):
         raise OptimizerStateRestoreError("checkpoint shard shape mismatch.")
     # Typed PRNG keys are stored as their raw key data.
-    stored = jax.random.key_data(target) if _is_key_array(target) else target
-    stored_dtype = np.dtype(stored.dtype)
-    expected_bytes = stored.size * stored_dtype.itemsize
+    stored_dtype, trailing = layout
+    stored_shape = (*shape, *trailing)
+    expected_bytes = math.prod(stored_shape) * stored_dtype.itemsize
     if expected_bytes > limits.max_array_bytes:
         raise OptimizerStateRestoreError("checkpoint array exceeds per-array limit.")
     with _open_checkpoint_file(path) as handle:
@@ -473,12 +646,10 @@ def _load_piece(
     data = np.frombuffer(
         payload, dtype=np.uint8, count=expected_bytes, offset=stream.tell()
     ).copy()
-    return data.view(stored_dtype).reshape(stored.shape)
+    return data.view(stored_dtype).reshape(stored_shape)
 
 
 def _place_piece(data: np.ndarray, target: Any, device: Any | None) -> Any:
-    if not isinstance(target, jax.Array):
-        return data
     placed = jax.device_put(data, device)
     if _is_key_array(target):
         return jax.random.wrap_key_data(placed, impl=jax.random.key_impl(target))

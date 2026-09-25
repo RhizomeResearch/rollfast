@@ -30,9 +30,9 @@ trusted-local pickle helper requires `trusted=True` to load; it is not a reader 
 
 `save_array_state_checkpoint` and `load_array_state_checkpoint` use a separate version 1 array format. Loading requires
 a template rebuilt from the same compiled plan, explicit allocation limits, and the matching model identity. The reader
-checks the array layout and checksums and requires the original process count and equivalent sharding. It does not read
-pickle files or arbitrary Equinox model checkpoints. See [state and checkpoints](state_and_checkpoints.md) for the
-complete save and restore example.
+checks shard coverage and checksums, requires the original process count, and restores onto the template's placement. It
+does not read pickle files or arbitrary Equinox model checkpoints. See [state and checkpoints](state_and_checkpoints.md)
+for the complete save and restore example.
 
 An older training application may have stored `(model, optimizer_state, random_key)` directly with Equinox rather than
 using a Rollfast fine-tuning checkpoint. Its own reader, model template, configuration, and dependency lock define that

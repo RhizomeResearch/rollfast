@@ -62,7 +62,7 @@ test-multidevice-cpu:
     XLA_FLAGS: "--xla_force_host_platform_device_count=4"
   script:
     - uv run python -c "import jax; assert jax.local_device_count() >= 4, jax.devices()"
-    - uv run pytest tests/test_multidevice_cpu.py tests/finetune/test_array_storage.py::test_local_shards_restore_to_same_layout_and_reject_repartition tests/finetune/test_array_storage.py::test_replicated_shards_are_written_once_and_restored_to_every_replica --junitxml=report-multidevice.xml
+    - uv run pytest tests/test_multidevice_cpu.py tests/finetune/test_array_storage.py --junitxml=report-multidevice.xml
   artifacts:
     reports:
       junit: report-multidevice.xml

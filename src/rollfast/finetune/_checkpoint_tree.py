@@ -32,7 +32,8 @@ def describe_tree(value: Any) -> tuple[dict[str, Any], list[Any]]:
     def visit(node: Any, depth: int) -> dict[str, Any]:
         if depth > 64:
             raise ValueError("checkpoint tree exceeds maximum depth (64).")
-        if isinstance(node, (jax.Array, np.ndarray)):
+        # Shape-only leaves describe restore targets without allocating them.
+        if isinstance(node, (jax.Array, np.ndarray, jax.ShapeDtypeStruct)):
             dtype = node.dtype
             if (
                 not jax.dtypes.issubdtype(dtype, jax.dtypes.prng_key)
@@ -112,9 +113,11 @@ def match_tree_schema(actual: Any, expected: Any, *, path: str = "checkpoint") -
         raise TypeError(f"{path} has malformed state schema.")
     if actual.keys() != expected.keys():
         raise ValueError(f"{path} state schema fields mismatch.")
-    # Scalar values come from the checkpoint; children are matched recursively.
+    # Scalar values come from the checkpoint and array placement from the restore
+    # template; children are matched recursively.
     if any(
-        actual[key] != expected[key] for key in expected.keys() - {"value", "children"}
+        actual[key] != expected[key]
+        for key in expected.keys() - {"value", "scope", "children"}
     ):
         raise ValueError(f"{path} state schema mismatch.")
     if "children" in expected:
@@ -186,14 +189,14 @@ def _type_name(value: Any) -> str:
 
 
 def _array_scope(value: Any) -> str:
-    if not isinstance(value, jax.Array):
+    # Host arrays and unsharded shape-only leaves hold one per-process value.
+    sharding = getattr(value, "sharding", None)
+    if sharding is None:
         return "local"
+    devices = sharding.device_set
     return (
         "global"
-        if len(value.sharding.device_set) > 1
-        or any(
-            device.process_index != jax.process_index()
-            for device in value.sharding.device_set
-        )
+        if len(devices) > 1
+        or any(device.process_index != jax.process_index() for device in devices)
         else "local"
     )

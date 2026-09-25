@@ -311,57 +311,6 @@ def test_strict_restore_rejects_missing_declared_component():
         )
 
 
-@pytest.mark.skipif(jax.local_device_count() < 2, reason="requires multiple devices")
-def test_local_shards_restore_to_same_layout_and_reject_repartition(tmp_path):
-    devices = jax.devices()
-    mesh = Mesh(np.asarray(devices), ("data",))
-    shape = (len(devices) * 2, len(devices) * 2)
-
-    def build(spec):
-        sharding = NamedSharding(mesh, spec)
-        trainable = {"w": jax.device_put(jnp.ones(shape), sharding)}
-        plan = TinyPlan(
-            trainable=trainable,
-            labels={"w": "head"},
-            group_specs={"head": TinyGroup("head", "head", None, 1.0, True)},
-        )
-        bundle = rfft.adamw_from_plan(
-            plan, total_steps=4, schedule="constant", clip_global_norm=None
-        )
-        checkpoint = rfft.make_state_checkpoint(
-            bundle,
-            bundle.init(plan.trainable),
-            model_checkpoint_id="sharded-model-0",
-            counters={"successful_update": 0},
-        )
-        return bundle, checkpoint
-
-    source_bundle, source = build(P("data", None))
-    path = tmp_path / "sharded.rfarr"
-    rfft.save_array_state_checkpoint(path, source, limits=LIMITS)
-    restored = rfft.load_array_state_checkpoint(
-        path,
-        source_bundle,
-        template=source,
-        model_checkpoint_id="sharded-model-0",
-        limits=LIMITS,
-    )
-    restored_moment = next(
-        leaf for leaf in jax.tree.leaves(restored.state) if leaf.shape == shape
-    )
-    assert restored_moment.sharding == NamedSharding(mesh, P("data", None))
-
-    changed_bundle, changed_template = build(P(None, "data"))
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="shard layout mismatch"):
-        rfft.load_array_state_checkpoint(
-            path,
-            changed_bundle,
-            template=changed_template,
-            model_checkpoint_id="sharded-model-0",
-            limits=LIMITS,
-        )
-
-
 @pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
 @pytest.mark.parametrize(
     ("mesh_shape", "spec", "distinct_shards"),
@@ -454,6 +403,209 @@ def test_replicated_shards_are_written_once_and_restored_to_every_replica(
             applied_updates=1,
             limits=LIMITS,
         )
+
+
+def _shape_only(tree):
+    return jax.tree.map(
+        lambda leaf: jax.ShapeDtypeStruct(
+            leaf.shape, leaf.dtype, sharding=leaf.sharding
+        ),
+        tree,
+    )
+
+
+def _assert_restored_onto(restored, expected, template):
+    for actual, value, target in zip(
+        jax.tree.leaves(restored),
+        jax.tree.leaves(expected),
+        jax.tree.leaves(template),
+        strict=True,
+    ):
+        assert actual.sharding.is_equivalent_to(target.sharding, actual.ndim)
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(value))
+
+
+def test_shape_only_templates_restore_without_template_arrays(tmp_path):
+    plan, bundle = _bundle()
+    saved, template = _checkpoints(plan, bundle)
+    path = tmp_path / "optimizer.rfarr"
+    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+
+    abstract = replace(template, state=_shape_only(template.state))
+    loaded = rfft.load_array_state_checkpoint(
+        path,
+        bundle,
+        template=abstract,
+        model_checkpoint_id="training-model-1",
+        applied_updates=1,
+        limits=LIMITS,
+    )
+    _assert_restored_onto(loaded.state, saved.state, template.state)
+
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="must be concrete"):
+        rfft.load_array_state_checkpoint(
+            path,
+            bundle,
+            template=replace(
+                abstract,
+                rng=replace(template.rng, forward=_shape_only(template.rng.forward)),
+            ),
+            model_checkpoint_id="training-model-1",
+            limits=LIMITS,
+        )
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="shape-only arrays"):
+        rfft.save_array_state_checkpoint(
+            tmp_path / "abstract.rfarr", abstract, limits=LIMITS
+        )
+
+
+def _placement_checkpoint(bundle, state, updates):
+    return rfft.make_state_checkpoint(
+        bundle,
+        state,
+        model_checkpoint_id="placement-model-0",
+        counters={"successful_update": updates},
+    )
+
+
+def _load_placement(path, bundle, template_state):
+    return rfft.load_array_state_checkpoint(
+        path,
+        bundle,
+        template=_placement_checkpoint(bundle, template_state, 0),
+        model_checkpoint_id="placement-model-0",
+        limits=LIMITS,
+    )
+
+
+def _trained_placement_state(trainable):
+    plan = TinyPlan(
+        trainable=trainable,
+        labels={name: "head" for name in trainable},
+        group_specs={"head": TinyGroup("head", "head", None, 1.0, True)},
+    )
+    bundle = rfft.adamw_from_plan(
+        plan, total_steps=4, schedule="constant", clip_global_norm=None
+    )
+    state = bundle.init(plan.trainable)
+    # Updates replicate scalar counters that init leaves on one device.
+    _, state = bundle.update(plan.trainable, state, plan.trainable)
+    return plan, bundle, state
+
+
+@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+def test_trained_state_restores_onto_eager_init_and_shape_only_templates(tmp_path):
+    mesh = Mesh(np.asarray(jax.devices()[:4]), ("data",))
+    plan, bundle, state = _trained_placement_state(
+        {
+            "w": jax.device_put(
+                jnp.arange(32, dtype=jnp.float32).reshape(8, 4),
+                NamedSharding(mesh, P("data", None)),
+            ),
+            "r": jax.device_put(
+                jnp.arange(4, dtype=jnp.float32), NamedSharding(mesh, P())
+            ),
+        }
+    )
+    saved = _placement_checkpoint(bundle, state, 1)
+    path = tmp_path / "trained.rfarr"
+    rfft.save_array_state_checkpoint(path, saved, limits=LIMITS)
+    init_state = bundle.init(plan.trainable)
+
+    for template_state in (init_state, _shape_only(init_state)):
+        restored = _load_placement(path, bundle, template_state)
+        _assert_restored_onto(restored.state, state, template_state)
+    rfft.restore_state_checkpoint(
+        bundle,
+        saved,
+        model_checkpoint_id="placement-model-0",
+        template=_placement_checkpoint(bundle, init_state, 0),
+    )
+
+    # One device is filled by stitching the four stored row shards together.
+    single_device = jax.tree.map(
+        lambda leaf: jax.device_put(leaf, jax.devices()[0]), init_state
+    )
+    restored = _load_placement(path, bundle, single_device)
+    _assert_restored_onto(restored.state, state, single_device)
+
+
+@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+def test_replicated_and_single_device_placements_are_interchangeable(tmp_path):
+    mesh = Mesh(np.asarray(jax.devices()[:4]), ("data",))
+    _, bundle, replicated = _trained_placement_state(
+        {"r": jax.device_put(jnp.arange(4.0), NamedSharding(mesh, P()))}
+    )
+    single_device = jax.tree.map(
+        lambda leaf: jax.device_put(leaf, jax.devices()[1]), replicated
+    )
+
+    for saved, target in ((replicated, single_device), (single_device, replicated)):
+        path = tmp_path / f"{len(list(tmp_path.iterdir()))}.rfarr"
+        rfft.save_array_state_checkpoint(
+            path, _placement_checkpoint(bundle, saved, 1), limits=LIMITS
+        )
+        template = jax.tree.map(zeros_like_preserving_sharding, target)
+        restored = _load_placement(path, bundle, template)
+        _assert_restored_onto(restored.state, saved, template)
+
+
+@pytest.mark.skipif(jax.local_device_count() < 4, reason="requires four devices")
+def test_sharded_state_restores_onto_a_different_partition(tmp_path):
+    from rollfast.finetune import array_storage
+
+    devices = np.asarray(jax.devices()[:4])
+    rows = Mesh(devices, ("data",))
+    grid = Mesh(devices.reshape(2, 2), ("data", "model"))
+    weight = jnp.arange(64, dtype=jnp.float32).reshape(8, 8)
+    _, bundle, state = _trained_placement_state(
+        {"w": jax.device_put(weight, NamedSharding(rows, P("data", None)))}
+    )
+    path = tmp_path / "sharded.rfarr"
+    rfft.save_array_state_checkpoint(
+        path, _placement_checkpoint(bundle, state, 1), limits=LIMITS
+    )
+
+    # Each target piece overlaps several stored row shards or a part of one.
+    for sharding in (
+        NamedSharding(rows, P(None, "data")),
+        NamedSharding(grid, P("data", "model")),
+        jax.sharding.SingleDeviceSharding(jax.devices()[3]),
+    ):
+        template = jax.tree.map(
+            lambda leaf, sharding=sharding: jax.ShapeDtypeStruct(
+                leaf.shape,
+                leaf.dtype,
+                sharding=sharding if leaf.shape == weight.shape else leaf.sharding,
+            ),
+            state,
+        )
+        restored = _load_placement(path, bundle, template)
+        _assert_restored_onto(restored.state, state, template)
+
+    # Stored shards must tile each array exactly once.
+    pointer = json.loads(path.read_text())
+    index_file = array_storage._generation_root(path) / pointer["generation"]
+    index_file = index_file / "index.json"
+    original = json.loads(index_file.read_text())
+    moment = next(
+        number
+        for number, entry in enumerate(original["records"][0]["arrays"])
+        if len(entry["chunks"]) == 4
+    )
+    for tamper in (
+        lambda chunks: chunks.pop(),
+        lambda chunks: chunks[1].update(index=[[1, 3], [0, 8]]),
+    ):
+        index = json.loads(json.dumps(original))
+        tamper(index["records"][0]["arrays"][moment]["chunks"])
+        index_file.write_text(json.dumps(index))
+        pointer["sha256"] = hashlib.sha256(index_file.read_bytes()).hexdigest()
+        path.write_text(json.dumps(pointer))
+        with pytest.raises(
+            rfft.OptimizerStateRestoreError, match="shard layout mismatch"
+        ):
+            _load_placement(path, bundle, state)
 
 
 def test_corruption_and_failed_publication_preserve_last_complete_checkpoint(

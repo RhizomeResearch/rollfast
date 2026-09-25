@@ -222,3 +222,37 @@ def test_rejected_master_steps_keep_collective_participation(declared_axis):
     np.testing.assert_array_equal(
         finite, [False] + [True] * (jax.local_device_count() - 1)
     )
+
+
+def test_eager_bundle_init_places_parameter_state_like_parameters():
+    import rollfast.finetune as rfft
+    from tests.finetune.helpers import TinyGroup, TinyPlan
+
+    mesh = Mesh(np.asarray(jax.devices()), ("data",))
+    sharding = NamedSharding(mesh, P("data", None))
+    params = {
+        "w": jax.device_put(jnp.ones((jax.local_device_count() * 2, 2)), sharding)
+    }
+    plan = TinyPlan(
+        trainable=params,
+        labels={"w": "head"},
+        group_specs={"head": TinyGroup("head", "head", None, 1.0, True)},
+    )
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=4,
+        schedule="constant",
+        accumulation_steps=2,
+        ema=rfft.EMAConfig(enabled=True),
+    )
+
+    # Traced parameters carry no sharding inside jax.jit, so init runs eagerly.
+    state = bundle.init(params)
+
+    parameter_state = [
+        leaf for leaf in jax.tree.leaves(state) if leaf.shape == params["w"].shape
+    ]
+    assert len(parameter_state) == 4  # Adam moments, accumulator, and EMA.
+    assert all(
+        leaf.sharding.is_equivalent_to(sharding, leaf.ndim) for leaf in parameter_state
+    )

@@ -53,9 +53,25 @@ opt_state = rfft.load_state_checkpoint(
 
 For a non-executable checkpoint on a shared POSIX filesystem, use the array helpers. Supply explicit limits and rebuild
 a trusted template from the same compiled plan and expected component structures. All participating JAX processes call
-save and load in the same order. The template supplies Python container types, static fields and target sharding; the
+save and load in the same order. The template supplies Python container types, static fields and target placement; the
 file supplies only metadata and numeric array bytes. See
 [`examples/finetuning/array_checkpoint.py`](../../examples/finetuning/array_checkpoint.py) for a runnable example.
+
+Each restored array takes the placement of its template leaf, which may differ from the saved layout. `optim.init` keeps
+parameter sharding when called eagerly. Inside `jax.jit`, traced parameters carry no sharding, so compiled
+initialization needs explicit `out_shardings`; plain Optax initializers behave the same way. To avoid allocating a
+template state, use `jax.ShapeDtypeStruct` leaves with the target sharding, for example from the training step's state
+shardings. Typed PRNG keys must remain concrete arrays.
+
+```python
+abstract_state = jax.tree.map(
+    lambda leaf, sharding: jax.ShapeDtypeStruct(
+        leaf.shape, leaf.dtype, sharding=sharding
+    ),
+    jax.eval_shape(optim.init, trainable),
+    state_shardings,
+)
+```
 
 ```python
 limits = rfft.ArrayCheckpointLimits(
@@ -96,7 +112,7 @@ opt_state = checkpoint.state
 ```
 
 The reader validates the plan fingerprint, effective group table, optimizer configuration, expected model identity,
-component tree, leaf shape and dtype, sharding layout, file lengths and SHA-256 checksums before returning state. These
+component tree, leaf shape and dtype, shard coverage, file lengths and SHA-256 checksums before returning state. These
 checks detect incompatibility and accidental damage; they do not authenticate the checkpoint's origin. Apply source
 admission and access controls separately. Pass the training model's identity and successful-update count from an
 independently restored model artifact. An evaluated EMA or SWA model is a distinct artifact.
@@ -104,10 +120,12 @@ independently restored model artifact. An evaluated EMA or SWA model is a distin
 The array format is versioned separately from the logical optimizer checkpoint schema. It writes uncompressed NumPy
 arrays with pickle disabled and supports bf16, complex arrays and typed PRNG keys without numeric conversion. The reader
 requires finite caller-selected limits. Checkpoint metadata must be JSON serializable. It restores onto the same process
-count and the same partition of each sharded array; changing the partition requires an explicit migration outside this
-reader. Each distinct shard is written once, by the process that holds its primary replica, and restored to every device
-that holds a copy. A shared POSIX filesystem is required for multiple processes because a process may read shards
-written by another. Run only one writer per path at a time.
+count. Each distinct shard is written once, by the process that holds its primary replica. On restore, every piece a
+device needs is assembled from the stored shards that overlap it, after checking that they tile the array exactly once,
+so a different mesh, partition, replication or single-device placement is supported. Per-process values, such as
+separate RNG streams, fill an array shared across processes only when every process stored identical bytes. A shared
+POSIX filesystem is required for multiple processes because a process may read shards written by another. Run only one
+writer per path at a time.
 
 Writers create immutable generations and atomically replace a small index after every participant has written and synced
 its shards. A failed write leaves the previous completed generation readable. Incomplete generations are never loaded;

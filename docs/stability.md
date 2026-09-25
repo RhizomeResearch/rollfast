@@ -58,4 +58,5 @@ major version is not automatically portable.
 Pickle helpers are for trusted local files only. The versioned array checkpoint helpers use numeric NumPy files and a
 trusted local template for non-executable restoration. Strict restoration validates the effective group table and state
 tree for new checkpoints; older logical checkpoints can receive full structural validation with an explicit template.
-The array reader requires matching process count and shard layout on a shared POSIX filesystem.
+The array reader requires a matching process count and a shared POSIX filesystem; restored arrays take the template's
+placement.
