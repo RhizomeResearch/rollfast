@@ -1,6 +1,7 @@
 """Strict optimizer checkpoint restoration and non-executable storage tests."""
 
 import copy
+import errno
 import hashlib
 import io
 import json
@@ -141,6 +142,16 @@ def _read_index(path):
     return generation, json.loads(payload)
 
 
+def _npy_bytes(array):
+    buffer = io.BytesIO()
+    np.save(buffer, array, allow_pickle=False)
+    return buffer.getvalue()
+
+
+def _first_chunk(index):
+    return index["records"][0]["arrays"][0]["chunks"][0]
+
+
 def _publish_index(path, index):
     """Replace the published index and update the pointer checksum to match."""
     pointer = json.loads(path.read_text())
@@ -221,43 +232,97 @@ def test_strict_restore_rejects_changed_group_and_state_shape():
         )
 
 
-def test_safe_reader_rejects_wrong_identity_and_limits(tmp_path):
+@pytest.mark.parametrize(
+    ("overrides", "cause"),
+    [
+        pytest.param(
+            {"model_checkpoint_id": "wrong"}, "model checkpoint mismatch", id="model"
+        ),
+        pytest.param(
+            {"base_model_value_hash": "wrong"},
+            "base model hash mismatch",
+            id="base-model",
+        ),
+        pytest.param(
+            {"applied_updates": 2}, "applied update mismatch", id="applied-updates"
+        ),
+    ],
+)
+def test_safe_reader_rejects_wrong_identity_or_update_position(
+    tmp_path, overrides, cause
+):
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
     rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
 
-    with pytest.raises(
-        rfft.OptimizerStateRestoreError, match="model checkpoint mismatch"
-    ):
+    with pytest.raises(rfft.OptimizerStateRestoreError, match=cause):
         rfft.load_array_state_checkpoint(
             path,
             bundle,
             template=template,
-            model_checkpoint_id="wrong",
             limits=ARRAY_LIMITS,
+            **{"model_checkpoint_id": "training-model-1", **overrides},
         )
 
-    with pytest.raises(
-        rfft.OptimizerStateRestoreError, match="base model hash mismatch"
-    ):
-        rfft.load_array_state_checkpoint(
-            path,
-            bundle,
-            template=template,
-            model_checkpoint_id="training-model-1",
-            base_model_value_hash="wrong",
-            limits=ARRAY_LIMITS,
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_manifest_bytes", 0),
+        ("max_arrays", -1),
+        ("max_shards", True),
+        ("max_array_bytes", 1.5),
+        ("max_total_bytes", 0),
+    ],
+)
+def test_array_limits_require_positive_integers(field, value):
+    with pytest.raises(ValueError, match=f"{field} must be a positive integer"):
+        replace(ARRAY_LIMITS, **{field: value})
+
+
+_LIMIT_CASES = [
+    pytest.param(
+        "max_manifest_bytes", 64, "manifest exceeds byte limit", id="manifest"
+    ),
+    pytest.param("max_arrays", 1, "array count exceeds limit", id="arrays"),
+    pytest.param("max_shards", 1, "shard allocation exceeds limit", id="shards"),
+    pytest.param(
+        "max_array_bytes", 1, "array exceeds per-array limit", id="array-bytes"
+    ),
+    pytest.param(
+        "max_total_bytes", 1, "shard allocation exceeds limit", id="total-bytes"
+    ),
+]
+
+
+@pytest.mark.parametrize(("field", "value", "cause"), _LIMIT_CASES)
+def test_writer_enforces_each_limit(tmp_path, field, value, cause):
+    plan, bundle = _bundle()
+    saved, _ = _checkpoints(plan, bundle)
+    path = tmp_path / "optimizer.rfarr"
+
+    with pytest.raises(rfft.OptimizerStateRestoreError, match=f"write failed.*{cause}"):
+        rfft.save_array_state_checkpoint(
+            path, saved, limits=replace(ARRAY_LIMITS, **{field: value})
         )
-    with pytest.raises(
-        rfft.OptimizerStateRestoreError, match="allocation exceeds limit"
-    ):
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(("field", "value", "cause"), _LIMIT_CASES)
+def test_reader_enforces_each_limit(tmp_path, field, value, cause):
+    plan, bundle = _bundle()
+    saved, template = _checkpoints(plan, bundle)
+    path = tmp_path / "optimizer.rfarr"
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
+
+    with pytest.raises(rfft.OptimizerStateRestoreError, match=f"read failed.*{cause}"):
         rfft.load_array_state_checkpoint(
             path,
             bundle,
             template=template,
             model_checkpoint_id="training-model-1",
-            limits=replace(ARRAY_LIMITS, max_total_bytes=1),
+            limits=replace(ARRAY_LIMITS, **{field: value}),
         )
 
 
@@ -279,14 +344,12 @@ def test_array_shards_are_plain_npy_byte_files(tmp_path):
             if jnp.issubdtype(leaf.dtype, jax.dtypes.prng_key)
             else leaf
         ).tobytes()
-        reference = io.BytesIO()
-        np.save(reference, np.frombuffer(expected, dtype=np.uint8), allow_pickle=False)
-        assert stored == reference.getvalue()
+        assert stored == _npy_bytes(np.frombuffer(expected, dtype=np.uint8))
         assert chunk["size"] == len(stored)
         assert chunk["sha256"] == hashlib.sha256(stored).hexdigest()
 
 
-def test_array_checkpoint_paths_reject_symlinked_directories(tmp_path):
+def test_array_checkpoint_paths_reject_symlinks(tmp_path):
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     real = tmp_path / "real"
@@ -313,6 +376,23 @@ def test_array_checkpoint_paths_reject_symlinked_directories(tmp_path):
             model_checkpoint_id="training-model-1",
             limits=ARRAY_LIMITS,
         )
+
+    # A shard file must not be a symlink either, even to identical bytes.
+    generation, index = _read_index(real / "optimizer.rfarr")
+    shard = generation / "rank-00000" / _first_chunk(index)["file"]
+    target = tmp_path / "shard-copy.npy"
+    target.write_bytes(shard.read_bytes())
+    shard.unlink()
+    shard.symlink_to(target)
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="read failed") as error:
+        rfft.load_array_state_checkpoint(
+            real / "optimizer.rfarr",
+            bundle,
+            template=template,
+            model_checkpoint_id="training-model-1",
+            limits=ARRAY_LIMITS,
+        )
+    assert error.value.__cause__.errno == errno.ELOOP
 
 
 def test_safe_round_trip_preserves_accumulation_and_precision_parts(tmp_path):
@@ -570,9 +650,7 @@ def test_sharded_state_restores_onto_a_different_partition(tmp_path):
             _load_placement(path, bundle, state)
 
 
-def test_failed_publication_keeps_last_checkpoint_and_truncated_shard_is_rejected(
-    tmp_path, monkeypatch
-):
+def test_failed_publication_keeps_last_complete_checkpoint(tmp_path, monkeypatch):
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
@@ -596,29 +674,129 @@ def test_failed_publication_keeps_last_checkpoint_and_truncated_shard_is_rejecte
     )
     assert loaded.manifest["counters"]["successful_update"] == 1
 
-    generation, _ = _read_index(path)
-    shard = next(generation.glob("rank-00000/*.npy"))
-    shard.write_bytes(shard.read_bytes()[:-1])
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="shard size mismatch"):
-        rfft.load_array_state_checkpoint(
-            path,
-            bundle,
-            template=template,
-            model_checkpoint_id="training-model-1",
-            limits=ARRAY_LIMITS,
-        )
+
+def _edit_index(edit):
+    def tamper(path):
+        _, index = _read_index(path)
+        edit(index)
+        _publish_index(path, index)
+
+    return tamper
 
 
-def test_safe_reader_rejects_unsafe_shard_name(tmp_path):
+def _edit_first_shard(edit, *, record=True):
+    """Rewrite the first shard; ``record`` also stores its new size and checksum."""
+
+    def tamper(path):
+        generation, index = _read_index(path)
+        chunk = _first_chunk(index)
+        shard = generation / "rank-00000" / chunk["file"]
+        payload = edit(shard.read_bytes())
+        shard.write_bytes(payload)
+        if record:
+            chunk.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+            _publish_index(path, index)
+
+    return tamper
+
+
+def _edit_index_without_pointer(path):
+    generation, index = _read_index(path)
+    index["metadata"] = {"edited": True}
+    (generation / "index.json").write_text(json.dumps(index))
+
+
+def _newer_pointer_version(path):
+    pointer = json.loads(path.read_text())
+    path.write_text(json.dumps({**pointer, "version": 2}))
+
+
+def _first_shard_as_directory(path):
+    generation, index = _read_index(path)
+    shard = generation / "rank-00000" / _first_chunk(index)["file"]
+    shard.unlink()
+    shard.mkdir()
+
+
+@pytest.mark.parametrize(
+    ("tamper", "cause"),
+    [
+        pytest.param(
+            _newer_pointer_version, "unsupported array checkpoint pointer", id="pointer"
+        ),
+        pytest.param(
+            _edit_index_without_pointer, "index checksum mismatch", id="index-checksum"
+        ),
+        pytest.param(
+            _edit_index(lambda index: index.update(process_count=2)),
+            "process count mismatch",
+            id="process-count",
+        ),
+        pytest.param(
+            _edit_index(
+                lambda index: index["manifest"].update(base_model_value_hash="other")
+            ),
+            "manifest differs from process records",
+            id="manifest",
+        ),
+        pytest.param(
+            _edit_index(lambda index: index.update(metadata={"epoch": 2})),
+            "metadata differs from process records",
+            id="metadata",
+        ),
+        pytest.param(
+            _edit_index(lambda index: _first_chunk(index).update(index=[[0, 1]])),
+            "local array layout mismatch",
+            id="local-layout",
+        ),
+        pytest.param(
+            _edit_index(
+                lambda index: _first_chunk(index).update(file="../../outside.npy")
+            ),
+            "filename is invalid",
+            id="filename",
+        ),
+        pytest.param(
+            _first_shard_as_directory, "not a regular file", id="non-regular-file"
+        ),
+        pytest.param(
+            _edit_first_shard(lambda payload: payload[:-1], record=False),
+            "shard size mismatch",
+            id="truncated-shard",
+        ),
+        pytest.param(
+            _edit_first_shard(
+                lambda payload: payload[:-1] + bytes([payload[-1] ^ 0xFF]),
+                record=False,
+            ),
+            "shard checksum mismatch",
+            id="flipped-byte",
+        ),
+        pytest.param(
+            _edit_first_shard(lambda payload: payload[:6] + b"\x09" + payload[7:]),
+            "unsupported NPY version",
+            id="npy-version",
+        ),
+        pytest.param(
+            _edit_first_shard(lambda _: _npy_bytes(np.zeros(1, np.float32))),
+            "shard header mismatch",
+            id="npy-header",
+        ),
+        pytest.param(
+            _edit_first_shard(lambda payload: payload + b"\x00"),
+            "payload length mismatch",
+            id="npy-payload",
+        ),
+    ],
+)
+def test_reader_rejects_damaged_or_inconsistent_checkpoints(tmp_path, tamper, cause):
     plan, bundle = _bundle()
     saved, template = _checkpoints(plan, bundle)
     path = tmp_path / "optimizer.rfarr"
     rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
-    _, index = _read_index(path)
-    index["records"][0]["arrays"][0]["chunks"][0]["file"] = "../../outside.npy"
-    _publish_index(path, index)
+    tamper(path)
 
-    with pytest.raises(rfft.OptimizerStateRestoreError, match="filename is invalid"):
+    with pytest.raises(rfft.OptimizerStateRestoreError, match=cause):
         rfft.load_array_state_checkpoint(
             path,
             bundle,

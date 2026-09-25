@@ -135,6 +135,22 @@ def test_divergent_views_survive_checkpoint_round_trip_with_model_state():
 
 
 @pytest.mark.parametrize("view", ["ema", "swa"])
+def test_averaged_view_is_selected_outside_jit(view):
+    plan = tiny_plan()
+    bundle = _bundle(plan, averaging=True)
+    params = plan.trainable
+    state = bundle.init(params)
+    for _ in range(2):
+        updates, state = bundle.update(ones_like_trainable(params), state, params)
+        params = apply_updates(params, updates, stochastic=False)
+    bundle.eval_params(params, state, view=view)
+
+    select = jax.jit(lambda params, state: bundle.eval_params(params, state, view=view))
+    with pytest.raises(TypeError, match="must be selected outside jax.jit"):
+        select(params, state)
+
+
+@pytest.mark.parametrize("view", ["ema", "swa"])
 def test_uninitialized_averaged_view_is_rejected(view):
     plan = tiny_plan()
     bundle = _bundle(plan, averaging=True)
@@ -201,6 +217,66 @@ def test_view_binding_rejects_missing_or_mismatched_state():
             checkpoint,
             **{**kwargs, "view": "ema"},
         )
+    checkpoint_without_averages = rfft.make_state_checkpoint(
+        bundle,
+        _bundle(plan).init(plan.trainable),
+        model_checkpoint_id="model-0",
+        counters={"successful_update": 0},
+    )
+    with pytest.raises(ValueError, match="missing enabled averaging state"):
+        rfft.bind_evaluation_view(
+            bundle, plan, plan.trainable, checkpoint_without_averages, **kwargs
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error", "cause"),
+    [
+        pytest.param(
+            {"optimizer_checkpoint_id": ""},
+            ValueError,
+            "optimizer_checkpoint_id is required",
+            id="optimizer-id",
+        ),
+        pytest.param(
+            {"applied_updates": True},
+            TypeError,
+            "non-negative integer",
+            id="bool-position",
+        ),
+        pytest.param(
+            {"applied_updates": 1.0},
+            TypeError,
+            "non-negative integer",
+            id="float-position",
+        ),
+        pytest.param(
+            {"applied_updates": -1},
+            ValueError,
+            "non-negative integer",
+            id="negative-position",
+        ),
+    ],
+)
+def test_view_binding_rejects_invalid_arguments(overrides, error, cause):
+    plan = CombiningPlan(tiny_plan())
+    bundle = _bundle(plan)
+    checkpoint = rfft.make_state_checkpoint(
+        bundle,
+        bundle.init(plan.trainable),
+        model_checkpoint_id="model-0",
+        counters={"successful_update": 0},
+    )
+    arguments = {
+        "view": "optimizer",
+        "model_checkpoint_id": "model-0",
+        "optimizer_checkpoint_id": "optimizer-0",
+        "applied_updates": 0,
+        **overrides,
+    }
+
+    with pytest.raises(error, match=cause):
+        rfft.bind_evaluation_view(bundle, plan, plan.trainable, checkpoint, **arguments)
 
 
 def test_view_binding_rejects_missing_model_state_snapshot():
