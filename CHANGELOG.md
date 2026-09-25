@@ -13,7 +13,7 @@ Fine-tuning state, checkpoint, and update coordination improvements. Detailed re
 ### Added
 
 - Add bounded, non-executable array checkpoints with checksum and layout validation, including distributed saves and
-  restores on a shared filesystem.
+  restores on a shared filesystem that store each replicated shard once.
 - Add checkpoint-bound optimizer and EMA evaluation views, explicit update outcomes for accumulation windows, and a
   host-side check for incomplete accumulation.
 

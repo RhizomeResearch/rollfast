@@ -67,7 +67,9 @@ def save_array_state_checkpoint(
 
     All participating JAX processes must invoke this function in the same order.
     One checkpoint path has one writer at a time. A failed generation is never
-    published, so a previous completed checkpoint remains readable.
+    published, so a previous completed checkpoint remains readable. Each distinct
+    shard of a sharded array is written once, by the process that holds its
+    primary replica.
     """
     destination = Path(path)
     rank = jax.process_index()
@@ -102,7 +104,8 @@ def save_array_state_checkpoint(
         for index, array in enumerate(arrays):
             chunks = []
             shards = (
-                array.addressable_shards
+                # Replicas hold identical data; readers share the primary copy.
+                [shard for shard in array.addressable_shards if shard.replica_id == 0]
                 if _is_global_array(array, array_nodes[index])
                 else (None,)
             )
@@ -207,7 +210,8 @@ def load_array_state_checkpoint(
     """Load and strictly validate a checkpoint against a trusted local template.
 
     Distributed processes call this function together with the same path and
-    checkpoint identity. The restored arrays retain the template's sharding.
+    checkpoint identity. A process may read shards written by another process.
+    The restored arrays retain the template's sharding.
     """
     error: Exception | None = None
     prepared: _PreparedLoad | None = None
@@ -344,21 +348,12 @@ def _prepare_array_load(
     rank = jax.process_index()
     prepared_pieces: list[list[np.ndarray]] = []
     for number, target in enumerate(expected_arrays):
-        chunks = records[rank]["arrays"][number]["chunks"]
         if _is_global_array(target, expected_nodes[number]):
-            target_shards = target.addressable_shards
-            if len(chunks) != len(target_shards):
-                raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
-            pieces = []
-            for chunk, shard in zip(chunks, target_shards, strict=True):
-                if chunk.get("index") != _encode_index(shard.index, target.shape):
-                    raise OptimizerStateRestoreError(
-                        "checkpoint shard layout mismatch."
-                    )
-                piece = _load_piece(generation_dir, rank, chunk, shard.data, limits)
-                pieces.append(piece)
-            prepared_pieces.append(pieces)
+            prepared_pieces.append(
+                _load_global_pieces(generation_dir, records, number, target, limits)
+            )
         else:
+            chunks = records[rank]["arrays"][number]["chunks"]
             if len(chunks) != 1 or chunks[0].get("index") is not None:
                 raise OptimizerStateRestoreError(
                     "checkpoint local array layout mismatch."
@@ -374,6 +369,39 @@ def _prepare_array_load(
         nodes=expected_nodes,
         pieces=prepared_pieces,
     )
+
+
+def _load_global_pieces(
+    generation_dir: Path,
+    records: list[dict[str, Any]],
+    number: int,
+    target: jax.Array,
+    limits: ArrayCheckpointLimits,
+) -> list[np.ndarray]:
+    """Return one host piece per addressable shard of ``target``.
+
+    Each distinct shard is stored once, possibly by another process, so chunks
+    are matched by logical index; local replicas share one loaded piece.
+    """
+    # JSON text is a canonical, hashable key for untrusted index records.
+    chunks: dict[str, tuple[int, dict[str, Any]]] = {}
+    for owner, record in enumerate(records):
+        for chunk in record["arrays"][number]["chunks"]:
+            key = json.dumps(chunk.get("index"))
+            if key in chunks:
+                raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
+            chunks[key] = (owner, chunk)
+    loaded: dict[str, np.ndarray] = {}
+    pieces = []
+    for shard in target.addressable_shards:
+        key = json.dumps(_encode_index(shard.index, target.shape))
+        if key not in loaded:
+            if key not in chunks:
+                raise OptimizerStateRestoreError("checkpoint shard layout mismatch.")
+            owner, chunk = chunks[key]
+            loaded[key] = _load_piece(generation_dir, owner, chunk, shard.data, limits)
+        pieces.append(loaded[key])
+    return pieces
 
 
 def _is_key_array(value: Any) -> bool:

@@ -104,8 +104,10 @@ independently restored model artifact. An evaluated EMA or SWA model is a distin
 The array format is versioned separately from the logical optimizer checkpoint schema. It writes uncompressed NumPy
 arrays with pickle disabled and supports bf16, complex arrays and typed PRNG keys without numeric conversion. The reader
 requires finite caller-selected limits. Checkpoint metadata must be JSON serializable. It restores onto the same process
-count and equivalent shard layout; changing the partition requires an explicit migration outside this reader. A shared
-POSIX filesystem is required for multiple processes. Run only one writer per path at a time.
+count and the same partition of each sharded array; changing the partition requires an explicit migration outside this
+reader. Each distinct shard is written once, by the process that holds its primary replica, and restored to every device
+that holds a copy. A shared POSIX filesystem is required for multiple processes because a process may read shards
+written by another. Run only one writer per path at a time.
 
 Writers create immutable generations and atomically replace a small index after every participant has written and synced
 its shards. A failed write leaves the previous completed generation readable. Incomplete generations are never loaded;

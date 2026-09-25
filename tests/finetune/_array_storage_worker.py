@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import rollfast.finetune as rfft
+from rollfast.finetune import array_storage
+from rollfast.utils import zeros_like_preserving_sharding
 
 from .helpers import TinyGroup, TinyPlan
 
@@ -25,13 +28,17 @@ def main(address: str, rank: int, path: Path) -> None:
         initialization_timeout=30,
     )
     try:
-        sharding = NamedSharding(Mesh(np.asarray(jax.devices()), ("data",)), P("data"))
+        mesh = Mesh(np.asarray(jax.devices()), ("data",))
         values = jax.make_array_from_process_local_data(
-            sharding, np.asarray([rank + 1], dtype=np.float32)
+            NamedSharding(mesh, P("data")), np.asarray([rank + 1], dtype=np.float32)
+        )
+        # Rank 1 holds no primary replica, so it restores rank 0's shard files.
+        replicated = jax.make_array_from_process_local_data(
+            NamedSharding(mesh, P()), np.asarray([3.0, 4.0], dtype=np.float32)
         )
         plan = TinyPlan(
-            trainable={"w": values},
-            labels={"w": "head"},
+            trainable={"w": values, "r": replicated},
+            labels={"w": "head", "r": "head"},
             group_specs={
                 "head": TinyGroup(
                     "head", "head", None, lr_multiplier=1.0, weight_decay=True
@@ -42,17 +49,19 @@ def main(address: str, rank: int, path: Path) -> None:
             plan, total_steps=4, schedule="constant", clip_global_norm=None
         )
         state = bundle.init(plan.trainable)
+        # Nonzero moments make misplaced cross-process shards observable.
+        _, state = bundle.update(plan.trainable, state, plan.trainable)
         rng = rfft.init_rng_streams(jax.random.key(rank + 100))
         saved = rfft.make_state_checkpoint(
             bundle,
             state,
             model_checkpoint_id="distributed-model-0",
-            counters={"successful_update": 0},
+            counters={"successful_update": 1},
             rng=rng,
         )
         template = rfft.make_state_checkpoint(
             bundle,
-            bundle.init(plan.trainable),
+            jax.tree.map(zeros_like_preserving_sharding, state),
             model_checkpoint_id="distributed-model-0",
             counters={"successful_update": 0},
             rng=rfft.init_rng_streams(jax.random.key(0)),
@@ -62,6 +71,20 @@ def main(address: str, rank: int, path: Path) -> None:
         )
         rfft.save_array_state_checkpoint(path, saved, limits=limits)
         pointer_before_failure = path.read_bytes()
+        generation = json.loads(pointer_before_failure)["generation"]
+        index = json.loads(
+            (
+                array_storage._generation_root(path) / generation / "index.json"
+            ).read_text()
+        )
+        for number in range(len(index["records"][0]["arrays"])):
+            shard_indices = [
+                json.dumps(chunk["index"])
+                for record in index["records"]
+                for chunk in record["arrays"][number]["chunks"]
+                if chunk["index"] is not None
+            ]
+            assert len(shard_indices) == len(set(shard_indices)), shard_indices
         invalid = (
             replace(saved, manifest={**saved.manifest, "state_schema": {}})
             if rank == 1
@@ -79,7 +102,7 @@ def main(address: str, rank: int, path: Path) -> None:
             bundle,
             template=template,
             model_checkpoint_id="distributed-model-0",
-            applied_updates=0,
+            applied_updates=1,
             limits=limits,
         )
         assert jnp.array_equal(loaded.rng.forward, rng.forward)
