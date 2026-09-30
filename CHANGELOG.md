@@ -5,6 +5,18 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+## [1.2.1] - 2026-09-30
+
+### Fixed
+
+- Make plan and model-state structural fingerprints deterministic across Python processes, including supported static
+  callables, partial arguments, dataclasses, and dtype metadata. Reject unsupported static metadata explicitly.
+
+### Changed
+
+- Introduce deterministic fingerprint format v1 and require its version during strict optimizer checkpoint restore. Old
+  unversioned checkpoints are incompatible and must be regenerated; checkpoint schema and array format remain v1.
+
 ## [1.2.0] - 2026-09-24
 
 Fine-tuning state, checkpoint, and update coordination improvements. Detailed release notes are available in

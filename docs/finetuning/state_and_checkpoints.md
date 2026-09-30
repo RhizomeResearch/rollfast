@@ -33,6 +33,38 @@ restored_state = rfft.restore_state_checkpoint(
 )
 ```
 
+## Fingerprint format v1
+
+Rollfast 1.2.1 replaces the previous unversioned, textual PyTree fingerprint with a deterministic structural identity.
+New manifests contain `plan_fingerprint_version: 1`; the logical checkpoint schema and array format remain at version 1.
+Strict restore rejects missing or unsupported fingerprint versions. Already-written optimizer checkpoints must be
+regenerated using the corrected release. There is no automatic migration: do not rewrite supplied manifests, copy a
+fingerprint into a reconstructed bundle, or bypass strict validation to admit old checkpoints.
+
+The fingerprint is the hexadecimal SHA-256 of UTF-8 JSON with sorted object keys, compact separators, ASCII escaping,
+and nonfinite floats forbidden. Its payload includes the fingerprint version; typed PyTree nodes with their module and
+qualified type names, auxiliary metadata, and ordered children; typed leaf paths; shapes/dtypes; labels; logical IDs and
+aliases; layout and sharding metadata; normalized groups; and lineage. Raw parameter values are excluded. The same
+structural encoding is used for the logical-ID table and model-state structure hashes.
+
+Static metadata uses tagged representations for `None`, booleans, integers, strings, finite floats (hexadecimal), plain
+NumPy dtypes (name and dtype string), named types, tuples/lists, sets/frozensets, dictionaries, dataclass types and
+named fields, and registered PyTrees with supported auxiliary data and leaves. Dictionary entries and unordered
+collections are sorted by their encoded JSON. Registered empty metadata such as Equinox's missing-field sentinel needs
+no special integration import. Static arrays, opaque objects, unsupported values, and cyclic or excessively deep
+metadata are refused rather than represented using `repr`.
+
+Named functions and canonical function wrappers use module and qualified-name references that must resolve to the actual
+callable in an already-loaded module. Unwrapped functions must have no closure. Plain `functools.partial` values include
+the callable, positional arguments, and keyword arguments. Lambdas, local functions, bound methods, unresolved wrappers,
+and opaque callable instances are unsupported. Dataclass or registered PyTree configuration objects are represented by
+their supported fields. A different activation or partial argument therefore changes the fingerprint.
+
+This identity is independent of process addresses, hash seeds, and checkout locations when rebuilding the same named
+code and metadata. It assumes matching application and dependency code: symbolic function/type names are not hashes of
+executable code. It does not authenticate code or checkpoint provenance. Unsupported metadata raises `TypeError`;
+nonfinite static floats raise `ValueError`.
+
 The local helpers use pickle, which may execute code while loading. Pass `trusted=True` only as an explicit
 acknowledgement that the file is trusted and local:
 
@@ -132,10 +164,11 @@ its shards. A failed write leaves the previous completed generation readable. In
 administrators can remove them after excluding concurrent writers and readers. Old generations remain available until
 separately retired. File checksums do not replace a signed or otherwise authenticated artifact inventory.
 
-Existing logical checkpoints without `state_schema` remain loadable through the older trusted path. Pass `template=` to
-`restore_state_checkpoint` when qualifying such a checkpoint's tree. The array reader requires a checkpoint produced
-with the new structural schema and does not load pickle files. The pickle helper now also writes through a temporary
-file before replacing its destination, but its read path still executes pickle and requires `trusted=True`.
+Logical checkpoints using fingerprint format v1 but without `state_schema` remain loadable through the trusted path.
+Pass `template=` to `restore_state_checkpoint` when qualifying such a checkpoint's tree. The array reader requires a
+checkpoint produced with the new structural schema and does not load pickle files. The pickle helper now also writes
+through a temporary file before replacing its destination, but its read path still executes pickle and requires
+`trusted=True`.
 
 Equimo model/delta serialization remains separate. Save the Equimo model or fine-tuning bundle with Equimo, and save the
 Rollfast optimizer state alongside it with the same training step metadata.

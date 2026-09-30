@@ -1,5 +1,6 @@
 import functools
 import pickle
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -641,3 +642,21 @@ def test_state_checkpoint_manifest_records_runtime_counters():
     assert checkpoint.manifest["counters"]["microstep"] == 3
     assert checkpoint.manifest["counters"]["successful_update"] == 2
     assert checkpoint.manifest["components"]["counters"] is True
+
+
+@pytest.mark.parametrize("version", [None, 0, 2, True])
+def test_strict_restore_rejects_unversioned_or_unknown_fingerprints(version):
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=4, schedule="constant")
+    checkpoint = rfft.make_state_checkpoint(
+        bundle, bundle.init(plan.trainable), model_checkpoint_id="model"
+    )
+    manifest = dict(checkpoint.manifest)
+    if version is None:
+        del manifest["plan_fingerprint_version"]
+    else:
+        manifest["plan_fingerprint_version"] = version
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="fingerprint version"):
+        rfft.restore_state_checkpoint(
+            bundle, replace(checkpoint, manifest=manifest), model_checkpoint_id="model"
+        )

@@ -19,6 +19,7 @@ from ._checkpoint_tree import (
     describe_tree,
     match_tree_schema,
 )
+from ._fingerprint import FINGERPRINT_VERSION
 from .config import SCHEMA_VERSION, OptimizerBundle
 
 _CHECKPOINT_FORMAT = "rollfast.finetune.optimizer_state"
@@ -164,6 +165,12 @@ def restore_state_checkpoint(
         )
     _validate_checkpoint_schema(checkpoint)
     if strict:
+        version = checkpoint.manifest.get("plan_fingerprint_version")
+        if type(version) is not int or version != FINGERPRINT_VERSION:
+            raise OptimizerStateRestoreError(
+                "unsupported or missing plan fingerprint version; "
+                "regenerate checkpoints written with the old fingerprint algorithm."
+            )
         expected = bundle.report.fingerprint
         actual = checkpoint.manifest.get("fingerprint")
         if actual != expected:

@@ -20,6 +20,7 @@ from rollfast.optim.adam8 import (
 )
 from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
+from ._fingerprint import FINGERPRINT_VERSION
 from .update_status import UpdateStatus, _update_status
 
 SCHEMA_VERSION = 1
@@ -1425,6 +1426,7 @@ class OptimizerBundle:
         return {
             "schema_version": SCHEMA_VERSION,
             "rollfast_revision": _rollfast_revision(),
+            "plan_fingerprint_version": FINGERPRINT_VERSION,
             "plan_fingerprint": self.report.fingerprint,
             "fingerprint": self.report.fingerprint,
             "model_checkpoint_id": None,

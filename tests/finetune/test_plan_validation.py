@@ -1,7 +1,9 @@
+import functools
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -324,3 +326,53 @@ def test_complex_plan_rejects_real_master_parameter_cast():
             ),
             total_steps=1,
         )
+
+
+class _StaticToy(eqx.Module):
+    weight: jax.Array
+    configuration: object = eqx.field(static=True)
+
+
+def _static_fingerprint(configuration, *, value=1.0):
+    tree = _StaticToy(jnp.full((2,), value), configuration)
+    return rfft.plan_fingerprint(tree, jax.tree.map(lambda _: "head", tree))
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        jax.nn.relu,
+        functools.partial(jax.nn.gelu, approximate=False),
+        functools.partial(jax.nn.gelu, None),
+    ],
+)
+def test_fingerprint_preserves_static_callable_configuration(changed):
+    original = functools.partial(jax.nn.gelu, approximate=True)
+    assert _static_fingerprint(original) == _static_fingerprint(
+        functools.partial(jax.nn.gelu, approximate=True), value=2.0
+    )
+    assert _static_fingerprint(original) != _static_fingerprint(changed)
+    assert _static_fingerprint(
+        {"a": frozenset({1, 2}), "b": [True]}
+    ) == _static_fingerprint({"b": [True], "a": frozenset({2, 1})})
+    assert _static_fingerprint((1,)) != _static_fingerprint([1])
+
+
+def _closed_activation(value):
+    return lambda x: x + value
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        object(),
+        lambda x: x,
+        _closed_activation(1),
+        object().__str__,
+        jnp.ones((2,)),
+        functools.partial(jax.nn.gelu, object()),
+    ],
+)
+def test_fingerprint_rejects_unsupported_static_metadata(metadata):
+    with pytest.raises(TypeError, match="fingerprint static"):
+        _static_fingerprint(metadata)

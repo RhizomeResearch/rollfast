@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -306,3 +311,31 @@ def leaf_estimation_plan(*, mixed: bool) -> TinyPlan:
             tags=("bias",),
         )
     return TinyPlan(trainable=trainable, labels=labels, group_specs=groups)
+
+
+def fingerprint_process(mode, seed, cwd, *args):
+    environment = {
+        **os.environ,
+        "PYTHONHASHSEED": str(seed),
+        "JAX_PLATFORMS": "cpu",
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=1 --xla_cpu_multi_thread_eigen=false",
+        "OMP_NUM_THREADS": "1",
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tests.finetune._fingerprint_worker",
+            mode,
+            *map(str, args),
+        ],
+        env=environment,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)

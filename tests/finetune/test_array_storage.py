@@ -23,7 +23,14 @@ from rollfast.finetune import array_storage
 from rollfast.finetune._checkpoint_tree import checkpoint_parts, describe_tree
 from rollfast.utils import zeros_like_preserving_sharding
 
-from .helpers import ARRAY_LIMITS, TinyGroup, TinyPlan, ones_like_trainable, tiny_plan
+from .helpers import (
+    ARRAY_LIMITS,
+    TinyGroup,
+    TinyPlan,
+    fingerprint_process,
+    ones_like_trainable,
+    tiny_plan,
+)
 
 requires_four_devices = pytest.mark.skipif(
     jax.local_device_count() < 4, reason="requires four devices"
@@ -846,3 +853,15 @@ def test_distributed_shards_and_local_rng_round_trip(tmp_path):
     for worker, (stdout, stderr) in zip(workers, outputs, strict=True):
         assert worker.returncode == 0, stdout + stderr
         assert "restored" in stdout
+
+
+def test_static_callable_checkpoint_survives_restart(tmp_path):
+    path = tmp_path / "optimizer.rfarr"
+    written = fingerprint_process("write", 1, tmp_path, path)
+    files = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    other_directory = tmp_path / "reader"
+    other_directory.mkdir()
+    restored = fingerprint_process("read", 42, other_directory, path)
+    assert written["fingerprint"] == restored["fingerprint"]
+    assert restored["mode"] == "read"
+    assert all(file.read_bytes() == contents for file, contents in files.items())

@@ -10,7 +10,7 @@ import pytest
 import rollfast.finetune as rfft
 from rollfast import apply_updates
 from rollfast.integrations import equimo
-from tests.finetune.helpers import ARRAY_LIMITS, tiny_plan
+from tests.finetune.helpers import ARRAY_LIMITS, fingerprint_process, tiny_plan
 
 
 @pytest.mark.integration
@@ -180,3 +180,13 @@ def test_safe_checkpoint_resumes_equimo_probe_plans(tmp_path, task, trainability
         jax.tree.leaves(expected), jax.tree.leaves(actual), strict=True
     ):
         assert jnp.allclose(left, right, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.integration
+def test_equimo_fingerprints_survive_restart(tmp_path):
+    first = fingerprint_process("equimo", 1, tmp_path)
+    other_directory = tmp_path / "reader"
+    other_directory.mkdir()
+    second = fingerprint_process("equimo", 42, other_directory)
+    assert set(first) == {"pooled", "pointwise", "eomt", "pmt"}
+    assert first == second

@@ -11,6 +11,12 @@ from typing import Any
 import jax.numpy as jnp
 import jax.tree_util as jtu
 
+from ._fingerprint import (
+    FINGERPRINT_VERSION,
+    encode_path,
+    encode_static,
+    encode_treedef,
+)
 from ._protocols import FineTunePlanProtocol, GroupSpecProtocol
 from .config import PlanGroup
 
@@ -170,7 +176,10 @@ def plan_fingerprint(
 ) -> str:
     """Hash plan structure, leaf metadata, labels, and groups.
 
-    Raw parameter values are intentionally excluded.
+    Format v1 hashes canonical JSON of typed PyTree nodes and supported static
+    metadata, including named callables and partial arguments. Unsupported static
+    metadata raises TypeError. Raw parameter values are intentionally excluded.
+    See docs/finetuning/state_and_checkpoints.md for the identity contract.
     """
 
     _check_treedef_alignment(trainable, labels, "trainable", "labels")
@@ -193,7 +202,7 @@ def plan_fingerprint(
             dtype = arr.dtype.name
         leaf_records.append(
             {
-                "path": _path_to_string(path),
+                "path": encode_path(path),
                 "shape": shape,
                 "dtype": dtype,
                 "label": label,
@@ -225,12 +234,15 @@ def plan_fingerprint(
         ]
 
     payload = {
-        "treedef": str(jtu.tree_structure(trainable, is_leaf=_is_none_leaf)),
+        "plan_fingerprint_version": FINGERPRINT_VERSION,
+        "treedef": encode_treedef(jtu.tree_structure(trainable, is_leaf=_is_none_leaf)),
         "leaves": leaf_records,
         "groups": group_records,
         "lineage": _lineage_record(lineage),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -260,7 +272,7 @@ def _logical_id_table_hash(trainable: Any, identities: Any) -> str:
         identity = identity_leaves[index]
         records.append(
             {
-                "path": _path_to_string(path),
+                "path": encode_path(path),
                 "logical_id": _identity_field(identity, "logical_id"),
                 "alias_group": _identity_field(identity, "alias_group"),
                 "layout": _identity_metadata_field(identity, "layout"),
@@ -286,21 +298,24 @@ def _model_state_structure_hash(model_state: Any | None) -> str | None:
             dtype = type(leaf).__name__
         records.append(
             {
-                "path": _path_to_string(path),
+                "path": encode_path(path),
                 "shape": shape,
                 "dtype": dtype,
             }
         )
     return _hash_json(
         {
-            "treedef": str(jtu.tree_structure(model_state)),
+            "plan_fingerprint_version": FINGERPRINT_VERSION,
+            "treedef": encode_treedef(jtu.tree_structure(model_state)),
             "leaves": records,
         }
     )
 
 
 def _hash_json(payload: Any) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -388,15 +403,7 @@ def _identity_field(identity: Any, name: str) -> Any:
 
 
 def _identity_metadata_field(identity: Any, name: str) -> Any:
-    value = _identity_field(identity, name)
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if isinstance(value, tuple | list):
-        return tuple(
-            item if isinstance(item, str | int | float | bool | None) else str(item)
-            for item in value
-        )
-    return str(value)
+    return encode_static(_identity_field(identity, name))
 
 
 def _lineage_record(lineage: Any | None) -> dict[str, Any]:
