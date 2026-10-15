@@ -111,3 +111,25 @@ def test_discriminative_adamw_rules_return_direct_builder_inputs():
     assert groups["head_decay"].effective_lr == pytest.approx(2e-3)
     assert groups["head_decay"].weight_decay_value == pytest.approx(0.01)
     assert groups["head_no_decay"].weight_decay_value == 0.0
+
+
+def test_precision_presets_name_supported_low_precision_policies():
+    mixed = rfft.bf16_mixed_precision()
+    assert mixed.master_params == "auto"
+    assert mixed.moment_dtype == jnp.float32
+    assert rfft.bf16_mixed_precision(moment_dtype=jnp.bfloat16).moment_dtype == (
+        jnp.bfloat16
+    )
+
+    master_free = rfft.bf16_master_free_precision()
+    assert master_free.master_params == "never"
+    assert master_free.parameter_rounding == "stochastic"
+    assert master_free.moment_dtype == jnp.bfloat16
+
+    fp16 = rfft.fp16_mixed_precision(static_loss_scale=1024.0, growth_interval=10)
+    assert fp16.master_params == "auto"
+    assert fp16.loss_scale == "dynamic"
+    assert fp16.static_loss_scale == 1024.0
+    assert fp16.growth_interval == 10
+    with pytest.raises(ValueError, match="static_loss_scale"):
+        rfft.fp16_mixed_precision(static_loss_scale=0.0)

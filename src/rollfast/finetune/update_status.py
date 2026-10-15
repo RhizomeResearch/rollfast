@@ -82,26 +82,31 @@ def _wrapped_states(state: Any) -> Iterator[Any]:
         state = getattr(state, name)
 
 
+def _pending_microsteps(state: Any) -> Any | None:
+    """Return the microsteps accumulated in ``state``'s open window, if any."""
+    for current in _wrapped_states(state):
+        if hasattr(current, "microsteps_in_window"):
+            return current.microsteps_in_window
+        if hasattr(current, "mini_step"):
+            return current.mini_step
+    return None
+
+
 def validate_accumulation_complete(
     state: Any, accumulation_config: AccumulationConfig
 ) -> None:
     """Raise when a host-side lifecycle boundary has pending microsteps.
 
-    ``state`` may be a compiled optimizer state or an explicit
-    ``AccumulationState``. Call after the final microbatch and before declaring
-    an epoch or run complete. This function does not modify the state.
+    ``state`` may be a compiled optimizer state, an explicit
+    ``AccumulationState``, or a ``FineTuneStepState``. Call after the final
+    microbatch and before declaring an epoch or run complete. This function
+    does not modify the state.
     """
 
     if accumulation_config.steps == 1:
         return
-    for current in _wrapped_states(state):
-        if hasattr(current, "microsteps_in_window"):
-            pending = current.microsteps_in_window
-            break
-        if hasattr(current, "mini_step"):
-            pending = current.mini_step
-            break
-    else:
+    pending = _pending_microsteps(getattr(state, "optimizer_state", state))
+    if pending is None:
         raise ValueError("state has no accumulation window for the supplied config.")
     pending_count = int(jax.device_get(pending))
     if pending_count:

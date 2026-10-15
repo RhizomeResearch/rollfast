@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Any
+
+import jax.numpy as jnp
 
 from .config import (
     AccumulationConfig,
@@ -223,6 +226,49 @@ def bitfit_adamw(
     )
 
 
+def bf16_mixed_precision(*, moment_dtype: Any = jnp.float32) -> PrecisionConfig:
+    """Return BF16 compute with float32 master parameters.
+
+    Masters are created for BF16/FP16 trainable leaves and cast back with
+    round-to-nearest. ``moment_dtype=jnp.bfloat16`` halves moment storage; the
+    optimizer stores BF16 moments with stochastic rounding.
+    """
+
+    return PrecisionConfig(master_params="auto", moment_dtype=moment_dtype)
+
+
+def bf16_master_free_precision(
+    *,
+    moment_dtype: Any = jnp.bfloat16,
+) -> PrecisionConfig:
+    """Return BF16 parameter storage with stochastic rounding and no masters.
+
+    This saves the four bytes per parameter that float32 masters cost. Steps
+    must carry ``RNGStreams``; checkpoints store the rounding stream.
+    """
+
+    return PrecisionConfig(
+        master_params="never",
+        parameter_rounding="stochastic",
+        moment_dtype=moment_dtype,
+    )
+
+
+def fp16_mixed_precision(
+    *,
+    static_loss_scale: float = 2**15,
+    growth_interval: int = 2000,
+) -> PrecisionConfig:
+    """Return FP16 compute with float32 masters and dynamic loss scaling."""
+
+    return PrecisionConfig(
+        master_params="auto",
+        loss_scale="dynamic",
+        static_loss_scale=static_loss_scale,
+        growth_interval=growth_interval,
+    )
+
+
 def _check_positive_finite(name: str, value: float) -> None:
     numeric = float(value)
     if not math.isfinite(numeric) or numeric <= 0.0:
@@ -239,8 +285,11 @@ __all__ = (
     "DEFAULT_NO_DECAY_TAGS",
     "FineTuneOptimizerRecipe",
     "adapters_adamw",
+    "bf16_master_free_precision",
+    "bf16_mixed_precision",
     "bitfit_adamw",
     "discriminative_adamw_rules",
+    "fp16_mixed_precision",
     "full_ft_adamw",
     "head_backbone_adamw",
     "linear_probe_adamw",

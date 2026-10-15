@@ -284,7 +284,9 @@ def _update_leaf(
         return _LeafUpdateResult(grad, state)
     projected = isinstance(state, GaLoreLeafState) and state.projected
     basis_left, basis_right = state.basis_left, state.basis_right
-    moment_grad = grad
+    # Project and square in float32: low-precision matmuls and squares lose
+    # the small gradient components the moments accumulate.
+    moment_grad = grad.astype(jnp.float32)
     mu_prev, nu_prev = state.mu, state.nu
     if projected:
         basis_left, basis_right = _refresh_basis(
@@ -293,7 +295,7 @@ def _update_leaf(
             should_refresh=should_refresh,
             basis_dtype=basis_dtype,
         )
-        moment_grad = _project(grad, basis_left, basis_right, state.orientation)
+        moment_grad = _project(moment_grad, basis_left, basis_right, state.orientation)
         if state_on_basis_refresh == "reset":
             mu_prev = jnp.where(should_refresh, jnp.zeros_like(state.mu), state.mu)
             nu_prev = jnp.where(should_refresh, jnp.zeros_like(state.nu), state.nu)

@@ -179,7 +179,7 @@ def test_quantized_zero_initialization_preserves_derived_sharding(spec, block_si
 @pytest.mark.parametrize("declared_axis", [False, True])
 def test_rejected_master_steps_keep_collective_participation(declared_axis):
     import rollfast.finetune as rfft
-    from rollfast.finetune.step import _apply_scaled_master_grads
+    from rollfast.finetune.step import _commit_update, _unscale_gradients
     from tests.finetune.helpers import tiny_plan
 
     def update(grads, state, params=None):
@@ -197,25 +197,34 @@ def test_rejected_master_steps_keep_collective_participation(declared_axis):
 
     @partial(jax.pmap, axis_name="devices")
     def apply(local_grad):
-        return _apply_scaled_master_grads(
+        grads, finite = _unscale_gradients(
+            bundle, {"w": local_grad}, jnp.array(1.0), jnp.array(1.0)
+        )
+        commit = _commit_update(
             bundle,
             {"w": jnp.ones(2, dtype=jnp.bfloat16)},
             {"w": jnp.ones(2)},
             jnp.array(0),
-            {"w": local_grad},
-            jnp.array(1.0),
-            jnp.array(1.0),
+            grads,
+            finite,
+            sr_key=None,
         )
+        return commit.master, commit.opt_state, commit.accepted
 
-    grads = jnp.ones((jax.local_device_count(), 2)).at[0].set(jnp.nan)
-    _, master, state, finite = apply(grads)
-    expected = np.full(grads.shape, 1.0 - 0.1 * (jax.local_device_count() - 1))
+    count = jax.local_device_count()
+    grads = jnp.ones((count, 2)).at[0].set(jnp.nan)
+    master, state, accepted = apply(grads)
+    if declared_axis:
+        # Partition participants agree, so one overflow rejects every replica.
+        np.testing.assert_array_equal(master["w"], np.ones(grads.shape))
+        np.testing.assert_array_equal(state, [0] * count)
+        np.testing.assert_array_equal(accepted, [False] * count)
+        return
+    expected = np.full(grads.shape, 1.0 - 0.1 * (count - 1))
     expected[0] = 1.0
     np.testing.assert_allclose(master["w"], expected, rtol=1e-6)
-    np.testing.assert_array_equal(state, [0] + [1] * (jax.local_device_count() - 1))
-    np.testing.assert_array_equal(
-        finite, [False] + [True] * (jax.local_device_count() - 1)
-    )
+    np.testing.assert_array_equal(state, [0] + [1] * (count - 1))
+    np.testing.assert_array_equal(accepted, [False] + [True] * (count - 1))
 
 
 def test_eager_bundle_init_places_parameter_state_like_parameters():
@@ -247,3 +256,40 @@ def test_eager_bundle_init_places_parameter_state_like_parameters():
     assert all(
         leaf.sharding.is_equivalent_to(sharding, leaf.ndim) for leaf in parameter_state
     )
+
+
+@pytest.mark.parametrize(
+    "precision",
+    [rfft.bf16_mixed_precision(), rfft.bf16_master_free_precision()],
+    ids=["masters", "master_free_stochastic"],
+)
+def test_low_precision_finetune_step_preserves_parameter_sharding(precision):
+    mesh = Mesh(np.asarray(jax.devices()), ("data",))
+    sharding = NamedSharding(mesh, P("data", None))
+    shape = (jax.local_device_count() * 2, 4)
+    params = {"w": jax.device_put(jnp.ones(shape, dtype=jnp.bfloat16), sharding)}
+    plan = TinyPlan(
+        trainable=params,
+        labels={"w": "head"},
+        group_specs={"head": TinyGroup("head", "head", None, 1.0, False)},
+    )
+    bundle = rfft.compile_optimizer(
+        plan,
+        optimizer=rfft.OptimizerConfig(base_lr=1e-2, weight_decay=0.0),
+        schedule=rfft.ScheduleConfig(kind="constant", total_steps=4),
+        precision=precision,
+    )
+    state = rfft.init_finetune_step_state(bundle, params, rng_seed=0)
+
+    def loss(model, model_state, key):
+        del key
+        return jnp.sum(model["w"].astype(jnp.float32) ** 2), model_state
+
+    step = jax.jit(rfft.make_finetune_update_step(plan, loss, bundle))
+    updated, state, info = step(params, state)
+
+    assert bool(info.update_applied)
+    assert updated["w"].dtype == jnp.bfloat16
+    assert updated["w"].sharding.is_equivalent_to(sharding, 2)
+    if state.master_params is not None:
+        assert state.master_params["w"].sharding.is_equivalent_to(sharding, 2)

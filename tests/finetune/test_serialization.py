@@ -660,3 +660,129 @@ def test_strict_restore_rejects_unversioned_or_unknown_fingerprints(version):
         rfft.restore_state_checkpoint(
             bundle, replace(checkpoint, manifest=manifest), model_checkpoint_id="model"
         )
+
+
+def _low_precision_run(precision):
+    plan = tiny_plan()
+    plan = replace(
+        plan,
+        trainable=jax.tree.map(lambda x: x.astype(jnp.bfloat16), plan.trainable),
+    )
+    bundle = rfft.compile_optimizer(
+        plan,
+        optimizer=rfft.OptimizerConfig(base_lr=1e-2, weight_decay=0.0),
+        schedule=rfft.ScheduleConfig(kind="constant", total_steps=10),
+        gradient_policy=rfft.GradientPolicy(clip_global_norm=None),
+        precision=precision,
+    )
+
+    def loss(model, model_state, key):
+        noise = jax.random.normal(key, ())
+        value = jnp.sum(model["head"]["w"].astype(jnp.float32) ** 2) * (1 + noise**2)
+        return value, {"updates": model_state["updates"] + 1}
+
+    step = jax.jit(
+        rfft.make_finetune_update_step(
+            plan, loss, bundle, state_policy="microbatch_sequential"
+        )
+    )
+    state = rfft.init_finetune_step_state(
+        bundle, plan.trainable, model_state={"updates": jnp.asarray(0)}, rng_seed=5
+    )
+    params, state, _ = step(plan.trainable, state)
+    return bundle, step, params, state
+
+
+@pytest.mark.parametrize(
+    "precision",
+    (
+        rfft.PrecisionConfig(loss_scale="dynamic", static_loss_scale=8.0),
+        rfft.bf16_master_free_precision(),
+    ),
+    ids=("masters_and_loss_scale", "master_free_stochastic"),
+)
+def test_step_state_checkpoint_resumes_the_next_step_exactly(precision):
+    bundle, step, params, state = _low_precision_run(precision)
+
+    checkpoint = rfft.make_step_state_checkpoint(
+        bundle, state, model_checkpoint_id="model-step-1"
+    )
+    loaded = pickle.loads(pickle.dumps(checkpoint))
+    rfft.restore_state_checkpoint(
+        bundle, loaded, model_checkpoint_id="model-step-1", applied_updates=1
+    )
+    resumed = rfft.step_state_from_checkpoint(loaded)
+
+    assert checkpoint.manifest["components"]["rng"] is True
+    assert checkpoint.manifest["counters"]["successful_update"] == 1
+    expected = step(params, state)
+    actual = step(params, resumed)
+    assert jax.tree.structure(actual) == jax.tree.structure(expected)
+    for left, right in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        assert jnp.array_equal(left, right)
+
+
+def test_step_state_checkpoint_rejects_state_it_cannot_store_or_rebuild():
+    bundle, _, _, state = _low_precision_run(rfft.bf16_mixed_precision())
+
+    with pytest.raises(ValueError, match="ema_state"):
+        rfft.make_step_state_checkpoint(
+            bundle,
+            replace(state, ema_state={"w": jnp.ones(1)}),
+            model_checkpoint_id="model-step-1",
+        )
+    plain = rfft.make_state_checkpoint(
+        bundle,
+        state.optimizer_state,
+        model_checkpoint_id="model-step-1",
+        master_params=state.master_params,
+    )
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="counters and RNG"):
+        rfft.step_state_from_checkpoint(plain)
+
+
+def test_low_precision_checkpoints_require_rounding_rng_and_warn_without_masters():
+    bundle, _, _, state = _low_precision_run(rfft.bf16_master_free_precision())
+    with pytest.raises(ValueError, match="stochastic"):
+        rfft.make_state_checkpoint(
+            bundle, state.optimizer_state, model_checkpoint_id="model-step-1"
+        )
+
+    bundle, _, _, state = _low_precision_run(rfft.bf16_mixed_precision())
+    with pytest.warns(UserWarning, match="checkpoint omits them"):
+        rfft.make_state_checkpoint(
+            bundle, state.optimizer_state, model_checkpoint_id="model-step-1"
+        )
+
+
+def test_restore_accepts_manifests_written_before_newer_precision_fields():
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(plan, total_steps=10, schedule="constant")
+    checkpoint = rfft.make_state_checkpoint(
+        bundle, bundle.init(plan.trainable), model_checkpoint_id="model-step-1"
+    )
+    precision = dict(checkpoint.manifest["precision_config"])
+    for field in ("parameter_rounding", "min_loss_scale", "max_loss_scale"):
+        del precision[field]
+    older_manifest = {**checkpoint.manifest, "precision_config": precision}
+    del older_manifest["resolved_precision"]
+    older = replace(checkpoint, manifest=older_manifest)
+
+    restored = rfft.restore_state_checkpoint(
+        bundle, older, model_checkpoint_id="model-step-1"
+    )
+
+    assert restored is checkpoint.state
+    changed = replace(
+        checkpoint,
+        manifest={
+            **older_manifest,
+            "precision_config": {**precision, "max_loss_scale": 2.0**10},
+        },
+    )
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="precision_config"):
+        rfft.restore_state_checkpoint(
+            bundle, changed, model_checkpoint_id="model-step-1"
+        )

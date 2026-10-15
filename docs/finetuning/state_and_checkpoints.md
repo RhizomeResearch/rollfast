@@ -177,3 +177,44 @@ For evaluation, retain the matching model-state snapshot and successful-update c
 checkpoint to `bind_evaluation_view` with an explicit view and both artifact IDs; the returned model, model state and
 view metadata can then travel together to validation or export. See [Fine-Tuning Averaging](averaging.md) for an
 example.
+
+## Composite step state
+
+`make_step_state_checkpoint` packages a `FineTuneStepState` from `make_finetune_update_step` or
+`make_finetune_sam_step`: the optimizer state, master parameters, accumulation record, model state, loss scale, RNG
+streams, and counters. Restoring all of them resumes the next step exactly, including the stochastic-rounding stream of
+`parameter_rounding="stochastic"`. EMA, SWA, AdaLoRA, projection, and Schedule-Free fields of the step state are not
+stored; checkpoint them separately or leave them `None`.
+
+```python
+checkpoint = rfft.make_step_state_checkpoint(
+    optim,
+    step_state,
+    model_checkpoint_id=training_model_id,
+)
+rfft.save_array_state_checkpoint("optimizer.rfarr", checkpoint, limits=limits)
+
+template = rfft.make_step_state_checkpoint(
+    optim,
+    rfft.init_finetune_step_state(optim, trainable, model_state=model_state),
+    model_checkpoint_id=training_model_id,
+)
+loaded = rfft.load_array_state_checkpoint(
+    "optimizer.rfarr",
+    optim,
+    template=template,
+    model_checkpoint_id=training_model_id,
+    applied_updates=applied_updates,
+    limits=limits,
+)
+step_state = rfft.step_state_from_checkpoint(loaded)
+```
+
+A checkpoint whose precision policy keeps master parameters should store them: rebuilding masters from the rounded model
+weights loses the residual updates that only the masters held. `make_state_checkpoint` warns when they are omitted and
+raises for `master_params="always"`. With `parameter_rounding="stochastic"`, it requires the RNG streams.
+
+`RNGStreams`, `StepCounters`, and `FineTuneStepState` are registered PyTrees. `RNGStreams` and `StepCounters` keep the
+field-based array checkpoint schema used by earlier 1.x releases, so their checkpoints remain loadable. Manifests
+written before the `parameter_rounding`, `min_loss_scale`, and `max_loss_scale` precision fields existed compare as if
+they held the defaults.

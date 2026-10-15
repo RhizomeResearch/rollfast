@@ -37,6 +37,13 @@ StepCounter = Literal["optimizer", "micro"]
 NonFinitePolicy = Literal["skip", "none", "raise"]
 Normalization = Literal["examples", "tokens", "pairs", "pixels", "custom", "none"]
 SAMNorm = Literal["global_l2"]
+ParameterRounding = Literal["nearest", "stochastic"]
+PrecisionMode = Literal[
+    "full_precision",
+    "master_mixed_precision",
+    "master_free_stochastic",
+    "master_free_nearest",
+]
 AveragingSourceView = Literal["optimizer", "schedule_free_eval"]
 OptimizerName = Literal[
     "adamw",
@@ -354,7 +361,26 @@ class AccumulationConfig:
 
 @dataclass(frozen=True)
 class PrecisionConfig:
-    """Mixed-precision optimizer-state policy."""
+    """Mixed-precision policy for trainable parameters, gradients, and state.
+
+    ``master_params`` keeps the optimization parameters in
+    ``master_param_dtype`` and casts them back to each visible leaf's dtype with
+    round-to-nearest. ``"auto"`` creates masters when any trainable leaf is
+    BF16 or FP16. A master leaf never has less precision than its visible leaf,
+    and complex leaves keep complex masters.
+
+    ``parameter_rounding`` controls how master-free parameter storage receives
+    updates. ``"stochastic"`` adds each update in float32 and stochastically
+    rounds BF16 leaves back to BF16, drawing keys from the step's
+    ``RNGStreams.stochastic_rounding`` stream. It requires
+    ``master_params="never"``.
+
+    ``expected_model_compute_dtype`` is recorded metadata: Rollfast never casts
+    the model. ``accumulation_dtype`` must match
+    ``AccumulationConfig.accumulate_dtype``, which controls gradient
+    accumulation. ``preconditioner_dtype`` applies to ``kron_adam`` only.
+    Dynamic loss scaling stays within ``[min_loss_scale, max_loss_scale]``.
+    """
 
     expected_model_compute_dtype: Any | None = None
     gradient_dtype: Any = jnp.float32
@@ -370,30 +396,82 @@ class PrecisionConfig:
     growth_factor: float = 2.0
     backoff_factor: float = 0.5
     growth_interval: int = 2000
+    parameter_rounding: ParameterRounding = "nearest"
+    min_loss_scale: float = 1.0
+    max_loss_scale: float = 2.0**24
 
     def __post_init__(self) -> None:
         if self.expected_model_compute_dtype is not None:
             _canonical_dtype(self.expected_model_compute_dtype)
-        _canonical_dtype(self.gradient_dtype)
-        _canonical_dtype(self.accumulation_dtype)
-        _canonical_dtype(self.master_param_dtype)
-        _canonical_dtype(self.moment_dtype)
-        _canonical_dtype(self.preconditioner_dtype)
-        _canonical_dtype(self.update_compute_dtype)
+        for name in (
+            "gradient_dtype",
+            "accumulation_dtype",
+            "master_param_dtype",
+            "moment_dtype",
+            "preconditioner_dtype",
+        ):
+            if not jnp.issubdtype(_canonical_dtype(getattr(self, name)), jnp.inexact):
+                raise ValueError(f"PrecisionConfig.{name} must be a floating dtype.")
+        if _canonical_dtype(self.update_compute_dtype) != jnp.dtype(jnp.float32):
+            raise NotImplementedError(
+                "PrecisionConfig.update_compute_dtype supports only 'float32'; "
+                f"got {_dtype_name(self.update_compute_dtype)!r}. Rollfast "
+                "optimizers compute updates in float32."
+            )
+        if self.master_params not in {"auto", "always", "never"}:
+            raise ValueError(
+                "PrecisionConfig.master_params must be 'auto', 'always', or "
+                f"'never'; got {self.master_params!r}."
+            )
+        if (
+            self.master_params != "never"
+            and _canonical_dtype(self.master_param_dtype).itemsize < 4
+        ):
+            raise ValueError(
+                "PrecisionConfig.master_param_dtype must have at least float32 "
+                "precision; low-precision masters lose the small updates they "
+                "exist to keep."
+            )
         if self.cast_back != "nearest":
             raise NotImplementedError(
                 "PrecisionConfig.cast_back supports only 'nearest'; "
-                f"got {self.cast_back!r}. Use rollfast.apply_updates(..., "
-                "stochastic=True) for stochastic BF16 parameter updates."
+                f"got {self.cast_back!r}. For stochastic BF16 parameter storage, "
+                "use parameter_rounding='stochastic' with master_params='never'."
             )
-        if self.static_loss_scale <= 0.0:
-            raise ValueError("static_loss_scale must be positive.")
-        if self.growth_factor <= 1.0:
-            raise ValueError("growth_factor must be > 1.")
+        if self.parameter_rounding not in {"nearest", "stochastic"}:
+            raise ValueError(
+                "PrecisionConfig.parameter_rounding must be 'nearest' or "
+                f"'stochastic'; got {self.parameter_rounding!r}."
+            )
+        if self.parameter_rounding == "stochastic" and self.master_params != "never":
+            raise ValueError(
+                "parameter_rounding='stochastic' rounds master-free parameter "
+                "storage; set master_params='never'. FP32 masters already keep "
+                "small updates."
+            )
+        if self.loss_scale not in {"none", "static", "dynamic"}:
+            raise ValueError(
+                "PrecisionConfig.loss_scale must be 'none', 'static', or "
+                f"'dynamic'; got {self.loss_scale!r}."
+            )
+        _check_positive_finite("static_loss_scale", self.static_loss_scale)
+        _check_positive_finite("min_loss_scale", self.min_loss_scale)
+        _check_positive_finite("max_loss_scale", self.max_loss_scale)
+        if not math.isfinite(self.growth_factor) or self.growth_factor <= 1.0:
+            raise ValueError("growth_factor must be finite and > 1.")
         if not 0.0 < self.backoff_factor < 1.0:
             raise ValueError("backoff_factor must satisfy 0 < value < 1.")
         if self.growth_interval <= 0:
             raise ValueError("growth_interval must be positive.")
+        if self.min_loss_scale > self.max_loss_scale:
+            raise ValueError("min_loss_scale cannot exceed max_loss_scale.")
+        if self.loss_scale == "dynamic" and not (
+            self.min_loss_scale <= self.static_loss_scale <= self.max_loss_scale
+        ):
+            raise ValueError(
+                "dynamic loss scaling requires min_loss_scale <= "
+                "static_loss_scale <= max_loss_scale."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -414,6 +492,9 @@ class PrecisionConfig:
             "growth_factor": self.growth_factor,
             "backoff_factor": self.backoff_factor,
             "growth_interval": self.growth_interval,
+            "parameter_rounding": self.parameter_rounding,
+            "min_loss_scale": self.min_loss_scale,
+            "max_loss_scale": self.max_loss_scale,
         }
 
     @classmethod
@@ -444,7 +525,19 @@ class PrecisionConfig:
             growth_factor=data.get("growth_factor", 2.0),
             backoff_factor=data.get("backoff_factor", 0.5),
             growth_interval=data.get("growth_interval", 2000),
+            parameter_rounding=data.get("parameter_rounding", "nearest"),
+            min_loss_scale=data.get("min_loss_scale", 1.0),
+            max_loss_scale=data.get("max_loss_scale", 2.0**24),
         )
+
+
+# Fields added to ``PrecisionConfig.to_dict`` in 1.3.0, within schema version 1.
+# Restores compare older manifests as if they held these defaults.
+_PRECISION_FIELDS_ADDED_IN_1_3 = {
+    "parameter_rounding": "nearest",
+    "min_loss_scale": 1.0,
+    "max_loss_scale": 2.0**24,
+}
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1132,7 @@ class LossScaleState(NamedTuple):
     growth_tracker: Any
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class StepCounters:
     """Logical counters used by fine-tuning step helpers."""
@@ -1052,6 +1146,7 @@ class StepCounters:
     loss_scale_growth_step: Any
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class RNGStreams:
     """Named PRNG streams carried by stateful fine-tuning steps."""
@@ -1063,9 +1158,15 @@ class RNGStreams:
     controller: Any
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FineTuneStepState:
-    """Complete mutable state bundle for stateful fine-tuning step helpers."""
+    """Complete mutable state bundle for stateful fine-tuning step helpers.
+
+    The state is a PyTree, so it can be carried through ``jax.jit`` and
+    ``jax.lax.scan``. ``master_params`` is ``None`` when the precision policy
+    resolves to master-free storage.
+    """
 
     optimizer_state: Any
     model_state: Any | None
@@ -1294,6 +1395,67 @@ class SchedulePoint:
 
 
 @dataclass(frozen=True)
+class PrecisionReport:
+    """Precision policy resolved against a plan's trainable parameters.
+
+    ``mode`` names the parameter-storage regime: ``"master_mixed_precision"``
+    keeps masters, ``"master_free_stochastic"`` and ``"master_free_nearest"``
+    update BF16/FP16 leaves in place, and ``"full_precision"`` has no
+    low-precision trainable leaves. ``moment_rounding`` describes how the
+    optimizer stores moments: ``"none"`` for float32 or wider state.
+    """
+
+    mode: PrecisionMode
+    trainable_dtypes: tuple[str, ...]
+    master_params: bool
+    master_param_dtypes: tuple[str, ...]
+    cast_back: str | None
+    parameter_rounding: ParameterRounding
+    gradient_dtype: str
+    accumulation_dtype: str
+    moment_storage: str
+    moment_rounding: str
+    loss_scale: str
+    expected_model_compute_dtype: str | None
+    visible_param_bytes: int
+    master_param_bytes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "trainable_dtypes": self.trainable_dtypes,
+            "master_params": self.master_params,
+            "master_param_dtypes": self.master_param_dtypes,
+            "cast_back": self.cast_back,
+            "parameter_rounding": self.parameter_rounding,
+            "gradient_dtype": self.gradient_dtype,
+            "accumulation_dtype": self.accumulation_dtype,
+            "moment_storage": self.moment_storage,
+            "moment_rounding": self.moment_rounding,
+            "loss_scale": self.loss_scale,
+            "expected_model_compute_dtype": self.expected_model_compute_dtype,
+            "visible_param_bytes": self.visible_param_bytes,
+            "master_param_bytes": self.master_param_bytes,
+        }
+
+    def __str__(self) -> str:
+        masters = (
+            f"masters={'/'.join(self.master_param_dtypes)} cast_back={self.cast_back}"
+            if self.master_params
+            else f"masters=none parameter_rounding={self.parameter_rounding}"
+        )
+        moments = (
+            self.moment_storage
+            if self.moment_rounding == "none"
+            else f"{self.moment_storage} ({self.moment_rounding} rounding)"
+        )
+        return (
+            f"{self.mode}: params={'/'.join(self.trainable_dtypes)} {masters} "
+            f"moments={moments} loss_scale={self.loss_scale}"
+        )
+
+
+@dataclass(frozen=True)
 class OptimizerReport:
     """Static report for a compiled plan-aware optimizer."""
 
@@ -1310,6 +1472,7 @@ class OptimizerReport:
     schedule_step_counter: StepCounter = "optimizer"
     state_policies: Mapping[str, str] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    precision: PrecisionReport | None = None
 
     def group_table(self, verbose: bool = False) -> tuple[dict[str, Any], ...]:
         rows = []
@@ -1349,8 +1512,10 @@ class OptimizerReport:
             f"fingerprint: {self.fingerprint[:16]}",
             f"trainable params: {self.trainable_params}",
             f"estimated state bytes: {self.estimated_state_bytes}",
-            "groups:",
         ]
+        if self.precision is not None:
+            lines.append(f"precision: {self.precision}")
+        lines.append("groups:")
         for group in self.groups:
             lines.append(
                 "  "
@@ -1441,6 +1606,9 @@ class OptimizerBundle:
             "accumulation_config": self.accumulation_config.to_dict(),
             "precision": self.precision_config.to_dict(),
             "precision_config": self.precision_config.to_dict(),
+            "resolved_precision": None
+            if self.report.precision is None
+            else self.report.precision.to_dict(),
             "sharding": self.sharding_policy.to_dict(),
             "sharding_config": self.sharding_policy.to_dict(),
             "state_offload": self.offload_policy.to_dict(),
@@ -1476,6 +1644,11 @@ def _rollfast_revision() -> str:
 def _check_fraction(name: str, value: float) -> None:
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"{name} must satisfy 0 <= {name} <= 1.")
+
+
+def _check_positive_finite(name: str, value: float) -> None:
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be finite and positive.")
 
 
 def _canonical_dtype(dtype: Any) -> jnp.dtype:
@@ -1518,6 +1691,7 @@ __all__ = (
     "OptimizerReport",
     "PlanGroup",
     "PrecisionConfig",
+    "PrecisionReport",
     "RNGStreams",
     "SAMConfig",
     "SWAConfig",

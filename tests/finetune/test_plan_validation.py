@@ -311,21 +311,19 @@ def test_complex_plan_rejects_adamw8_before_state_initialization():
         )
 
 
-def test_complex_plan_rejects_real_master_parameter_cast():
-    plan = replace(
-        _minimal_compiler_plan(),
-        trainable={"w": jnp.ones((2,), dtype=jnp.complex64)},
+def test_complex_plan_keeps_complex_master_parameters():
+    trainable = {"w": jnp.asarray([1 + 2j, -3 + 0.5j], dtype=jnp.complex64)}
+    plan = replace(_minimal_compiler_plan(), trainable=trainable)
+    precision = rfft.PrecisionConfig(
+        master_params="always", master_param_dtype=jnp.float32
     )
+    bundle = rfft.compile_optimizer(plan, precision=precision, total_steps=1)
 
-    with pytest.raises(ValueError, match=r"AdamW.*real master-parameter.*w"):
-        rfft.compile_optimizer(
-            plan,
-            precision=rfft.PrecisionConfig(
-                master_params="always",
-                master_param_dtype=jnp.float32,
-            ),
-            total_steps=1,
-        )
+    master = rfft.make_master_params(trainable, precision)
+
+    assert master["w"].dtype == jnp.complex64
+    assert jnp.array_equal(master["w"], trainable["w"])
+    assert bundle.report.precision.master_param_dtypes == ("complex64",)
 
 
 class _StaticToy(eqx.Module):

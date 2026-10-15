@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pickle
 import tempfile
+import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -20,7 +21,14 @@ from ._checkpoint_tree import (
     match_tree_schema,
 )
 from ._fingerprint import FINGERPRINT_VERSION
-from .config import SCHEMA_VERSION, OptimizerBundle
+from .config import (
+    _PRECISION_FIELDS_ADDED_IN_1_3,
+    SCHEMA_VERSION,
+    FineTuneStepState,
+    OptimizerBundle,
+    RNGStreams,
+    StepCounters,
+)
 
 _CHECKPOINT_FORMAT = "rollfast.finetune.optimizer_state"
 _COMPATIBILITY_FIELDS = (
@@ -104,9 +112,27 @@ def make_state_checkpoint(
         raise ValueError(
             "master_params are required when precision.master_params='always'."
         )
+    resolved = bundle.report.precision
+    if master_params is None and resolved is not None and resolved.master_params:
+        # The bundle cannot tell whether the loop kept masters or updated the
+        # visible parameters directly, so this is a warning rather than an error.
+        warnings.warn(
+            "the precision policy keeps master parameters for this plan, but the "
+            "checkpoint omits them; a resumed run would rebuild them from rounded "
+            "weights and lose their residual updates. Pass master_params, use "
+            "make_step_state_checkpoint, or set master_params='never' when the "
+            "loop updates the visible parameters directly.",
+            UserWarning,
+            stacklevel=2,
+        )
     if bundle.precision_config.loss_scale != "none" and loss_scale is None:
         raise ValueError(
             "loss_scale state is required when precision.loss_scale is enabled."
+        )
+    if bundle.precision_config.parameter_rounding == "stochastic" and rng is None:
+        raise ValueError(
+            "rng is required when precision.parameter_rounding='stochastic'; it "
+            "holds the stochastic-rounding stream."
         )
     checkpoint = OptimizerStateCheckpoint(
         manifest={
@@ -144,6 +170,88 @@ def make_state_checkpoint(
     return replace(
         checkpoint,
         manifest={**checkpoint.manifest, "state_schema": schema},
+    )
+
+
+_UNSTORED_STEP_STATE_FIELDS = (
+    "ema_state",
+    "swa_state",
+    "adalora_state",
+    "projection_state",
+    "schedule_free_state",
+)
+
+
+def make_step_state_checkpoint(
+    bundle: OptimizerBundle,
+    step_state: FineTuneStepState,
+    *,
+    model_checkpoint_id: str,
+    base_model_value_hash: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> OptimizerStateCheckpoint:
+    """Package a ``FineTuneStepState`` for exact resume.
+
+    The checkpoint stores the optimizer state, master parameters, accumulation
+    record, model state, loss scale, RNG streams, and counters. Validate it with
+    ``restore_state_checkpoint`` or an array-checkpoint loader, then rebuild the
+    state with ``step_state_from_checkpoint``.
+    """
+
+    unstored = [
+        name
+        for name in _UNSTORED_STEP_STATE_FIELDS
+        if getattr(step_state, name) is not None
+    ]
+    if unstored:
+        raise ValueError(
+            "optimizer checkpoints do not store FineTuneStepState fields "
+            f"{', '.join(unstored)}; checkpoint them separately."
+        )
+    return make_state_checkpoint(
+        bundle,
+        step_state.optimizer_state,
+        model_checkpoint_id=model_checkpoint_id,
+        master_params=step_state.master_params,
+        accumulation=step_state.accumulation,
+        model_state=step_state.model_state,
+        loss_scale=step_state.loss_scale,
+        rng=step_state.rng,
+        counters=step_state.counters,
+        base_model_value_hash=base_model_value_hash,
+        metadata=metadata,
+    )
+
+
+def step_state_from_checkpoint(
+    checkpoint: OptimizerStateCheckpoint,
+) -> FineTuneStepState:
+    """Rebuild a ``FineTuneStepState`` from a validated step-state checkpoint."""
+
+    if not isinstance(checkpoint.counters, StepCounters) or not isinstance(
+        checkpoint.rng, RNGStreams
+    ):
+        raise OptimizerStateRestoreError(
+            "checkpoint does not hold FineTuneStepState counters and RNG streams; "
+            "write it with make_step_state_checkpoint."
+        )
+    if checkpoint.accumulation is None:
+        raise OptimizerStateRestoreError(
+            "checkpoint does not hold a FineTuneStepState accumulation record."
+        )
+    return FineTuneStepState(
+        optimizer_state=checkpoint.state,
+        model_state=checkpoint.model_state,
+        master_params=checkpoint.master_params,
+        accumulation=checkpoint.accumulation,
+        loss_scale=checkpoint.loss_scale,
+        ema_state=None,
+        swa_state=None,
+        adalora_state=None,
+        projection_state=None,
+        schedule_free_state=None,
+        counters=checkpoint.counters,
+        rng=checkpoint.rng,
     )
 
 
@@ -349,17 +457,24 @@ def _validate_checkpoint_schema(checkpoint: OptimizerStateCheckpoint) -> None:
             raise OptimizerStateRestoreError(
                 f"checkpoint {name} component presence mismatch."
             )
-    if checkpoint.manifest.get("precision", {}).get(
-        "master_params"
-    ) == "always" and not components.get("master_params", False):
+    precision = checkpoint.manifest.get("precision", {})
+    if precision.get("master_params") == "always" and not components.get(
+        "master_params", False
+    ):
         raise OptimizerStateRestoreError(
             "checkpoint is missing required master parameters."
         )
-    if checkpoint.manifest.get("precision", {}).get(
-        "loss_scale", "none"
-    ) != "none" and not components.get("loss_scale", False):
+    if precision.get("loss_scale", "none") != "none" and not components.get(
+        "loss_scale", False
+    ):
         raise OptimizerStateRestoreError(
             "checkpoint is missing required loss-scale state."
+        )
+    if precision.get(
+        "parameter_rounding", "nearest"
+    ) == "stochastic" and not components.get("rng", False):
+        raise OptimizerStateRestoreError(
+            "checkpoint is missing the stochastic-rounding RNG state."
         )
     if "schedule_free" in checkpoint.manifest.get(
         "eval_views", ()
@@ -405,6 +520,10 @@ def _compatibility_view(manifest: Mapping[str, Any]) -> dict[str, Any]:
         raise OptimizerStateRestoreError(
             f"checkpoint manifest is missing compatibility field {key!r}."
         )
+    view["precision_config"] = {
+        **_PRECISION_FIELDS_ADDED_IN_1_3,
+        **view["precision_config"],
+    }
     return view
 
 
@@ -483,7 +602,9 @@ __all__ = (
     "OptimizerStateRestoreError",
     "load_state_checkpoint",
     "make_state_checkpoint",
+    "make_step_state_checkpoint",
     "restore_state_checkpoint",
     "save_state_checkpoint",
     "state_manifest",
+    "step_state_from_checkpoint",
 )

@@ -577,3 +577,37 @@ def test_stateful_loss_bundle_accumulation_rejects_pre_wrapped_optimizer():
             bundle,
             accumulation=rfft.AccumulationConfig(steps=2),
         )
+
+
+def test_loss_bundle_microbatch_sums_accumulate_bf16_terms_in_float32():
+    plan = replace(
+        _single_weight_plan(), trainable={"w": jnp.asarray(1.0, dtype=jnp.bfloat16)}
+    )
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        precision=rfft.PrecisionConfig(master_params="never"),
+    )
+
+    def bundled_loss(params, value):
+        return rfft.LossBundle(
+            loss_sum=params["w"] * value,
+            normalizer=jnp.asarray(1.0, dtype=jnp.float32),
+            metrics_sums={},
+            metric_normalizers={},
+            new_model_state=None,
+        )
+
+    step = jax.jit(
+        rfft.make_loss_bundle_update_step(bundled_loss, bundle, microbatch_axis=0)
+    )
+    # A BF16 running sum of ones stops growing at 256.
+    _, _, normalized = step(
+        plan.trainable,
+        bundle.init(plan.trainable),
+        jnp.ones((512,), dtype=jnp.bfloat16),
+    )
+
+    assert float(normalized.loss_sum) == 1.0

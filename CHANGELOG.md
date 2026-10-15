@@ -5,6 +5,64 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+## [1.3.0] - 2026-10-15
+
+Low-precision fine-tuning: explicit BF16/FP16 precision modes, master-free stochastic parameter rounding, and composite
+steps that honor the whole precision policy. Detailed release notes are available in
+[`docs/releases/1.3.0.md`](./docs/releases/1.3.0.md).
+
+### Added
+
+- Add `PrecisionConfig.parameter_rounding="stochastic"` for master-free BF16 parameter storage. The composite and
+  stateful steps draw rounding keys from `RNGStreams.stochastic_rounding`, which advances only with applied updates, and
+  give each parameter partition independent noise.
+- Report the resolved precision mode, master and moment storage, rounding, and parameter bytes in
+  `OptimizerReport.precision` (`PrecisionReport`) and the manifest's `resolved_precision`.
+- Add the `bf16_mixed_precision`, `bf16_master_free_precision`, and `fp16_mixed_precision` presets, and a `precision=`
+  argument on every `*_from_plan` builder.
+- Support gradient accumulation in `make_finetune_update_step`, and add `make_finetune_sam_step` for SAM/ASAM with
+  master parameters, loss scaling, and stochastic parameter rounding.
+- Register `FineTuneStepState`, `RNGStreams`, and `StepCounters` as PyTrees so composite steps run under `jax.jit` and
+  `jax.lax.scan`.
+- Add `make_step_state_checkpoint` and `step_state_from_checkpoint` for exact resume of a composite step state.
+- Add `PrecisionConfig.min_loss_scale` and `max_loss_scale` bounds for dynamic loss scaling.
+- Add `low_precision_update_metrics`, and master-parameter accounting in `optimizer_state_memory_summary` and
+  `estimate_optimizer_state_memory`.
+- Report `grads_finite` and `update_applied` in stateful step info.
+- Document the precision modes, helper capabilities, and troubleshooting in
+  [`docs/finetuning/precision.md`](./docs/finetuning/precision.md), with a runnable example.
+
+### Changed
+
+- With declared collective axes, every parameter partition reaches the same accept or reject decision.
+- Dynamic loss scaling lowers the scale only on gradient overflow and stays within its configured bounds.
+- The perturbed pass of `make_sam_step` evaluates the model at the trainable dtype, and its microbatch sums, like those
+  of the `LossBundle` steps, accumulate in the accumulation dtype.
+- `init_finetune_step_state` validates supplied master parameters, and its default accumulation record holds no
+  gradient-sized buffer.
+- Complex trainable leaves keep complex master parameters instead of being rejected.
+- Direct-parameter helpers warn when they ignore the bundle's master parameters or loss scaling, and reject stochastic
+  parameter rounding. `make_state_checkpoint` warns when a policy that keeps masters omits them.
+- Reject precision settings that had no effect: non-floating dtypes, a non-float32 `update_compute_dtype`, sub-float32
+  master dtypes, an `accumulation_dtype` that differs from `AccumulationConfig.accumulate_dtype`, a non-float32
+  `preconditioner_dtype` outside `kron_adam`, and quantized moments whose `moment_dtype` differs from the fallback
+  dtype. `hybrid_kron_adam_from_plan` now honors `precision.preconditioner_dtype`.
+- `validate_accumulation_complete` accepts a `FineTuneStepState`.
+
+### Fixed
+
+- Keep the state structure of master-aware steps stable when the policy keeps no masters, such as float32 weights under
+  `master_params="auto"`. They return `None` for master parameters instead of a copy of the visible parameters, which
+  made a jitted step recompile on its second call and stopped checkpoint templates from matching. Policies that keep
+  masters still need them, and any loss-scale state, passed from the first call; the composite steps create both up
+  front.
+- Reject updates that overflow the visible dtype even when the gradients are finite.
+- Compute global-norm clipping and SAM norms by promoting to float32 before squaring, so FP16 gradients above 256 no
+  longer overflow, and apply the clip scale in float32.
+- Project and square BF16 gradients in float32 in GaLore and APOLLO.
+- Keep every NaN a NaN under BF16 stochastic rounding.
+- Keep the precision of float64 and complex leaves in `make_master_params`.
+
 ## [1.2.1] - 2026-09-30
 
 ### Fixed

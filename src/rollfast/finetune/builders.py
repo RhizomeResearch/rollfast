@@ -25,6 +25,7 @@ from rollfast.schedules.schedulefree import (
 )
 from rollfast.utils import _fresh_prng_key
 
+from ._precision import precision_report, validate_precision
 from ._protocols import FineTunePlanProtocol
 from .averaging import _build_averaging
 from .config import (
@@ -64,32 +65,53 @@ class _FactorizedAdamWState(NamedTuple):
     inner_state: optax.OptState
 
 
-def _validate_complex_plan_compatibility(
-    trainable: Any,
-    *,
-    family: str,
-    precision: PrecisionConfig,
-) -> None:
+def _validate_complex_plan_compatibility(trainable: Any, *, family: str) -> None:
     complex_paths = [
         jax.tree_util.keystr(path)
         for path, leaf in jax.tree_util.tree_leaves_with_path(trainable)
         if hasattr(leaf, "dtype")
         and jnp.issubdtype(jnp.dtype(leaf.dtype), jnp.complexfloating)
     ]
-    if not complex_paths:
-        return
-    path = complex_paths[0]
-    if family != "adamw":
+    if complex_paths and family != "adamw":
         raise ValueError(
             f"{family} does not support complex fine-tuning leaves; found one at "
-            f"{path}. Use plain AdamW or a complex-safe matrix/Adam wrapper."
+            f"{complex_paths[0]}. Use plain AdamW or a complex-safe matrix/Adam "
+            "wrapper."
         )
-    if precision.master_params == "always" and not jnp.issubdtype(
-        jnp.dtype(precision.master_param_dtype), jnp.complexfloating
+
+
+def _resolve_builder_precision(
+    precision: PrecisionConfig | None,
+    *,
+    moment_dtype: Any | None,
+) -> PrecisionConfig:
+    if precision is None:
+        return PrecisionConfig(
+            moment_dtype=jnp.float32 if moment_dtype is None else moment_dtype
+        )
+    if moment_dtype is not None and jnp.dtype(moment_dtype) != jnp.dtype(
+        precision.moment_dtype
     ):
         raise ValueError(
-            "plain AdamW cannot use a real master-parameter cast with complex "
-            f"fine-tuning leaves; found one at {path}."
+            "moment_dtype conflicts with precision.moment_dtype; pass only one."
+        )
+    return precision
+
+
+def _validate_builder_precision(
+    trainable: Any,
+    precision: PrecisionConfig,
+    accumulation: AccumulationConfig,
+    *,
+    family: str,
+) -> None:
+    validate_precision(trainable, precision, accumulation)
+    if family != "kron" and jnp.dtype(precision.preconditioner_dtype) != jnp.dtype(
+        jnp.float32
+    ):
+        raise ValueError(
+            "PrecisionConfig.preconditioner_dtype applies to kron_adam only; "
+            f"{family} keeps no preconditioner state."
         )
 
 
@@ -152,11 +174,18 @@ def compile_optimizer(
         optimizer = replace(optimizer, name="adamw8")
 
     normalized = validate_plan(plan, allow_empty_groups=allow_empty_groups)
-    _validate_complex_plan_compatibility(
-        normalized.trainable,
-        family=optimizer.name,
-        precision=precision,
+    _validate_complex_plan_compatibility(normalized.trainable, family=optimizer.name)
+    _validate_builder_precision(
+        normalized.trainable, precision, accumulation, family=optimizer.name
     )
+    if state_quantization.enabled and jnp.dtype(precision.moment_dtype) != jnp.dtype(
+        state_quantization.fallback_dtype
+    ):
+        raise ValueError(
+            "quantized optimizer state stores unquantized moments in "
+            "StateQuantizationConfig.fallback_dtype; set PrecisionConfig.moment_dtype "
+            "to the same dtype."
+        )
     schedule = schedule.resolved(total_steps)
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
@@ -341,16 +370,22 @@ def adamw_from_plan(
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     lora_b_lr_ratio: float | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
     sharding: ShardingPolicy | None = None,
     ema: EMAConfig | None = None,
     swa: SWAConfig | None = None,
+    precision: PrecisionConfig | None = None,
     **kwargs: Any,
 ) -> OptimizerBundle:
-    """Build grouped AdamW from a fine-tuning plan."""
+    """Build grouped AdamW from a fine-tuning plan.
+
+    ``precision`` sets master parameters, loss scaling, and parameter rounding.
+    ``moment_dtype`` is shorthand for ``precision.moment_dtype``; the default
+    stores float32 moments.
+    """
 
     optimizer = OptimizerConfig(
         name="adamw",
@@ -370,7 +405,7 @@ def adamw_from_plan(
             axis_name=axis_name,
         ),
         accumulation=AccumulationConfig(steps=accumulation_steps),
-        precision=PrecisionConfig(moment_dtype=moment_dtype),
+        precision=_resolve_builder_precision(precision, moment_dtype=moment_dtype),
         sharding=sharding,
         group_rules=group_rules,
         ema=ema,
@@ -389,15 +424,20 @@ def galore_adamw_from_plan(
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
     sharding: ShardingPolicy | None = None,
     ema: EMAConfig | None = None,
     swa: SWAConfig | None = None,
+    precision: PrecisionConfig | None = None,
     **kwargs: Any,
 ) -> OptimizerBundle:
-    """Build grouped GaLore AdamW from a fine-tuning plan."""
+    """Build grouped GaLore AdamW from a fine-tuning plan.
+
+    ``precision`` and ``moment_dtype`` behave as in ``adamw_from_plan``.
+    Projected moments narrower than float32 are stored with round-to-nearest.
+    """
 
     group_rules = tuple(group_rules)
     optimizer = OptimizerConfig(
@@ -413,7 +453,7 @@ def galore_adamw_from_plan(
         axis_name=axis_name,
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
-    precision = PrecisionConfig(moment_dtype=moment_dtype)
+    precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
     sharding = ShardingPolicy() if sharding is None else sharding
     gradient_policy = _with_sharding_norm_axes(gradient_policy, sharding)
     ema = EMAConfig() if ema is None else ema
@@ -425,10 +465,9 @@ def galore_adamw_from_plan(
     )
 
     normalized = validate_plan(plan)
-    _validate_complex_plan_compatibility(
-        normalized.trainable,
-        family="galore_adamw",
-        precision=precision,
+    _validate_complex_plan_compatibility(normalized.trainable, family="galore_adamw")
+    _validate_builder_precision(
+        normalized.trainable, precision, accumulation, family="galore_adamw"
     )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
@@ -478,6 +517,7 @@ def galore_adamw_from_plan(
                 refresh_communication_bytes=refresh_communication_bytes,
             ),
         ),
+        stochastic_bf16_moments=False,
     )
     report = replace(
         report,
@@ -525,15 +565,20 @@ def apollo_adamw_from_plan(
     weight_decay: float | None = None,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
     sharding: ShardingPolicy | None = None,
     ema: EMAConfig | None = None,
     swa: SWAConfig | None = None,
+    precision: PrecisionConfig | None = None,
     **kwargs: Any,
 ) -> OptimizerBundle:
-    """Build grouped APOLLO AdamW from a fine-tuning plan."""
+    """Build grouped APOLLO AdamW from a fine-tuning plan.
+
+    ``precision`` and ``moment_dtype`` behave as in ``adamw_from_plan``.
+    Moments narrower than float32 are stored with round-to-nearest.
+    """
 
     group_rules = tuple(group_rules)
     apollo = APOLLOConfig() if apollo is None else apollo
@@ -554,7 +599,7 @@ def apollo_adamw_from_plan(
         axis_name=axis_name,
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
-    precision = PrecisionConfig(moment_dtype=moment_dtype)
+    precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
     sharding = ShardingPolicy() if sharding is None else sharding
     gradient_policy = _with_sharding_norm_axes(gradient_policy, sharding)
     ema = EMAConfig() if ema is None else ema
@@ -566,10 +611,9 @@ def apollo_adamw_from_plan(
     )
 
     normalized = validate_plan(plan)
-    _validate_complex_plan_compatibility(
-        normalized.trainable,
-        family="apollo_adamw",
-        precision=precision,
+    _validate_complex_plan_compatibility(normalized.trainable, family="apollo_adamw")
+    _validate_builder_precision(
+        normalized.trainable, precision, accumulation, family="apollo_adamw"
     )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
@@ -606,6 +650,7 @@ def apollo_adamw_from_plan(
             *rule_warnings,
             *_apollo_profile_warnings(),
         ),
+        stochastic_bf16_moments=False,
     )
     policy = (
         "apollo_mini_tensor_scaling"
@@ -650,7 +695,7 @@ def schedule_free_adam_from_plan(
     weight_decay: float = 0.0,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     state_dtype: Any | None = None,
     lora_b_lr_ratio: float | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -676,8 +721,13 @@ def schedule_free_adam_from_plan(
     polyak_f_star: float = 0.0,
     polyak_axis_name: str | tuple[str, ...] | None = None,
     key: jax.Array | None = None,
+    precision: PrecisionConfig | None = None,
 ) -> OptimizerBundle:
-    """Build grouped Schedule-Free Adam from a fine-tuning plan."""
+    """Build grouped Schedule-Free Adam from a fine-tuning plan.
+
+    ``precision`` and ``moment_dtype`` behave as in ``adamw_from_plan``;
+    ``state_dtype`` separately sets the Schedule-Free averaging state.
+    """
 
     group_rules = tuple(group_rules)
     ema = EMAConfig() if ema is None else ema
@@ -705,13 +755,14 @@ def schedule_free_adam_from_plan(
         axis_name=axis_name,
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
-    precision = PrecisionConfig(moment_dtype=moment_dtype)
+    precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
 
     normalized = validate_plan(plan)
     _validate_complex_plan_compatibility(
-        normalized.trainable,
-        family="schedule_free_adam",
-        precision=precision,
+        normalized.trainable, family="schedule_free_adam"
+    )
+    _validate_builder_precision(
+        normalized.trainable, precision, accumulation, family="schedule_free_adam"
     )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
@@ -807,9 +858,13 @@ def adamw8_from_plan(
     ema: EMAConfig | None = None,
     swa: SWAConfig | None = None,
     state_quantization: StateQuantizationConfig | None = None,
+    precision: PrecisionConfig | None = None,
     **kwargs: Any,
 ) -> OptimizerBundle:
-    """Build grouped AdamW with blockwise 8-bit moment state."""
+    """Build grouped AdamW with blockwise 8-bit moment state.
+
+    ``precision.moment_dtype`` must match the quantization fallback dtype.
+    """
 
     quantization = (
         StateQuantizationConfig(enabled=True)
@@ -836,7 +891,9 @@ def adamw8_from_plan(
             axis_name=axis_name,
         ),
         accumulation=AccumulationConfig(steps=accumulation_steps),
-        precision=PrecisionConfig(moment_dtype=quantization.fallback_dtype),
+        precision=PrecisionConfig(moment_dtype=quantization.fallback_dtype)
+        if precision is None
+        else precision,
         state_quantization=quantization,
         sharding=sharding,
         group_rules=group_rules,
@@ -855,7 +912,7 @@ def hybrid_aurora_adam_from_plan(
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
     ema: EMAConfig | None = None,
@@ -866,6 +923,7 @@ def hybrid_aurora_adam_from_plan(
     adam_eps: float = 1e-8,
     polar_ns_iters: int = 12,
     key: jax.Array | None = None,
+    precision: PrecisionConfig | None = None,
 ) -> OptimizerBundle:
     """Build grouped Aurora/Adam from a fine-tuning plan."""
 
@@ -880,6 +938,7 @@ def hybrid_aurora_adam_from_plan(
         clip_global_norm=clip_global_norm,
         accumulation_steps=accumulation_steps,
         moment_dtype=moment_dtype,
+        precision=precision,
         axis_name=axis_name,
         group_rules=group_rules,
         ema=ema,
@@ -902,7 +961,7 @@ def hybrid_prism_adam_from_plan(
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
     ema: EMAConfig | None = None,
@@ -913,6 +972,7 @@ def hybrid_prism_adam_from_plan(
     adam_eps: float = 1e-8,
     ns_iters: int = 5,
     key: jax.Array | None = None,
+    precision: PrecisionConfig | None = None,
 ) -> OptimizerBundle:
     """Build grouped PRISM/Adam from a fine-tuning plan."""
 
@@ -927,6 +987,7 @@ def hybrid_prism_adam_from_plan(
         clip_global_norm=clip_global_norm,
         accumulation_steps=accumulation_steps,
         moment_dtype=moment_dtype,
+        precision=precision,
         axis_name=axis_name,
         group_rules=group_rules,
         ema=ema,
@@ -949,7 +1010,7 @@ def hybrid_kron_adam_from_plan(
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     preconditioner_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
@@ -958,9 +1019,27 @@ def hybrid_kron_adam_from_plan(
     b1: float = 0.9,
     preconditioner_update_probability: float = 1.0,
     key: jax.Array | None = None,
+    precision: PrecisionConfig | None = None,
 ) -> OptimizerBundle:
-    """Build grouped PSGD/Kron from a fine-tuning plan."""
+    """Build grouped PSGD/Kron from a fine-tuning plan.
 
+    ``preconditioner_dtype`` is shorthand for ``precision.preconditioner_dtype``.
+    With neither set, Kron keeps its default: float32 non-scalar factors and
+    parameter-dtype scalar factors.
+    """
+
+    resolved = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
+    if preconditioner_dtype is not None:
+        if precision is not None and jnp.dtype(preconditioner_dtype) != jnp.dtype(
+            precision.preconditioner_dtype
+        ):
+            raise ValueError(
+                "preconditioner_dtype conflicts with precision.preconditioner_dtype; "
+                "pass only one."
+            )
+        resolved = replace(resolved, preconditioner_dtype=preconditioner_dtype)
+    elif precision is not None:
+        preconditioner_dtype = precision.preconditioner_dtype
     return _hybrid_optimizer_from_plan(
         plan,
         optimizer_name="kron_adam",
@@ -971,7 +1050,8 @@ def hybrid_kron_adam_from_plan(
         weight_decay=weight_decay,
         clip_global_norm=clip_global_norm,
         accumulation_steps=accumulation_steps,
-        moment_dtype=moment_dtype,
+        moment_dtype=None,
+        precision=resolved,
         axis_name=axis_name,
         group_rules=group_rules,
         ema=ema,
@@ -998,7 +1078,7 @@ def muon_adam_from_plan(
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
-    moment_dtype: Any = jnp.float32,
+    moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
     group_rules: Iterable[GroupRule] = (),
     ema: EMAConfig | None = None,
@@ -1007,6 +1087,7 @@ def muon_adam_from_plan(
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
     key: jax.Array | None = None,
+    precision: PrecisionConfig | None = None,
 ) -> OptimizerBundle:
     """Build grouped Muon/AdamW from a fine-tuning plan."""
 
@@ -1022,6 +1103,7 @@ def muon_adam_from_plan(
         clip_global_norm=clip_global_norm,
         accumulation_steps=accumulation_steps,
         moment_dtype=moment_dtype,
+        precision=precision,
         axis_name=axis_name,
         group_rules=group_rules,
         ema=ema,
@@ -1054,7 +1136,8 @@ def _hybrid_optimizer_from_plan(
     weight_decay: float,
     clip_global_norm: float | None,
     accumulation_steps: int,
-    moment_dtype: Any,
+    moment_dtype: Any | None,
+    precision: PrecisionConfig | None,
     axis_name: str | tuple[str, ...] | None,
     group_rules: Iterable[GroupRule],
     ema: EMAConfig | None,
@@ -1089,8 +1172,11 @@ def _hybrid_optimizer_from_plan(
         axis_name=axis_name,
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
-    precision = PrecisionConfig(moment_dtype=moment_dtype)
+    precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
     normalized = validate_plan(plan)
+    _validate_builder_precision(
+        normalized.trainable, precision, accumulation, family=family
+    )
     compiled_groups = compile_groups(normalized.groups, optimizer, group_rules)
     rule_warnings = unmatched_rule_warnings(normalized.groups, group_rules)
     tx = _build_grouped_hybrid_transform(
@@ -1775,7 +1861,13 @@ def _make_report(
     state_quantization: StateQuantizationConfig | None = None,
     *,
     warnings: tuple[str, ...],
+    stochastic_bf16_moments: bool = True,
 ) -> OptimizerReport:
+    moment_storage, moment_rounding = _moment_precision(
+        precision,
+        state_quantization,
+        stochastic_bf16=stochastic_bf16_moments,
+    )
     preview_lr = max((group.effective_lr for group in groups), default=0.0)
     schedule_preview = preview_schedule(
         schedule,
@@ -1804,7 +1896,32 @@ def _make_report(
         schedule_step_counter=schedule.step_counter,
         state_policies=_state_policies(groups, precision, state_quantization),
         warnings=tuple(dict.fromkeys(warnings)),
+        precision=precision_report(
+            trainable,
+            precision,
+            accumulation,
+            moment_storage=moment_storage,
+            moment_rounding=moment_rounding,
+        ),
     )
+
+
+def _moment_precision(
+    precision: PrecisionConfig,
+    state_quantization: StateQuantizationConfig | None,
+    *,
+    stochastic_bf16: bool,
+) -> tuple[str, str]:
+    """Return how the optimizer stores moments and how it rounds into storage."""
+    if state_quantization is not None and state_quantization.enabled:
+        fallback = jnp.dtype(state_quantization.fallback_dtype).name
+        rounding = "stochastic" if state_quantization.stochastic_rounding else "nearest"
+        return f"blockwise_int8+{fallback}_fallback", rounding
+    dtype = jnp.dtype(precision.moment_dtype)
+    if dtype.itemsize >= 4:
+        return dtype.name, "none"
+    stochastic = stochastic_bf16 and dtype == jnp.dtype(jnp.bfloat16)
+    return dtype.name, "stochastic" if stochastic else "nearest"
 
 
 def _report_warnings(
@@ -1975,10 +2092,11 @@ def _precision_warnings(trainable: Any, precision: PrecisionConfig) -> tuple[str
     warnings: list[str] = []
     if jnp.dtype(jnp.float16) in dtypes and precision.loss_scale == "none":
         warnings.append("fp16 without loss scaling.")
-    if precision.master_params == "never" and dtypes & {
-        jnp.dtype(jnp.float16),
-        jnp.dtype(jnp.bfloat16),
-    }:
+    if (
+        precision.master_params == "never"
+        and precision.parameter_rounding == "nearest"
+        and dtypes & {jnp.dtype(jnp.float16), jnp.dtype(jnp.bfloat16)}
+    ):
         warnings.append("low-precision stored parameters without master parameters.")
     return tuple(warnings)
 

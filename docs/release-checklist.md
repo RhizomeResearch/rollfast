@@ -19,6 +19,7 @@ XLA_FLAGS=--xla_force_host_platform_device_count=4 uv run pytest tests/test_mult
 uv run python examples/adamw_quickstart.py
 uv run python examples/schedule_free_eval.py
 uv run python examples/finetuning/state_memory_report.py
+uv run python examples/finetuning/low_precision.py
 uv run python benchmarks/finetuning/memory.py
 uv run python benchmarks/finetuning/throughput.py
 uv run python benchmarks/finetuning/convergence.py

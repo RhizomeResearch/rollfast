@@ -350,12 +350,29 @@ def _momentum_grad_scale(
     )
 
 
+def _squared_magnitude_f32(x: jax.Array) -> jax.Array:
+    """Return ``|x| ** 2`` in float32, promoting before squaring.
+
+    Squaring in BF16 discards precision and in FP16 overflows above 256, so the
+    promotion must precede the square rather than follow it.
+    """
+    if jnp.issubdtype(x.dtype, jnp.complexfloating):
+        return numerics.abs_sq(x.astype(jnp.complex64)).astype(jnp.float32)
+    return jnp.square(x.astype(jnp.float32))
+
+
 def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
     """Stochastic rounding from FP32 → BF16 via uint32 bit manipulation.
 
-    For ±Inf (0x7F800000 / 0xFF800000), max noise 0xFFFF yields
-    0x7F80FFFF / 0xFF80FFFF. The mask (& 0xFFFF0000) truncates
-    these back to the original Inf encoding. No NaN can escape.
+    A finite value rounds away from zero with probability equal to its distance
+    from the truncated BF16 value, in units of the BF16 spacing. Exactly
+    representable values, signed zeros, and infinities are unchanged. Finite
+    values above the largest finite BF16 value treat infinity as the next
+    representable value, so they may round to infinity.
+
+    Infinities receive no noise, so the mask (& 0xFFFF0000) keeps their
+    encoding. A NaN whose payload lies only in the discarded low bits would
+    truncate to infinity; setting the quiet bit keeps every NaN a NaN.
 
     randint() internally upcasts raw PRNG output to float32 for range
     scaling, producing float intermediates that break XLA's integer-only
@@ -378,6 +395,9 @@ def _stochastic_round_bf16(x: jax.Array, key: jax.Array) -> jax.Array:
     abs_u32 = x_u32 & jnp.uint32(0x7FFFFFFF)
     is_special = abs_u32 >= jnp.uint32(0x7F800000)
     noise = jnp.where(is_special, jnp.uint32(0), noise)
+    x_u32 = jnp.where(
+        abs_u32 > jnp.uint32(0x7F800000), x_u32 | jnp.uint32(0x00400000), x_u32
+    )
     rounded = (x_u32 + noise) & jnp.uint32(0xFFFF0000)
     return jax.lax.bitcast_convert_type(rounded, jnp.float32).astype(jnp.bfloat16)
 

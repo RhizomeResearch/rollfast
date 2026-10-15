@@ -41,6 +41,9 @@ uv run ruff format --check .
 uv run mdformat --check --wrap 120 ./*.md benchmarks docs examples src tests
 uv run ty check
 
+# Run the multi-device checks CI runs on four forced CPU devices.
+XLA_FLAGS=--xla_force_host_platform_device_count=4 uv run pytest tests/test_multidevice_cpu.py tests/finetune/test_array_storage.py
+
 # Build the distribution when packaging or release behavior changes.
 uv build
 ```
@@ -81,7 +84,14 @@ most focused relevant test, then the full applicable checks above. Report any ch
 ## Public API and compatibility
 
 - Treat exports from `rollfast`, `rollfast.optim`, and `rollfast.finetune` as public API. When intentionally adding an
-  API, update the appropriate `__init__.py` imports and `__all__` declaration and add compatibility tests.
+  API, update the appropriate `__init__.py` imports and `__all__` declaration and add compatibility tests. The sorted
+  `__all__` snapshot in `tests/compat/public_api_v1.json` must be updated with intentional additions.
+- Array checkpoints match the stored tree schema strictly. A dataclass that earlier releases stored in checkpoints and
+  that is later registered as a PyTree must be listed in `_FIELD_SCHEMA_DATACLASSES` in
+  `src/rollfast/finetune/_checkpoint_tree.py` to keep its `"dataclass"` schema kind.
+- Strict restore compares manifest config dictionaries. A field added to a config's `to_dict` within schema version 1
+  needs a default in the restore compatibility view (see `_PRECISION_FIELDS_ADDED_IN_1_3` and
+  `serialization._compatibility_view`) so older manifests still match.
 - Do not silently change optimizer defaults, state-tree structure, counter ownership, serialization formats, or
   checkpoint compatibility. Such changes require explicit tests and matching documentation.
 - If the package version changes, keep `pyproject.toml` and `src/rollfast/__init__.py` synchronized; CI checks them for

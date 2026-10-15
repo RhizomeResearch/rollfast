@@ -9,6 +9,15 @@ from typing import Any
 import jax
 import numpy as np
 
+# Registered as PyTrees in 1.3.0 so step state works under JIT. Describe them by
+# field, as earlier releases did, so their checkpoints keep matching.
+_FIELD_SCHEMA_DATACLASSES = frozenset(
+    {
+        "rollfast.finetune.config.RNGStreams",
+        "rollfast.finetune.config.StepCounters",
+    }
+)
+
 # Optional checkpoint components whose presence the manifest records.
 OPTIONAL_COMPONENTS = (
     "master_params",
@@ -89,7 +98,10 @@ def describe_tree(value: Any) -> tuple[dict[str, Any], list[Any]]:
             }
         if dataclasses.is_dataclass(node) and not isinstance(node, type):
             flattened, definition = jax.tree_util.tree_flatten(node)
-            if definition.num_nodes > 1:
+            if (
+                definition.num_nodes > 1
+                and _type_name(node) not in _FIELD_SCHEMA_DATACLASSES
+            ):
                 return {
                     "kind": "registered_pytree",
                     "type": _type_name(node),

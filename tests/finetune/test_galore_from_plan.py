@@ -337,3 +337,41 @@ def test_galore_scheduled_weight_decay_matches_eager_under_jit():
         eager_updates, eager_state = tx.update(grads, eager_state, params)
         jit_updates, jit_state = jit_update(grads, jit_state, params)
         assert jax.tree.all(jax.tree.map(jnp.allclose, eager_updates, jit_updates))
+
+
+def _bf16_gradients(trainable, seed=0):
+    leaves, treedef = jax.tree.flatten(trainable, is_leaf=lambda x: x is None)
+    keys = jax.random.split(jax.random.key(seed), len(leaves))
+    return jax.tree.unflatten(
+        treedef,
+        [
+            None
+            if leaf is None
+            else (0.37 + 1e-2 * jax.random.normal(key, leaf.shape)).astype(jnp.bfloat16)
+            for leaf, key in zip(leaves, keys, strict=True)
+        ],
+    )
+
+
+def test_galore_updates_bf16_gradients_like_their_float32_values():
+    plan = tiny_plan()
+    bundle = rfft.galore_adamw_from_plan(
+        plan,
+        galore=rfft.GaLoreConfig(rank=1, min_matrix_size=1, update_interval=1),
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    state = bundle.init(plan.trainable)
+    grads = _bf16_gradients(plan.trainable)
+
+    low, _ = bundle.update(grads, state, plan.trainable)
+    wide, _ = bundle.update(
+        jax.tree.map(lambda g: g.astype(jnp.float32), grads), state, plan.trainable
+    )
+
+    for actual, expected in zip(
+        jax.tree.leaves(low), jax.tree.leaves(wide), strict=True
+    ):
+        assert actual.dtype == jnp.bfloat16
+        assert jnp.array_equal(actual, expected.astype(jnp.bfloat16))

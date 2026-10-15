@@ -59,6 +59,65 @@ def test_unsupported_precision_cast_back_is_rejected(cast_back):
         rfft.PrecisionConfig(cast_back=cast_back)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "config",
+    (
+        rfft.PrecisionConfig(master_params="never", parameter_rounding="stochastic"),
+        rfft.PrecisionConfig(master_params="never", master_param_dtype=jnp.bfloat16),
+        rfft.PrecisionConfig(
+            loss_scale="dynamic",
+            static_loss_scale=2.0**10,
+            min_loss_scale=2.0**4,
+            max_loss_scale=2.0**12,
+        ),
+    ),
+)
+def test_supported_precision_configs_round_trip(config):
+    assert rfft.PrecisionConfig.from_dict(config.to_dict()) == config
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "match"),
+    (
+        (
+            {"gradient_dtype": jnp.int32},
+            ValueError,
+            "gradient_dtype must be a floating",
+        ),
+        (
+            {"update_compute_dtype": jnp.bfloat16},
+            NotImplementedError,
+            "update_compute_dtype supports only",
+        ),
+        ({"master_params": "sometimes"}, ValueError, "master_params must be"),
+        ({"master_param_dtype": jnp.bfloat16}, ValueError, "at least float32"),
+        ({"parameter_rounding": "typo"}, ValueError, "parameter_rounding must be"),
+        ({"parameter_rounding": "stochastic"}, ValueError, "master_params='never'"),
+        ({"loss_scale": "typo"}, ValueError, "loss_scale must be"),
+        ({"static_loss_scale": float("inf")}, ValueError, "static_loss_scale"),
+        ({"min_loss_scale": 0.0}, ValueError, "min_loss_scale"),
+        ({"growth_factor": 1.0}, ValueError, "growth_factor"),
+        ({"min_loss_scale": 4.0, "max_loss_scale": 2.0}, ValueError, "cannot exceed"),
+        (
+            {"loss_scale": "dynamic", "static_loss_scale": 2.0**30},
+            ValueError,
+            "static_loss_scale <= max_loss_scale",
+        ),
+    ),
+)
+def test_unsupported_precision_configs_are_rejected(kwargs, error, match):
+    with pytest.raises(error, match=match):
+        rfft.PrecisionConfig(**kwargs)
+
+
+def test_precision_dictionaries_without_newer_fields_use_their_defaults():
+    data = rfft.PrecisionConfig().to_dict()
+    for field in ("parameter_rounding", "min_loss_scale", "max_loss_scale"):
+        del data[field]
+
+    assert rfft.PrecisionConfig.from_dict(data) == rfft.PrecisionConfig()
+
+
 def test_legacy_unsupported_config_dictionary_has_a_clear_error():
     with pytest.raises(NotImplementedError, match="AccumulationConfig.remainder"):
         rfft.AccumulationConfig.from_dict({"remainder": "drop"})

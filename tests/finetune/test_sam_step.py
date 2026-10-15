@@ -205,3 +205,39 @@ def test_sam_cost_report_honors_bias_exclusion():
     )
 
     assert report["perturbation_bytes"] == 10 * 4
+
+
+def test_make_sam_step_accumulates_bf16_microbatches_in_float32():
+    plan = tiny_plan()
+    plan = type(plan)(
+        trainable={"w": jnp.asarray(1.0, dtype=jnp.bfloat16)},
+        labels={"w": "head_decay"},
+        group_specs={"head_decay": plan.group_specs["head_decay"]},
+    )
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+        precision=rfft.PrecisionConfig(master_params="never"),
+    )
+    step = jax.jit(
+        rfft.make_sam_step(
+            plan=plan,
+            base_optimizer=bundle,
+            loss_fn=lambda model, value: model["w"] * value,
+            microbatch_axis=0,
+            microbatch_reduction="sum",
+        )
+    )
+
+    # A BF16 running sum of ones stops growing at 256.
+    params, _, info = step(
+        plan.trainable,
+        bundle.init(plan.trainable),
+        jnp.ones((512,), dtype=jnp.bfloat16),
+    )
+
+    assert float(info.loss) == 512.0
+    assert float(info.grad_norm) == 512.0
+    assert params["w"].dtype == jnp.bfloat16

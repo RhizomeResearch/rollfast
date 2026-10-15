@@ -333,3 +333,28 @@ def test_apollo_scheduled_weight_decay_matches_eager_under_jit():
         eager_updates, eager_state = tx.update(grads, eager_state, params)
         jit_updates, jit_state = jit_update(grads, jit_state, params)
         assert jax.tree.all(jax.tree.map(jnp.allclose, eager_updates, jit_updates))
+
+
+def test_apollo_updates_bf16_gradients_like_their_float32_values():
+    plan = _matrix_plan()
+    bundle = rfft.apollo_adamw_from_plan(
+        plan,
+        apollo=rfft.APOLLOConfig(rank=1, projection_seed=7),
+        total_steps=10,
+        schedule="constant",
+        clip_global_norm=None,
+    )
+    state = bundle.init(plan.trainable)
+    grads = {
+        "w": (0.37 + 1e-2 * jax.random.normal(jax.random.key(0), (4, 4))).astype(
+            jnp.bfloat16
+        )
+    }
+
+    low, _ = bundle.update(grads, state, plan.trainable)
+    wide, _ = bundle.update(
+        {"w": grads["w"].astype(jnp.float32)}, state, plan.trainable
+    )
+
+    assert low["w"].dtype == jnp.bfloat16
+    assert jnp.array_equal(low["w"], wide["w"].astype(jnp.bfloat16))

@@ -7,7 +7,11 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from rollfast.utils import AxisName, resolve_partition_norm_axis_name
+from rollfast.utils import (
+    AxisName,
+    _squared_magnitude_f32,
+    resolve_partition_norm_axis_name,
+)
 
 
 def global_l2_norm(
@@ -20,7 +24,7 @@ def global_l2_norm(
     """Return the global L2 norm over local leaves and parameter-shard axes."""
 
     sq_sum = sum(
-        jnp.sum(jnp.square(jnp.abs(leaf)).astype(jnp.float32))
+        jnp.sum(_squared_magnitude_f32(leaf))
         for leaf in jax.tree.leaves(tree, is_leaf=lambda x: x is None)
         if leaf is not None
     )

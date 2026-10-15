@@ -293,7 +293,9 @@ def _update_leaf(
         return _LeafUpdateResult(grad, state)
     projected = isinstance(state, APOLLOLeafState) and state.projected
     projection = state.projection
-    moment_grad = grad
+    # Project and square in float32: low-precision matmuls and squares lose
+    # the small gradient components the moments accumulate.
+    moment_grad = grad.astype(jnp.float32)
     if projected:
         projection = _refresh_projection(
             state,
@@ -302,7 +304,7 @@ def _update_leaf(
             projection_seed=projection_seed,
             projection_refresh_interval=projection_refresh_interval,
         )
-        moment_grad = _project(grad, projection, state.orientation)
+        moment_grad = _project(moment_grad, projection, state.orientation)
     mu = (b1 * state.mu + (1.0 - b1) * moment_grad).astype(mu_dtype)
     nu = (b2 * state.nu + (1.0 - b2) * jnp.square(moment_grad)).astype(mu_dtype)
     step_size = _reference_step_size(learning_rate, count_inc, b1, b2)

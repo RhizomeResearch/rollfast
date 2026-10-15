@@ -1,6 +1,9 @@
+from dataclasses import replace
 from typing import Any, NamedTuple
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 import rollfast.finetune as rfft
 from rollfast.optim.adam8 import quantize_blocks
@@ -293,3 +296,51 @@ def test_adamw8_static_estimate_uses_real_leaf_shapes_and_storage():
     assert leaves_by_path["key:sensitive/moment:nu"].storage == "array"
     assert estimate.by_group["shared"] == quantized_bytes + (2048 + 33) * 4 * 2
     assert estimate.by_group["sensitive"] == 5000 * 4 * 2
+
+
+def test_state_memory_counts_master_parameters_when_requested():
+    plan = tiny_plan()
+    plan = replace(
+        plan, trainable=jax.tree.map(lambda x: x.astype(jnp.bfloat16), plan.trainable)
+    )
+    bundle = rfft.adamw_from_plan(plan, total_steps=4)
+    masters = rfft.make_master_params(plan.trainable, bundle.precision_config)
+
+    summary = rfft.optimizer_state_memory_summary(
+        bundle, bundle.init(masters), master_params=masters
+    )
+    included = rfft.estimate_optimizer_state_memory(
+        plan, bundle, include_master_params=True
+    )
+    excluded = rfft.estimate_optimizer_state_memory(plan, bundle)
+
+    assert summary.by_category["master_params"] == 14 * 4
+    assert included.by_category["master_params"] == 14 * 4
+    assert "master_params" not in excluded.by_category
+    assert any("include_master_params=True" in w for w in excluded.warnings)
+
+
+def test_low_precision_update_metrics_count_updates_rounding_would_discard():
+    masters = {"w": jnp.ones(4, dtype=jnp.float32), "frozen": None}
+    visible = {"w": jnp.ones(4, dtype=jnp.bfloat16), "frozen": None}
+    # Half the BF16 spacing at one is 2**-8; the zero update is not counted.
+    updates = {
+        "w": jnp.asarray([2.0**-10, 2.0**-6, 0.0, -(2.0**-10)], dtype=jnp.float32),
+        "frozen": None,
+    }
+
+    metrics = rfft.low_precision_update_metrics
+    for fn in (metrics, jax.jit(metrics)):
+        result = fn(visible, updates)
+        np.testing.assert_allclose(result["below_half_spacing_fraction"], 2 / 3)
+        np.testing.assert_allclose(result["param_rms"], 1.0)
+        np.testing.assert_allclose(
+            result["update_to_param_ratio"], result["update_rms"], rtol=1e-6
+        )
+    assert float(metrics(masters, updates)["below_half_spacing_fraction"]) == 0.0
+    np.testing.assert_allclose(
+        metrics(masters, updates, storage_dtype=jnp.bfloat16)[
+            "below_half_spacing_fraction"
+        ],
+        2 / 3,
+    )

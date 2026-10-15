@@ -235,13 +235,11 @@ def test_finetune_step_state_initializes_master_loss_scale_accumulators_and_rng(
     assert state.counters.microstep == 0
     assert state.rng.forward.shape == (2,)
     assert state.optimizer_state is not None
-    for leaf in jax.tree.leaves(
-        state.accumulation.grad_numerator,
-        is_leaf=lambda x: x is None,
-    ):
-        if leaf is not None:
-            assert leaf.dtype == bundle.accumulation_config.accumulate_dtype
-            assert jnp.all(leaf == 0)
+    # The optimizer state owns gradient accumulation; the record holds no buffer.
+    assert state.accumulation.grad_numerator is None
+    assert state.accumulation.loss_sum.dtype == (
+        bundle.accumulation_config.accumulate_dtype
+    )
 
 
 def test_finetune_update_step_advances_success_counters_and_commits_state():
@@ -456,15 +454,67 @@ def test_equinox_state_is_preserved_for_forward_rollback():
     )
 
 
-def test_finetune_update_step_rejects_internal_accumulation_until_stateful_path_exists():
-    plan = tiny_plan()
-    bundle = rfft.compile_optimizer(
+def _accumulating_bundle(plan, nonfinite="skip"):
+    return rfft.compile_optimizer(
         plan,
-        optimizer=rfft.OptimizerConfig(weight_decay=0.0),
+        optimizer=rfft.OptimizerConfig(base_lr=1e-2, weight_decay=0.0),
         schedule=rfft.ScheduleConfig(kind="constant", total_steps=10),
-        gradient_policy=rfft.GradientPolicy(clip_global_norm=None),
+        gradient_policy=rfft.GradientPolicy(clip_global_norm=None, nonfinite=nonfinite),
+        precision=rfft.PrecisionConfig(master_params="always"),
         accumulation=rfft.AccumulationConfig(steps=2),
     )
 
-    with pytest.raises(NotImplementedError, match="accumulation steps=1"):
+
+def test_finetune_update_step_accumulates_windows_and_discards_nonfinite_ones():
+    plan = tiny_plan()
+    bundle = _accumulating_bundle(plan)
+    state = rfft.init_finetune_step_state(
+        bundle, plan.trainable, model_state={"updates": jnp.asarray(0)}
+    )
+
+    def loss(model, model_state, key, factor):
+        del key
+        return (
+            jnp.sum(model["head"]["w"] ** 2) * factor,
+            {"updates": model_state["updates"] + 1},
+        )
+
+    step = jax.jit(
+        rfft.make_finetune_update_step(
+            plan, loss, bundle, state_policy="microbatch_sequential"
+        )
+    )
+
+    params, state, info = step(plan.trainable, state, jnp.asarray(1.0))
+    assert bool(info.all_finite) and not bool(info.update_applied)
+    assert_tree_allclose(params, plan.trainable)
+    assert int(state.accumulation.microsteps_in_window) == 1
+    assert int(state.counters.attempted_update) == 0
+
+    params, state, info = step(params, state, jnp.asarray(1.0))
+    assert bool(info.update_applied)
+    assert int(state.accumulation.microsteps_in_window) == 0
+    assert int(state.counters.attempted_update) == 1
+    assert int(state.counters.successful_update) == 1
+    assert int(state.model_state["updates"]) == 2
+    applied = params
+    assert not jnp.array_equal(applied["head"]["w"], plan.trainable["head"]["w"])
+
+    params, state, info = step(params, state, jnp.asarray(jnp.nan))
+    assert not bool(info.all_finite)
+    params, state, info = step(params, state, jnp.asarray(1.0))
+    assert not bool(info.update_applied)
+    assert_tree_allclose(params, applied)
+    assert int(state.counters.attempted_update) == 2
+    assert int(state.counters.successful_update) == 1
+    assert int(state.counters.microstep) == 4
+    assert int(state.model_state["updates"]) == 3
+    rfft.validate_accumulation_complete(state, bundle.accumulation_config)
+
+
+def test_finetune_update_step_accumulation_requires_skip_guard():
+    plan = tiny_plan()
+    bundle = _accumulating_bundle(plan, nonfinite="none")
+
+    with pytest.raises(NotImplementedError, match="nonfinite='skip'"):
         rfft.make_finetune_update_step(plan, _loss_with_state, bundle)

@@ -138,12 +138,16 @@ def test_sam_scan_retains_sum_order_broadcasting_and_aux(dtype, reduction):
             microbatch_axis=1,
             microbatch_count=batch.shape[1],
             microbatch_reduction=reduction,
+            accumulate_dtype=jnp.float32,
         )
 
-    expected = value_and_grad(params, batch[:, 0], offset, scale=2.0)
-    for index in range(1, batch.shape[1]):
+    def microbatch(index):
         item = value_and_grad(params, batch[:, index], offset, scale=2.0)
-        expected = jax.tree.map(lambda a, b: a + b, expected, item)
+        return jax.tree.map(lambda x: x.astype(jnp.float32), item)
+
+    expected = microbatch(0)
+    for index in range(1, batch.shape[1]):
+        expected = jax.tree.map(lambda a, b: a + b, expected, microbatch(index))
     if reduction == "mean":
         expected = jax.tree.map(lambda x: x * 0.25, expected)
     for fn in (evaluate, jax.jit(evaluate)):
@@ -152,7 +156,9 @@ def test_sam_scan_retains_sum_order_broadcasting_and_aux(dtype, reduction):
         )
     differentiated = jax.jit(jax.grad(lambda p: evaluate(p, batch)[0][0]))(params)
     _assert_close(
-        differentiated, expected[1], rtol=0.01 if dtype == jnp.bfloat16 else 1e-6
+        differentiated,
+        jax.tree.map(lambda g: g.astype(dtype), expected[1]),
+        rtol=0.01 if dtype == jnp.bfloat16 else 1e-6,
     )
     small = jax.make_jaxpr(evaluate)(params, batch).jaxpr
     large = jax.make_jaxpr(evaluate)(params, jnp.tile(batch, (1, 8))).jaxpr
@@ -184,6 +190,7 @@ def test_loss_bundle_scan_preserves_all_totals_and_last_model_state():
             {},
             microbatch_axis=0,
             microbatch_count=None,
+            accumulate_dtype=jnp.float32,
         )
 
     for fn in (evaluate, jax.jit(evaluate)):
@@ -223,9 +230,11 @@ def test_rejected_scaled_steps_bypass_optimizer_and_preserve_promoted_state(
     state = bundle.init(master)
 
     def apply(g, loss):
-        return steps._apply_scaled_master_grads(
-            bundle, visible, master, state, g, jnp.array(2.0), loss
+        grads, finite = steps._unscale_gradients(bundle, g, jnp.array(2.0), loss)
+        commit = steps._commit_update(
+            bundle, visible, master, state, grads, finite, sr_key=None
         )
+        return commit.visible, commit.master, commit.opt_state, commit.accepted
 
     graph = jax.make_jaxpr(apply)({"w": jnp.array(2.0)}, jnp.array(1.0)).jaxpr
     conditional = next(eqn for eqn in graph.eqns if eqn.primitive.name == "cond")
@@ -252,17 +261,23 @@ def test_rejected_scaled_steps_preserve_custom_optimizer_effects():
     bundle = replace(
         _bundle(), tx=optax.GradientTransformation(lambda _: jnp.array(0), update)
     )
-    apply = jax.jit(
-        lambda grad: steps._apply_scaled_master_grads(
+
+    def apply(grad):
+        grads, finite = steps._unscale_gradients(
+            bundle, grad, jnp.array(1.0), jnp.array(1.0)
+        )
+        commit = steps._commit_update(
             bundle,
             jnp.array(1.0),
             jnp.array(1.0),
             jnp.array(0),
-            grad,
-            jnp.array(1.0),
-            jnp.array(1.0),
+            grads,
+            finite,
+            sr_key=None,
         )
-    )
+        return commit.visible, commit.master, commit.opt_state, commit.accepted
+
+    apply = jax.jit(apply)
     visible, master, state, finite = jax.block_until_ready(apply(jnp.array(jnp.nan)))
     assert len(calls) == 1
     assert float(visible) == float(master) == 1.0

@@ -8,7 +8,12 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from rollfast.utils import AxisName, dist_reduce, resolve_partition_norm_axis_name
+from rollfast.utils import (
+    AxisName,
+    _squared_magnitude_f32,
+    dist_reduce,
+    resolve_partition_norm_axis_name,
+)
 
 
 class GlobalNormClipState(NamedTuple):
@@ -189,7 +194,7 @@ def _global_norm(
     for leaf in jax.tree.leaves(tree, is_leaf=lambda x: x is None):
         if leaf is None or not hasattr(leaf, "dtype"):
             continue
-        total = total + jnp.sum(jnp.square(jnp.abs(leaf)).astype(jnp.float32))
+        total = total + jnp.sum(_squared_magnitude_f32(leaf))
     norm_axis_name = resolve_partition_norm_axis_name(
         axis_name=axis_name,
         partition_axis_names=partition_axis_names,
@@ -202,7 +207,9 @@ def _global_norm(
 def _scale_leaf(leaf, scale):
     if leaf is None or not hasattr(leaf, "dtype"):
         return leaf
-    return leaf * scale.astype(leaf.dtype)
+    # A low-precision scale can underflow or round away; scale in float32.
+    working = leaf.astype(jnp.promote_types(leaf.dtype, jnp.float32))
+    return (working * scale).astype(leaf.dtype)
 
 
 __all__ = (

@@ -273,3 +273,39 @@ def test_loss_scaled_master_aux_commit_and_overflow_rollback(compiled, stateful)
         else:
             assert_tree_allclose((visible, master, state, model_state, rng), previous)
             assert scale.loss_scale == 4.0
+
+
+@pytest.mark.parametrize("loss_scaled", [False, True])
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+def test_master_steps_keep_their_argument_structure_across_jitted_calls(
+    dtype, loss_scaled
+):
+    plan = _plan(dtype)
+    precision = rfft.PrecisionConfig(
+        loss_scale="static" if loss_scaled else "none", static_loss_scale=8.0
+    )
+    bundle = _bundle(plan, precision)
+    traces = []
+
+    def loss(params):
+        traces.append(None)
+        return _loss_fn(params)
+
+    make = (
+        rfft.make_loss_scaled_master_update_step
+        if loss_scaled
+        else rfft.make_master_update_step
+    )
+    step = jax.jit(make(loss, bundle))
+    # The float32 policy keeps no masters; the BF16 one receives them up front.
+    visible = plan.trainable
+    master = rfft.make_master_params(visible, precision)
+    state = bundle.init(visible if master is None else master)
+    scale = (rfft.init_loss_scale_state(precision),) if loss_scaled else ()
+    for _ in range(2):
+        visible, master, state, *rest = step(visible, master, state, *scale)
+        scale = (rest[0],) if loss_scaled else ()
+
+    assert len(traces) == 1
+    assert (master is None) == (dtype == jnp.float32)
+    assert (visible if master is None else master)["w"][0] < 1.0

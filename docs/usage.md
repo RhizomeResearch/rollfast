@@ -82,8 +82,14 @@ params = apply_updates(params, updates, key=step_key, stochastic=True)
 
 Use `apply_updates_prefix` when updates are a prefix of an Equinox model PyTree.
 
+Stochastic rounding rounds a finite value away from zero with probability equal to its distance from the truncated BF16
+value, measured in BF16 spacings. Exactly representable values, signed zeros, infinities and NaNs keep their class;
+values beyond the largest finite BF16 number may round to infinity. For plan-aware fine-tuning steps that own the
+rounding stream, master parameters, and loss scaling, see [low-precision fine-tuning](finetuning/precision.md).
+
 ## Runnable Examples
 
 - [`examples/adamw_quickstart.py`](../examples/adamw_quickstart.py)
 - [`examples/schedule_free_eval.py`](../examples/schedule_free_eval.py)
 - [`examples/finetuning/`](../examples/finetuning)
+- [`examples/finetuning/low_precision.py`](../examples/finetuning/low_precision.py)

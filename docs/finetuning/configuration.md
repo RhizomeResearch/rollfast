@@ -12,6 +12,7 @@ schema version 1 remain unchanged.
 | `AccumulationConfig.reduce_after_accumulation` | `True`                                                     | `False`                              |
 | `AccumulationConfig.finite_policy`             | `discard_window`                                           | `error`                              |
 | `PrecisionConfig.cast_back`                    | `nearest`                                                  | `stochastic`                         |
+| `PrecisionConfig.update_compute_dtype`         | `float32`                                                  | Other dtypes                         |
 
 With `remainder="error"`, callers must finish training on a complete accumulation window. Rollfast does not currently
 expose a finalization API for flushing or dropping a partial window, so the caller owns that lifecycle.
@@ -26,10 +27,10 @@ decay, or EMA/SWA averages. Optax `MultiSteps.gradient_step` counts completed wi
 apply AdamW weight decay. If a batch has no valid training targets, record the skip and omit the update invocation.
 
 Call `validate_accumulation_complete(state, accumulation_config)` at the end of an epoch or run. It accepts a compiled
-optimizer state (including EMA/SWA wrappers) or an explicit `AccumulationState`, and raises `ValueError` with the
-pending and required microstep counts for an incomplete window. It does not apply, drop, or flush that window. Save an
-incomplete window in the optimizer checkpoint when resuming it later; validate completion only when training is meant to
-finish.
+optimizer state (including EMA/SWA wrappers), a `FineTuneStepState`, or an explicit `AccumulationState`, and raises
+`ValueError` with the pending and required microstep counts for an incomplete window. It does not apply, drop, or flush
+that window. Save an incomplete window in the optimizer checkpoint when resuming it later; validate completion only when
+training is meant to finish.
 
 Ordinary `MultiSteps` accumulation averages microbatch gradients under `normalization="examples"`. For batches with
 different valid counts, use `LossBundle` sums and normalizers with `make_accumulating_loss_bundle_update_step` to obtain
@@ -37,9 +38,10 @@ the declared global weighted mean. Its `info.update_applied` reports the actual 
 finite-guard rejection. The existing checkpoint schema and state structure are unchanged; previously stored averages
 from discarded updates cannot be corrected retroactively.
 
-`cast_back="nearest"` describes the fine-tuning optimizer's deterministic cast-back behavior. For stochastic BF16
-parameter updates, use the separate [`apply_updates(..., stochastic=True)` helpers](../usage.md#low-precision-updates)
-with a PRNG key.
+`cast_back="nearest"` describes how float32 master parameters are cast back to the model dtype; the masters keep the
+residual updates, so the cast needs no stochastic rounding. For BF16 parameter storage without masters, set
+`parameter_rounding="stochastic"` with `master_params="never"`. [Low-precision fine-tuning](precision.md) describes the
+precision modes, the remaining `PrecisionConfig` validation, and which step helpers honor each field.
 
 `schedule_free_adam_from_plan` defaults to a WSD schedule. When a caller supplies any supported `ScheduleConfig`
 explicitly, the builder uses and reports that schedule without replacing it.

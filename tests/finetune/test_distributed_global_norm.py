@@ -83,6 +83,24 @@ def test_global_norm_clip_uses_complex_magnitude_and_preserves_phase():
     assert jnp.imag(updates["w"][0]) != 0.0
 
 
+def test_float16_global_norms_do_not_overflow():
+    # 300**2 exceeds the float16 maximum of 65504.
+    grads = {"w": jnp.asarray([300.0], dtype=jnp.float16)}
+    tx = clip_by_global_norm(1.0)
+
+    def clip(grads):
+        return tx.update(grads, tx.init(None))[0]
+
+    for fn in (clip, jax.jit(clip)):
+        clipped = fn(grads)
+        assert clipped["w"].dtype == jnp.float16
+        np.testing.assert_allclose(clipped["w"].astype(jnp.float32), 1.0, rtol=1e-3)
+    np.testing.assert_allclose(global_l2_norm(grads), 300.0, rtol=1e-6)
+    perturbation, norm = sam_perturbation(grads, rho=0.5)
+    np.testing.assert_allclose(perturbation["w"].astype(jnp.float32), 0.5, rtol=1e-3)
+    np.testing.assert_allclose(norm, 0.5, rtol=1e-3)
+
+
 def test_sam_perturbation_uses_partition_axes():
     def perturb_shard(grad):
         perturbation, norm = sam_perturbation(

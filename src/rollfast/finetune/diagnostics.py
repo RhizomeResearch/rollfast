@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
 import jax
@@ -14,6 +14,7 @@ from rollfast.optim.adam8 import (
     quantized_nbytes,
 )
 
+from ._precision import master_leaf_dtype, uses_master_params
 from ._state_tree import _format_tokens, _is_masked_node, _path_leaves, _path_tokens
 from .config import (
     SCHEMA_VERSION,
@@ -161,12 +162,22 @@ def _state_memory_totals(leaves: tuple[StateLeafSummary, ...]) -> _StateMemoryTo
 def optimizer_state_memory_summary(
     bundle: OptimizerBundle,
     state: Any,
+    *,
+    master_params: Any | None = None,
 ) -> OptimizerStateMemorySummary:
-    """Measure optimizer-state storage from an initialized state PyTree."""
+    """Measure optimizer-state storage from an initialized state PyTree.
+
+    Pass ``master_params`` to include master-parameter storage under the
+    ``"master_params"`` category.
+    """
 
     leaves = tuple(
         summary
         for path, leaf in _path_leaves(state)
+        if (summary := _summarize_leaf(path, leaf)) is not None
+    ) + tuple(
+        replace(summary, path=f"master_params/{summary.path}", category="master_params")
+        for path, leaf in _path_leaves(master_params)
         if (summary := _summarize_leaf(path, leaf)) is not None
     )
     totals = _state_memory_totals(leaves)
@@ -192,12 +203,15 @@ def estimate_optimizer_state_memory(
     bundle: OptimizerBundle,
     *,
     preconditioner_dtype: Any | None = None,
+    include_master_params: bool = False,
 ) -> OptimizerStateMemoryEstimate:
     """Estimate optimizer-state storage from the plan before ``bundle.init``.
 
     ``preconditioner_dtype`` should match the value passed to
     ``hybrid_kron_adam_from_plan``. ``None`` matches PSGD/Kron's default fp32
-    factor initialization for non-scalar factors.
+    factor initialization for non-scalar factors. With
+    ``include_master_params``, the estimate adds the master parameters the
+    precision policy keeps, under the ``"master_params"`` category.
     """
 
     normalized = validate_plan(plan)
@@ -210,6 +224,9 @@ def estimate_optimizer_state_memory(
     plan_leaves = _plan_trainable_leaves(
         normalized.trainable,
         normalized.labels,
+    )
+    include_masters = include_master_params and uses_master_params(
+        normalized.trainable, bundle.precision_config
     )
     leaves = []
     if bundle.optimizer_config.name == "adamw8":
@@ -232,6 +249,20 @@ def estimate_optimizer_state_memory(
                     preconditioner_dtype=preconditioner_dtype,
                 )
             )
+        if include_masters:
+            dtype = master_leaf_dtype(
+                leaf.dtype, bundle.precision_config.master_param_dtype
+            )
+            leaves.append(
+                StateLeafSummary(
+                    path=f"master_params/{_format_tokens(_path_tokens(path))}",
+                    category="master_params",
+                    shape=tuple(int(dim) for dim in leaf.shape),
+                    dtype=dtype.name,
+                    bytes=int(leaf.size * dtype.itemsize),
+                    group=label,
+                )
+            )
 
     leaves = [_with_estimated_placement(leaf, bundle) for leaf in leaves]
     totals = _state_memory_totals(tuple(leaves))
@@ -247,6 +278,13 @@ def estimate_optimizer_state_memory(
             "schedule-free averaging state, and accumulation buffers."
         )
     ]
+    if not include_master_params and uses_master_params(
+        normalized.trainable, bundle.precision_config
+    ):
+        warnings.append(
+            "the precision policy keeps master parameters, which this estimate "
+            "excludes; pass include_master_params=True to count them."
+        )
     if (
         bundle.optimizer_config.name in {"aurora_adam", "prism_adam", "kron_adam"}
         and bundle.report.estimated_state_bytes != moment_bytes
@@ -273,6 +311,78 @@ def estimate_optimizer_state_memory(
         leaves=tuple(leaves),
         warnings=tuple(warnings),
     )
+
+
+def low_precision_update_metrics(
+    params: Any,
+    updates: Any,
+    *,
+    storage_dtype: Any | None = None,
+) -> dict[str, jax.Array]:
+    """Return float32 metrics on how parameter updates survive rounding.
+
+    ``below_half_spacing_fraction`` is the fraction of nonzero update elements
+    smaller than half the spacing between representable ``storage_dtype``
+    values at the parameter; a round-to-nearest store in that dtype discards
+    them. ``storage_dtype`` defaults to each leaf's dtype. With master
+    parameters, pass the masters and the visible dtype to see how much of each
+    update only the masters retain. ``update_to_param_ratio`` is the update RMS
+    over the parameter RMS. Complex leaves count their real and imaginary parts
+    as separate elements.
+
+    The function is JIT-compatible. Inside ``shard_map`` or ``pmap`` the values
+    cover the local shard only.
+    """
+
+    param_sq = jnp.asarray(0.0, dtype=jnp.float32)
+    update_sq = jnp.asarray(0.0, dtype=jnp.float32)
+    below = jnp.asarray(0.0, dtype=jnp.float32)
+    changed = jnp.asarray(0.0, dtype=jnp.float32)
+    count = 0
+    for param, update in zip(
+        jax.tree.leaves(params, is_leaf=lambda x: x is None),
+        jax.tree.leaves(updates, is_leaf=lambda x: x is None),
+        strict=True,
+    ):
+        if param is None or update is None or _is_masked_node(update):
+            continue
+        dtype = jnp.dtype(param.dtype if storage_dtype is None else storage_dtype)
+        param_values = _real_components_f32(param)
+        update_values = _real_components_f32(update)
+        info = jnp.finfo(dtype)
+        smallest = jnp.asarray(info.smallest_subnormal, dtype=jnp.float32)
+        _, exponent = jnp.frexp(param_values)
+        spacing = jnp.maximum(
+            jnp.ldexp(jnp.ones_like(param_values), exponent - 1 - int(info.nmant)),
+            smallest,
+        )
+        spacing = jnp.where(param_values == 0.0, smallest, spacing)
+        nonzero = update_values != 0.0
+        param_sq = param_sq + jnp.sum(jnp.square(param_values))
+        update_sq = update_sq + jnp.sum(jnp.square(update_values))
+        below = below + jnp.sum(
+            jnp.logical_and(nonzero, jnp.abs(update_values) < 0.5 * spacing),
+            dtype=jnp.float32,
+        )
+        changed = changed + jnp.sum(nonzero, dtype=jnp.float32)
+        count += int(param_values.size)
+    size = jnp.asarray(max(count, 1), dtype=jnp.float32)
+    param_rms = jnp.sqrt(param_sq / size)
+    update_rms = jnp.sqrt(update_sq / size)
+    return {
+        "param_rms": param_rms,
+        "update_rms": update_rms,
+        "update_to_param_ratio": update_rms
+        / jnp.maximum(param_rms, jnp.finfo(jnp.float32).tiny),
+        "below_half_spacing_fraction": below / jnp.maximum(changed, 1.0),
+    }
+
+
+def _real_components_f32(value: Any) -> jax.Array:
+    value = jnp.asarray(value)
+    if jnp.issubdtype(value.dtype, jnp.complexfloating):
+        return jnp.stack([jnp.real(value), jnp.imag(value)]).astype(jnp.float32)
+    return value.astype(jnp.float32)
 
 
 def _summarize_leaf(path: tuple[Any, ...], leaf: Any) -> StateLeafSummary | None:
@@ -602,5 +712,6 @@ __all__ = (
     "OptimizerStateMemorySummary",
     "StateLeafSummary",
     "estimate_optimizer_state_memory",
+    "low_precision_update_metrics",
     "optimizer_state_memory_summary",
 )

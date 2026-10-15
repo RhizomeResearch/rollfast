@@ -170,6 +170,8 @@ def _publish_index(path, index):
     path.write_text(json.dumps(pointer))
 
 
+# The round trip updates the visible parameters directly and omits masters.
+@pytest.mark.filterwarnings("ignore:the precision policy keeps master parameters")
 @pytest.mark.parametrize("averaging", [False, True])
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
 def test_safe_adamw_round_trip_preserves_next_update(tmp_path, averaging, dtype):
@@ -331,6 +333,54 @@ def test_reader_enforces_each_limit(tmp_path, field, value, cause):
             model_checkpoint_id="training-model-1",
             limits=replace(ARRAY_LIMITS, **{field: value}),
         )
+
+
+def test_step_state_array_checkpoint_resumes_the_next_step_exactly(tmp_path):
+    plan = tiny_plan()
+    plan = replace(
+        plan, trainable=jax.tree.map(lambda x: x.astype(jnp.bfloat16), plan.trainable)
+    )
+    bundle = rfft.compile_optimizer(
+        plan,
+        optimizer=rfft.OptimizerConfig(base_lr=1e-2),
+        schedule=rfft.ScheduleConfig(kind="constant", total_steps=5),
+        precision=rfft.bf16_master_free_precision(),
+    )
+
+    def loss(model, model_state, key):
+        del model_state, key
+        return jnp.sum(model["head"]["w"].astype(jnp.float32) ** 2), None
+
+    step = jax.jit(rfft.make_finetune_update_step(plan, loss, bundle))
+    initial = rfft.init_finetune_step_state(bundle, plan.trainable, rng_seed=9)
+    params, state, _ = step(plan.trainable, initial)
+    path = tmp_path / "optimizer.rfarr"
+    saved = rfft.make_step_state_checkpoint(
+        bundle, state, model_checkpoint_id="training-model-1"
+    )
+
+    rfft.save_array_state_checkpoint(path, saved, limits=ARRAY_LIMITS)
+    loaded = rfft.load_array_state_checkpoint(
+        path,
+        bundle,
+        template=rfft.make_step_state_checkpoint(
+            bundle, initial, model_checkpoint_id="training-model-1"
+        ),
+        model_checkpoint_id="training-model-1",
+        applied_updates=1,
+        limits=ARRAY_LIMITS,
+    )
+    resumed = rfft.step_state_from_checkpoint(loaded)
+
+    for actual, expected in zip(
+        jax.tree.leaves(step(params, resumed)),
+        jax.tree.leaves(step(params, state)),
+        strict=True,
+    ):
+        assert jnp.array_equal(actual, expected)
+    # Registering these as PyTrees must not change their stored schema.
+    schema, _ = describe_tree({"counters": state.counters, "rng": state.rng})
+    assert [child["kind"] for child in schema["children"]] == ["dataclass"] * 2
 
 
 def test_array_shards_are_plain_npy_byte_files(tmp_path):

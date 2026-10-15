@@ -190,7 +190,7 @@ maturity of the research algorithms and reference profiles, not the stability of
 
 - [`docs/stability.md`](./docs/stability.md) for the v1 compatibility contract;
 - [`docs/migrating-to-1.0.md`](./docs/migrating-to-1.0.md) when upgrading from 0.x;
-- [`docs/releases/1.2.0.md`](./docs/releases/1.2.0.md) and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
+- [`docs/releases/1.3.0.md`](./docs/releases/1.3.0.md) and [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## Examples and Fine-Tuning
 
@@ -199,11 +199,12 @@ evaluation parameters, and stochastic rounding helpers.
 
 Runnable examples live under [`examples/`](./examples):
 
-| Script                                                               | Covers                                                                                            |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [`examples/adamw_quickstart.py`](./examples/adamw_quickstart.py)     | AdamW on a small PyTree with a weight-decay mask                                                  |
-| [`examples/schedule_free_eval.py`](./examples/schedule_free_eval.py) | Schedule-Free Adam training parameters and averaged eval parameters                               |
-| [`examples/finetuning/`](./examples/finetuning)                      | Equimo plan-aware optimizers, EMA/SWA, SAM/ASAM, AdaLoRA, state migration, and memory diagnostics |
+| Script                                                                           | Covers                                                                                            |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [`examples/adamw_quickstart.py`](./examples/adamw_quickstart.py)                 | AdamW on a small PyTree with a weight-decay mask                                                  |
+| [`examples/schedule_free_eval.py`](./examples/schedule_free_eval.py)             | Schedule-Free Adam training parameters and averaged eval parameters                               |
+| [`examples/finetuning/`](./examples/finetuning)                                  | Equimo plan-aware optimizers, EMA/SWA, SAM/ASAM, AdaLoRA, state migration, and memory diagnostics |
+| [`examples/finetuning/low_precision.py`](./examples/finetuning/low_precision.py) | BF16 precision modes, stochastic parameter rounding, and exact step-state resume, without Equimo  |
 
 `rollfast.finetune` compiles model-library fine-tuning plans into grouped Optax optimizers. It is designed for Equimo's
 `equimo.finetune.FineTunePlan`, but the core only requires a structural plan with five fields: `trainable`, `frozen`,
@@ -297,7 +298,8 @@ Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with compatibil
 [`docs/finetuning/compatibility.md`](./docs/finetuning/compatibility.md), state and checkpoint guidance in
 [`docs/finetuning/state_and_checkpoints.md`](./docs/finetuning/state_and_checkpoints.md), query-model and mutable-state
 guidance in [`docs/finetuning/query_models.md`](./docs/finetuning/query_models.md), configuration support in
-[`docs/finetuning/configuration.md`](./docs/finetuning/configuration.md), and averaging guidance in
+[`docs/finetuning/configuration.md`](./docs/finetuning/configuration.md), BF16/FP16 training guidance in
+[`docs/finetuning/precision.md`](./docs/finetuning/precision.md), and averaging guidance in
 [`docs/finetuning/averaging.md`](./docs/finetuning/averaging.md). The checkpoint guide includes bounded, non-executable
 array storage for shared POSIX filesystems; a runnable example is in
 [`examples/finetuning/array_checkpoint.py`](./examples/finetuning/array_checkpoint.py).
@@ -642,7 +644,7 @@ Complex-parameter support is explicit:
 | Public Muon/PRISM/Aurora/RMNP/NorMuon/TrasMuon/Pion wrappers | Complex leaves route to Adam                    |
 | Direct matrix transforms                                     | Rejected                                        |
 | SAM/ASAM and global-norm clipping                            | Supported with Hermitian magnitude              |
-| Plain fine-tuning AdamW without a real master-parameter cast | Supported                                       |
+| Plain fine-tuning AdamW, including master parameters         | Supported; complex leaves keep complex masters  |
 | AdamW8, APOLLO, GaLore, SODA, Schedule-Free, and Hyperball   | Rejected before real-only state or update casts |
 
 A bare `MatrixDimensionNumbers(...)` is only for a single array leaf. It is not broadcast across PyTrees; for structured
@@ -771,6 +773,13 @@ def step(model, opt_state, batch, key):
 
     return new_model, new_opt_state, loss
 ```
+
+Plan-aware fine-tuning applies the same rounding through
+`PrecisionConfig(master_params="never", parameter_rounding="stochastic")`, or the `rfft.bf16_master_free_precision()`
+preset, with `rfft.make_finetune_update_step`. Its rounding keys come from a checkpointed RNG stream that advances only
+with applied updates, so a resumed run continues exactly. Float32 master parameters are the alternative: they keep small
+updates themselves, so their cast back to BF16 uses round-to-nearest. See
+[`docs/finetuning/precision.md`](./docs/finetuning/precision.md).
 
 #### 2. Memory-Efficient Optimizer Moments
 
