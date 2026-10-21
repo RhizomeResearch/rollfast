@@ -438,6 +438,25 @@ def test_bundle_manifest_is_serializable_shape_metadata():
     assert manifest["groups"]
 
 
+@pytest.mark.parametrize(
+    "builder",
+    (
+        rfft.adamw_from_plan,
+        rfft.adamw8_from_plan,
+        lambda plan, **kwargs: rfft.galore_adamw_from_plan(
+            plan, galore=rfft.GaLoreConfig(rank=1), **kwargs
+        ),
+    ),
+)
+def test_adamw_builders_take_betas_and_eps(builder):
+    default = builder(tiny_plan(), total_steps=4).optimizer_config
+    chosen = builder(tiny_plan(), total_steps=4, b1=0.8, b2=0.95, eps=1e-8)
+    manifest = chosen.manifest()["optimizer"]
+
+    assert (default.b1, default.b2, default.eps) == (0.9, 0.999, 1e-6)
+    assert (manifest["b1"], manifest["b2"], manifest["eps"]) == (0.8, 0.95, 1e-8)
+
+
 def test_bundle_updates_can_be_applied_with_optax():
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(

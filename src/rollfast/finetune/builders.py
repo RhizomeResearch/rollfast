@@ -368,6 +368,9 @@ def adamw_from_plan(
     base_lr: float = 5e-4,
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
+    b1: float = 0.9,
+    b2: float = 0.999,
+    eps: float = 1e-6,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
@@ -382,6 +385,8 @@ def adamw_from_plan(
 ) -> OptimizerBundle:
     """Build grouped AdamW from a fine-tuning plan.
 
+    ``b1`` and ``b2`` are the moment decay rates. ``eps`` defaults to ``1e-6``,
+    not the ``1e-8`` of Optax and PyTorch; pass ``eps=1e-8`` to match them.
     ``precision`` sets master parameters, loss scaling, and parameter rounding.
     ``moment_dtype`` is shorthand for ``precision.moment_dtype``; the default
     stores float32 moments.
@@ -391,6 +396,9 @@ def adamw_from_plan(
         name="adamw",
         base_lr=base_lr,
         weight_decay=weight_decay,
+        b1=b1,
+        b2=b2,
+        eps=eps,
         lora_b_lr_ratio=lora_b_lr_ratio,
         **kwargs,
     )
@@ -422,6 +430,9 @@ def galore_adamw_from_plan(
     base_lr: float = 5e-4,
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
+    b1: float = 0.9,
+    b2: float = 0.999,
+    eps: float = 1e-6,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
@@ -435,8 +446,9 @@ def galore_adamw_from_plan(
 ) -> OptimizerBundle:
     """Build grouped GaLore AdamW from a fine-tuning plan.
 
-    ``precision`` and ``moment_dtype`` behave as in ``adamw_from_plan``.
-    Projected moments narrower than float32 are stored with round-to-nearest.
+    ``b1``, ``b2``, ``eps``, ``precision``, and ``moment_dtype`` behave as in
+    ``adamw_from_plan``. Projected moments narrower than float32 are stored
+    with round-to-nearest.
     """
 
     group_rules = tuple(group_rules)
@@ -444,6 +456,9 @@ def galore_adamw_from_plan(
         name="galore_adamw",
         base_lr=base_lr,
         weight_decay=weight_decay,
+        b1=b1,
+        b2=b2,
+        eps=eps,
         **kwargs,
     )
     schedule_config = _schedule_config(schedule, total_steps)
@@ -849,6 +864,9 @@ def adamw8_from_plan(
     base_lr: float = 5e-4,
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
+    b1: float = 0.9,
+    b2: float = 0.999,
+    eps: float = 1e-6,
     clip_global_norm: float | None = 1.0,
     accumulation_steps: int = 1,
     lora_b_lr_ratio: float | None = None,
@@ -863,6 +881,7 @@ def adamw8_from_plan(
 ) -> OptimizerBundle:
     """Build grouped AdamW with blockwise 8-bit moment state.
 
+    ``b1``, ``b2``, and ``eps`` behave as in ``adamw_from_plan``.
     ``precision.moment_dtype`` must match the quantization fallback dtype.
     """
 
@@ -877,6 +896,9 @@ def adamw8_from_plan(
         name="adamw8",
         base_lr=base_lr,
         weight_decay=weight_decay,
+        b1=b1,
+        b2=b2,
+        eps=eps,
         lora_b_lr_ratio=lora_b_lr_ratio,
         **kwargs,
     )

@@ -5,6 +5,11 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+### Added
+
+- Name `b1`, `b2`, and `eps` in the signatures of `adamw_from_plan`, `adamw8_from_plan`, and `galore_adamw_from_plan`.
+  Their defaults are unchanged; `eps` stays `1e-6`, against `1e-8` in Optax and PyTorch.
+
 ### Fixed
 
 - Reject master parameters passed to `init_finetune_step_state` or a master-aware step when the precision policy keeps
