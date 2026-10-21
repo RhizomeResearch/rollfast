@@ -5,6 +5,11 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+## [1.4.0] - 2026-10-21
+
+Supplied master parameters follow the precision policy, and the AdamW builders name their Adam hyperparameters. Detailed
+release notes are available in [`docs/releases/1.4.0.md`](./docs/releases/1.4.0.md).
+
 ### Added
 
 - Name `b1`, `b2`, and `eps` in the signatures of `adamw_from_plan`, `adamw8_from_plan`, and `galore_adamw_from_plan`.
