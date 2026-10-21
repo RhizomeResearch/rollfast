@@ -452,7 +452,7 @@ def _store_moment_tree(
     if target_dtype == jnp.dtype(jnp.bfloat16):
         if sr_key is None:
             key, sr_key = jax.random.split(cast(jax.Array, key), 2)
-        return _tree_stochastic_cast(tree, target_dtype, cast(jax.Array, sr_key)), key
+        return _tree_stochastic_cast(tree, target_dtype, sr_key), key
     return _cast_state_tree(tree, target_dtype), key
 
 
