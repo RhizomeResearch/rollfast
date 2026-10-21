@@ -5,6 +5,13 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+### Fixed
+
+- Reject master parameters passed to `init_finetune_step_state` or a master-aware step when the precision policy keeps
+  none, such as `master_params="never"`, float32 weights under `"auto"`, or stochastic parameter rounding. The state
+  silently kept them before: a `"never"` policy trained float32 masters that the precision report denied, and the
+  checkpoint stored them.
+
 ## [1.3.0] - 2026-10-15
 
 Low-precision fine-tuning: explicit BF16/FP16 precision modes, master-free stochastic parameter rounding, and composite

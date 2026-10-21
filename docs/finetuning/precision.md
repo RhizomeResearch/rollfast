@@ -34,7 +34,9 @@ than its model leaf, and complex leaves keep complex masters.
 ## Steps that honor the policy
 
 Use the composite steps, which carry masters, loss scale, RNG streams, and counters in one `FineTuneStepState` PyTree
-and therefore run under `jax.jit` and `jax.lax.scan`:
+and therefore run under `jax.jit` and `jax.lax.scan`. Rollfast never casts the model: partition the float32 model as
+`fp32_plan`, then its BF16 copy as `plan`. Compile the bundle on `plan`, because `master_params="auto"` resolves against
+the dtypes of the plan it compiles, and pass the float32 partition as the masters:
 
 ```python
 optim = rfft.adamw_from_plan(
@@ -42,17 +44,19 @@ optim = rfft.adamw_from_plan(
 )
 state = rfft.init_finetune_step_state(
     optim,
-    bf16_trainable,
-    master_params=fp32_trainable,  # The original float32 weights, before the cast.
+    plan.trainable,
+    master_params=fp32_plan.trainable,  # The original float32 weights, before the cast.
     rng_seed=0,
 )
 step = jax.jit(rfft.make_finetune_update_step(plan, loss_fn, optim))
-bf16_trainable, state, info = step(bf16_trainable, state, batch)
+trainable, state, info = step(plan.trainable, state, batch)
 ```
 
 `loss_fn(model, model_state, key, *args)` returns `(loss, new_model_state)`. Without `master_params`, the state builds
-masters by upcasting `bf16_trainable`, which keeps the rounding already applied to the weights. The masters must have
-the model parameters' structure and shapes, and at least their precision.
+masters by upcasting `plan.trainable`, which keeps the rounding already applied to the weights; nothing is lost when the
+published weights are BF16. The masters must have the model parameters' structure and shapes, and at least their
+precision. Pass them only when `optim.report.precision.master_params` is true: a policy that keeps no masters rejects
+them.
 
 | Helper                                                                           | Masters | Loss scaling | Stochastic parameter rounding | Notes                                                 |
 | -------------------------------------------------------------------------------- | ------- | ------------ | ----------------------------- | ----------------------------------------------------- |
@@ -143,6 +147,7 @@ problem and resumes a run from a step-state checkpoint.
 | BF16 loss plateaus early                                                  | The report says `master_free_nearest`. Keep masters or use `bf16_master_free_precision()`; check `below_half_spacing_fraction`. |
 | `parameter_rounding='stochastic' ... carries no RNG`                      | The helper has no RNG streams. Use `make_finetune_update_step` or another RNG-aware step.                                       |
 | `FineTuneStepState.master_params is None but ... keeps master parameters` | Build the state with `init_finetune_step_state` instead of replacing its masters with `None`.                                   |
+| `the precision policy keeps no master parameters`                         | The policy updates the parameters directly. Pass masters only when `report.precision.master_params` is true.                    |
 | Warning that the checkpoint omits master parameters                       | Use `make_step_state_checkpoint`, pass `master_params`, or set `master_params="never"` for direct loops.                        |
 | `accumulation requires GradientPolicy(nonfinite='skip')`                  | The composite steps discard nonfinite windows through the finite guard.                                                         |
 | `PrecisionConfig.accumulation_dtype must match`                           | Set the accumulation dtype on `AccumulationConfig`, and the same value on `PrecisionConfig`.                                    |

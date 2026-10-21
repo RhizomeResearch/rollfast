@@ -309,6 +309,49 @@ def test_step_state_rejects_masters_with_less_precision_than_visible_params():
         )
 
 
+@pytest.mark.parametrize(
+    ("dtype", "precision"),
+    (
+        (jnp.float32, rfft.PrecisionConfig()),
+        (jnp.bfloat16, rfft.PrecisionConfig(master_params="never")),
+        (jnp.bfloat16, rfft.bf16_master_free_precision()),
+    ),
+)
+def test_masters_are_rejected_when_the_policy_keeps_none(dtype, precision):
+    plan = _plan(dtype)
+    bundle = _bundle(plan, precision)
+    masters = {"w": plan.trainable["w"].astype(jnp.float32)}
+    step = rfft.make_stateful_loss_scaled_master_update_step(
+        plan, _quadratic_loss, bundle
+    )
+
+    with pytest.raises(ValueError, match="keeps no master parameters"):
+        rfft.init_finetune_step_state(bundle, plan.trainable, master_params=masters)
+    with pytest.raises(ValueError, match="keeps no master parameters"):
+        step(
+            plan.trainable,
+            masters,
+            bundle.init(masters),
+            None,
+            None,
+            rfft.init_rng_streams(0),
+            jnp.zeros(4),
+        )
+
+
+def test_step_state_keeps_float32_masters_supplied_for_bf16_params():
+    weights = jnp.asarray([1.0, -2.0, 0.5, 3.001], dtype=jnp.float32)
+    plan = _plan(jnp.bfloat16, values=weights)
+    bundle = _bundle(plan, rfft.bf16_mixed_precision())
+
+    state = rfft.init_finetune_step_state(
+        bundle, plan.trainable, master_params={"w": weights}
+    )
+
+    np.testing.assert_array_equal(state.master_params["w"], weights)
+    assert not np.array_equal(state.master_params["w"], plan.trainable["w"])
+
+
 def test_complex_low_precision_trainables_keep_complex_masters():
     trainable = {
         "w": jnp.asarray([1.0, 2.0], dtype=jnp.bfloat16),

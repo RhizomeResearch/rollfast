@@ -231,9 +231,11 @@ def init_finetune_step_state(
 ) -> FineTuneStepState:
     """Initialize the canonical composite fine-tuning step state.
 
-    Pass ``master_params`` built from the original float32 weights, before
+    When the policy keeps masters (``bundle.report.precision.master_params``),
+    pass ``master_params`` built from the original float32 weights, before
     casting them to the low-precision compute copy: masters built from
-    ``trainable`` only upcast values that were already rounded. The optimizer
+    ``trainable`` only upcast values that were already rounded. Supplied masters
+    are rejected when the policy keeps none. The optimizer
     state is initialized from the masters when they exist. The default
     ``accumulation`` record tracks the window position only; the optimizer
     state accumulates gradients.
@@ -2080,11 +2082,6 @@ def _resolve_master_params(
 ) -> Any | None:
     if master_params is None:
         return make_master_params(visible_params, precision)
-    if precision.parameter_rounding == "stochastic":
-        raise ValueError(
-            "parameter_rounding='stochastic' updates master-free parameters; "
-            "pass master_params=None."
-        )
     _check_master_params(visible_params, master_params, precision)
     return master_params
 
@@ -2094,8 +2091,13 @@ def _check_master_params(
     master_params: Any,
     precision: PrecisionConfig,
 ) -> None:
-    """Reject caller-supplied masters that cannot represent the visible params."""
+    """Reject caller-supplied masters that the policy or the params rule out."""
 
+    if not uses_master_params(visible_params, precision):
+        raise ValueError(
+            "the precision policy keeps no master parameters for these "
+            "parameters; pass master_params=None."
+        )
     visible_paths = jax.tree_util.tree_leaves_with_path(
         visible_params, is_leaf=lambda x: x is None
     )
