@@ -212,8 +212,9 @@ Runnable examples live under [`examples/`](./examples):
 `trainable`, and each trainable identity must provide a stable `logical_id`. Plan-aware step helpers additionally
 require a `combine(trainable)` method; compiler-only plans do not.
 
-The development integration supports Equimo `>=2.4.0,<3.0.0`. Equimo 1.x does not provide the `equimo.finetune` plan
-API, and a future 3.x API must be verified before widening this interval.
+The development integration supports Equimo `>=2.8.0,<3.0.0`: Equimo 2.8 keeps buffers out of plans and applies the
+default no-decay tags that `rfft.DEFAULT_NO_DECAY_TAGS` mirrors. A future 3.x API must be verified before widening this
+interval.
 
 ```python
 import rollfast.finetune as rfft

@@ -12,6 +12,7 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ### Changed
 
+- The Equimo integration is developed and tested against Equimo 2.8 or later.
 - `DEFAULT_NO_DECAY_TAGS` also lists `block.layer_scale`, `ssm`, and `vector` (arrays with at most one axis), matching
   Equimo 2.8's default no-decay policy.
 
