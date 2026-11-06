@@ -136,13 +136,17 @@ def _resolve_weight_decay_value(
     optimizer: OptimizerConfig,
     rules: tuple[GroupRule, ...],
 ) -> float:
+    # The plan's no-decay groups (biases, norms, buffers, embeddings) stay
+    # undecayed: rules only tune the decay of groups the plan decays.
+    if not group.weight_decay:
+        return 0.0
     selected = [
         rule
         for rule in rules
         if rule.weight_decay is not None or rule.weight_decay_value is not None
     ]
     if not selected:
-        return optimizer.weight_decay if group.weight_decay else 0.0
+        return optimizer.weight_decay
     max_priority = max(rule.priority for rule in selected)
     highest = [rule for rule in selected if rule.priority == max_priority]
     values = {_rule_weight_decay_value(rule, optimizer) for rule in highest}

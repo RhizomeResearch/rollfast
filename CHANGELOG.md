@@ -5,6 +5,22 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+### Added
+
+- `galore_adamw` and `apollo_adamw` accept `weight_decay_mask`, a boolean tree or a callable returning one, like the
+  other AdamW variants.
+
+### Changed
+
+- `DEFAULT_NO_DECAY_TAGS` also lists `block.layer_scale`, `ssm`, and `vector` (arrays with at most one axis), matching
+  Equimo 2.8's default no-decay policy.
+
+### Fixed
+
+- `GroupRule` weight-decay overrides no longer enable decay on groups the plan marks as no-decay. A broad rule such as
+  `GroupRule(role="backbone", weight_decay_value=0.05)` previously decayed the backbone's biases, norms, and position
+  embeddings.
+
 ## [1.4.0] - 2026-10-21
 
 Supplied master parameters follow the precision policy, and the AdamW builders name their Adam hyperparameters. Detailed

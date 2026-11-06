@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import optax
 from optax._src import utils
 
-from rollfast.utils import _reject_complex_tree
+from rollfast.utils import _reject_complex_tree, _resolve_mask
 
 Scaling = Literal["channel", "tensor"]
 Orientation = Literal["left", "right", "full"]
@@ -89,8 +89,14 @@ def apollo_adamw(
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike = jnp.float32,
     weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
 ) -> optax.GradientTransformation:
-    """AdamW using APOLLO low-rank projected gradient-scaling factors."""
+    """AdamW using APOLLO low-rank projected gradient-scaling factors.
+
+    ``weight_decay_mask`` is a tree with the structure of the params, or a
+    callable returning one, whose boolean leaves select the leaves to decay.
+    By default every leaf decays.
+    """
 
     if rank < 1:
         raise ValueError("APOLLO rank must be >= 1.")
@@ -133,6 +139,14 @@ def apollo_adamw(
                     "is nonzero or scheduled."
                 )
             params = jax.tree.map(lambda _: None, updates)
+        elif weight_decay_mask is not None:
+            # Leaves without params are not decayed.
+            params = jax.tree.map(
+                lambda param, decays: param if decays else None,
+                params,
+                _resolve_mask(weight_decay_mask, params),
+                is_leaf=_is_passthrough,
+            )
         count_inc = cast(jax.Array, optax.safe_increment(state.count))
         wd_step = (
             cast(Callable[[jax.Array], Any], weight_decay)(state.count)

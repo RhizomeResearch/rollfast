@@ -624,7 +624,9 @@ class StateQuantizationConfig:
 class GroupRule:
     """Rollfast-side override for groups emitted by a fine-tuning plan.
 
-    Set ``required`` when a missing matching group should reject compilation.
+    ``weight_decay`` and ``weight_decay_value`` apply only to groups the plan
+    decays; groups the plan marks as no-decay stay undecayed. Set ``required``
+    when a missing matching group should reject compilation.
     """
 
     label: str | None = None

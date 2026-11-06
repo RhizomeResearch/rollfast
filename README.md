@@ -234,7 +234,8 @@ opt_state = optim.init(plan.trainable)
 Group rules can override the plan's learning-rate and weight-decay policy. They match normalized plan groups, not
 individual parameter leaves, so tag-based rules depend on the plan producer's `group_specs` metadata and label
 granularity. The plan-level `weight_decay` flag is boolean: when it is enabled, Rollfast uses the optimizer's global
-`weight_decay`; when disabled, the compiled group uses `0.0`.
+`weight_decay`; when disabled, the compiled group uses `0.0`. Rules can change the decay of groups the plan decays, but
+never enable decay on a group the plan marks as no-decay (biases, norms, layer scales, vectors, embeddings).
 
 Use `head_backbone_adamw(...)` for a common discriminative fine-tuning setup where the backbone and head use different
 LR/WD values and standard no-decay tags force zero decay:
@@ -773,6 +774,10 @@ def step(model, opt_state, batch, key):
 
     return new_model, new_opt_state, loss
 ```
+
+For Equimo models, select the optimized leaves with `equimo.core.parameters.trainable_mask(model)` instead of
+`eqx.is_inexact_array`, so that buffers such as frozen PEFT bases stay out of the optimizer, and pass
+`weight_decay_mask=equimo.core.parameters.weight_decay_mask` to optimizers that decay weights (Equimo 2.8 or later).
 
 Plan-aware fine-tuning applies the same rounding through
 `PrecisionConfig(master_params="never", parameter_rounding="stochastic")`, or the `rfft.bf16_master_free_precision()`

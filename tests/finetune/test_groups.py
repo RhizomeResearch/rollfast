@@ -30,7 +30,6 @@ def test_compile_groups_supports_wd_ft_weight_decay_values():
         (
             rfft.GroupRule(role="backbone", weight_decay_value=0.05),
             rfft.GroupRule(role="head", weight_decay_value=0.01),
-            rfft.GroupRule(tag="bias", weight_decay_value=0.0, priority=1),
         ),
     )
     by_label = {group.source_label: group for group in groups}

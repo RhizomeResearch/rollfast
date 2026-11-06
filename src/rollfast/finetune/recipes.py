@@ -34,9 +34,14 @@ class FineTuneOptimizerRecipe:
     group_rules: tuple[GroupRule, ...] = ()
 
 
+# Mirrors equimo.core.parameters.DEFAULT_NO_DECAY_TAGS, which Equimo plans
+# already apply; these rules matter for plans from other producers.
 DEFAULT_NO_DECAY_TAGS = (
     "bias",
     "norm",
+    "block.layer_scale",
+    "ssm",
+    "vector",
     "embedding.position",
     "embedding.class_token",
     "embedding.register_token",

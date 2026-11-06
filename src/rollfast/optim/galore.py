@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import optax
 from optax._src import utils
 
-from rollfast.utils import _reject_complex_tree, _safe_bias_correction
+from rollfast.utils import _reject_complex_tree, _resolve_mask, _safe_bias_correction
 
 Projection = Literal["auto", "left", "right", "two_sided"]
 StateOnRefresh = Literal["reuse_coordinates", "reset", "transport"]
@@ -82,8 +82,14 @@ def galore_adamw(
     eps_root: jax.typing.ArrayLike = 0.0,
     mu_dtype: jax.typing.DTypeLike = jnp.float32,
     weight_decay: optax.ScalarOrSchedule = 0.0,
+    weight_decay_mask: Any | Callable[[optax.Params], Any] | None = None,
 ) -> optax.GradientTransformation:
-    """AdamW with GaLore low-rank moment states for eligible matrices."""
+    """AdamW with GaLore low-rank moment states for eligible matrices.
+
+    ``weight_decay_mask`` is a tree with the structure of the params, or a
+    callable returning one, whose boolean leaves select the leaves to decay.
+    By default every leaf decays.
+    """
 
     if rank < 1:
         raise ValueError("GaLore rank must be >= 1.")
@@ -136,6 +142,14 @@ def galore_adamw(
                     "is nonzero or scheduled."
                 )
             params = jax.tree.map(lambda _: None, updates)
+        elif weight_decay_mask is not None:
+            # Leaves without params are not decayed.
+            params = jax.tree.map(
+                lambda param, decays: param if decays else None,
+                params,
+                _resolve_mask(weight_decay_mask, params),
+                is_leaf=_is_passthrough,
+            )
         count_inc = cast(jax.Array, optax.safe_increment(state.count))
         should_refresh = (state.count % update_interval) == 0
         wd_step = (

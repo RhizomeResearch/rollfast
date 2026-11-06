@@ -312,6 +312,28 @@ def test_apollo_zero_gradient_decay_uses_params_for_all_leaf_paths():
     )
 
 
+def test_apollo_weight_decay_mask_skips_unselected_leaves():
+    params = {
+        "w": jnp.full((2, 2), 2.0, dtype=jnp.float32),
+        "b": jnp.full((2,), 3.0, dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.zeros_like, params)
+    tx = apollo_adamw(
+        learning_rate=0.1,
+        rank=1,
+        weight_decay=0.2,
+        weight_decay_mask=lambda tree: {"w": True, "b": False},
+    )
+    state = tx.init(params)
+
+    updates, _ = tx.update(grads, state, params)
+    jit_updates, _ = jax.jit(tx.update)(grads, state, params)
+
+    assert jnp.allclose(updates["w"], -0.02 * params["w"])
+    assert jnp.array_equal(updates["b"], jnp.zeros_like(params["b"]))
+    assert jax.tree.all(jax.tree.map(jnp.array_equal, updates, jit_updates))
+
+
 def test_apollo_scheduled_weight_decay_matches_eager_under_jit():
     params = {
         "w": jnp.ones((2, 2), dtype=jnp.float32),

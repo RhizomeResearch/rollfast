@@ -110,7 +110,9 @@ most focused relevant test, then the full applicable checks above. Report any ch
 - When changing numerically sensitive logic, add representative low-precision coverage and check that updates and state
   remain finite and sufficiently close to a higher-precision reference.
 - Tests marked `integration` may require optional development dependencies; tests marked `slow` should remain narrowly
-  scoped. Do not weaken or remove a test merely to make a change pass.
+  scoped. The Equimo integration tests use the Equimo release in `uv.lock`; to run them against a local Equimo checkout,
+  use `devenv shell -- uv run --with-editable ../Equimo pytest tests/test_equimo_integration.py tests/integrations` (run
+  in practice; the lock file is unchanged). Do not weaken or remove a test merely to make a change pass.
 - Update README, `docs/`, and examples when public behavior or usage changes. Run benchmarks only when
   performance-sensitive code is modified; do not treat benchmark output as a unit-test assertion.
 
