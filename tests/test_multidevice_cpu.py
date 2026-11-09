@@ -13,7 +13,7 @@ from jax.sharding import PartitionSpec as P
 
 import rollfast.finetune as rfft
 from rollfast import adamw, apply_updates
-from rollfast.finetune.transforms import clip_by_global_norm
+from rollfast.finetune.transforms import always_skip_nonfinite, clip_by_global_norm
 from rollfast.optim.sam import global_l2_norm, sam_perturbation
 from tests.finetune.helpers import TinyGroup, TinyPlan
 
@@ -94,6 +94,35 @@ def test_adamw_state_and_updates_preserve_multi_device_sharding(dtype):
         for leaf in jax.tree.leaves(state)
         if hasattr(leaf, "shape") and leaf.shape == params["w"].shape
     )
+
+
+@pytest.mark.parametrize("dtype", (jnp.float32, jnp.bfloat16))
+def test_nonfinite_guard_preserves_multi_device_sharding(dtype):
+    mesh = Mesh(np.asarray(jax.devices()), ("data",))
+    sharding = NamedSharding(mesh, P("data", None))
+    shape = (jax.local_device_count() * 2, 2)
+    params = {"w": jax.device_put(jnp.ones(shape, dtype=dtype), sharding)}
+    grads = {"w": jax.device_put(jnp.full(shape, 0.25, dtype=dtype), sharding)}
+    nan_grads = {"w": jax.device_put(jnp.full(shape, jnp.nan, dtype=dtype), sharding)}
+    tx = always_skip_nonfinite(adamw(learning_rate=1e-2), alert_threshold=1)
+    state = tx.init(params)
+    update = jax.jit(tx.update)
+
+    for batch, expected_finite in ((grads, True), (nan_grads, False)):
+        updates, next_state = update(batch, state, params)
+
+        assert updates["w"].sharding.is_equivalent_to(sharding, len(shape))
+        moments = [
+            leaf
+            for leaf in jax.tree.leaves(next_state.inner_state)
+            if hasattr(leaf, "shape") and leaf.shape == shape
+        ]
+        assert moments
+        assert all(
+            leaf.sharding.is_equivalent_to(sharding, len(shape)) for leaf in moments
+        )
+        assert bool(next_state.last_finite) is expected_finite
+        assert bool(jnp.all(updates["w"] != 0.0)) is expected_finite
 
 
 def test_discarded_accumulation_preserves_sharding_and_recovers():

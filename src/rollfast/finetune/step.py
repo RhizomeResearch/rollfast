@@ -1975,42 +1975,20 @@ def _commit_optimizer_result(
 ) -> tuple[Any, jax.Array, UpdateStatus]:
     """Return the proposed candidate when attempted and finite, else ``current``.
 
-    ``propose`` returns ``(candidate, candidate_finite, status)``.
+    ``propose`` returns ``(candidate, candidate_finite, status)`` and always
+    runs. A lax.cond here copies donated parameters and optimizer state, and
+    keeps the ~390 ms per-update cost seen on H100 GPUs. Selecting also keeps
+    replica-local flags from changing participation in collectives, and
+    retains where's dtype promotion for transforms that canonicalize state on
+    their first update.
     """
 
+    candidate, finite, status = propose()
+    accepted = jnp.logical_and(attempt, finite)
     if _has_declared_collectives(optimizer):
-        # Replica-local flags must not change participation in collectives,
-        # and every partition must reach the same decision.
-        candidate, finite, status = propose()
-        accepted = _agree_across_axes(jnp.logical_and(attempt, finite), optimizer)
-        return _select_tree(accepted, candidate, current), accepted, status
-
-    def accept():
-        candidate, finite, status = propose()
-        # Retain where's dtype promotion for transforms that canonicalize state
-        # on their first update, including restored mixed-precision state.
-        return _select_tree(finite, candidate, current), finite, status
-
-    proposed_jaxpr, result_shape = jax.make_jaxpr(accept, return_shape=True)()
-    if proposed_jaxpr.effects:
-        # Custom transformations can introduce collectives or callbacks that
-        # are not described by the bundle's policies. Preserve those effects.
-        candidate, finite, status = propose()
-        accepted = jnp.logical_and(attempt, finite)
-        return _select_tree(accepted, candidate, current), accepted, status
-
-    def reject():
-        rejected_status = UpdateStatus(
-            accumulating=jnp.asarray(False),
-            update_applied=jnp.asarray(False),
-            window_discarded=jnp.asarray(True),
-            microsteps_in_window=jnp.asarray(0, dtype=jnp.int32),
-        )
-        return _cast_tree_like(
-            (current, jnp.asarray(False), rejected_status), result_shape
-        )
-
-    return jax.lax.cond(attempt, accept, reject)
+        # Every partition must reach the same decision.
+        accepted = _agree_across_axes(accepted, optimizer)
+    return _select_tree(accepted, candidate, current), accepted, status
 
 
 def _has_declared_collectives(optimizer: OptimizerBundle) -> bool:

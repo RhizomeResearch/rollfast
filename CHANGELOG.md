@@ -21,6 +21,9 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 - `GroupRule` weight-decay overrides no longer enable decay on groups the plan marks as no-decay. A broad rule such as
   `GroupRule(role="backbone", weight_decay_value=0.05)` previously decayed the backbone's biases, norms, and position
   embeddings.
+- The non-finite guard and fine-tuning update commit no longer branch around the optimizer. On H100 GPUs this removes
+  about 390 ms per update, and with donated buffers it avoids copying parameters and optimizer state. A rejected
+  fine-tuning update now runs one optimizer pass on zero gradients and discards it.
 
 ## [1.4.0] - 2026-10-21
 

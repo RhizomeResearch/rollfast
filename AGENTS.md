@@ -70,6 +70,9 @@ most focused relevant test, then the full applicable checks above. Report any ch
 - Apply parameter updates with Rollfast's `apply_updates`, explicitly passing `stochastic=False` for deterministic
   paths. Use `apply_updates_prefix` for prefix update trees. Keep `optax.apply_updates` only in independent reference or
   Optax compatibility tests; stochastic rounding requires explicit PRNG ownership.
+- Do not wrap a whole optimizer update in `jax.lax.cond`; run it and select per leaf. A branch around a key-splitting
+  update measured about 390 ms per update on H100 80GB (JAX 0.11.0) but under 1 ms on an RTX 4080, and it copies donated
+  buffers. The slowdown does not show on CPU or RTX, so check performance claims about branches on the target GPU.
 - Validate static user-facing arguments at construction time where practical. Keep update paths compatible with
   `jax.jit`; do not convert traced values to Python scalars or booleans.
 - Maintain Optax-compatible behavior for transformation `init` and `update` functions, including the handling of

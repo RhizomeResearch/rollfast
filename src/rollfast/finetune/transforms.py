@@ -11,8 +11,10 @@ import optax
 from rollfast.utils import (
     AxisName,
     _squared_magnitude_f32,
+    astype_preserving_sharding,
     dist_reduce,
     resolve_partition_norm_axis_name,
+    zeros_like_preserving_sharding,
 )
 
 
@@ -58,52 +60,21 @@ def always_skip_nonfinite(
             if leaf is not None:
                 finite = jnp.logical_and(finite, jnp.all(jnp.isfinite(leaf)))
 
-        def accept(_):
-            return inner.update(
-                updates,
-                state.inner_state,
-                params,
-                **extra_args,
-            )
-
-        def reject(_):
-            zero_updates = jax.tree.map(
-                lambda leaf: None if leaf is None else jnp.zeros_like(leaf),
-                updates,
-                is_leaf=lambda x: x is None,
-            )
-            canonical_updates, canonical_state = inner.update(
-                zero_updates,
-                state.inner_state,
-                params,
-                **extra_args,
-            )
-
-            def preserve_state_leaf(old, canonical):
-                if not hasattr(old, "dtype") or not hasattr(canonical, "dtype"):
-                    return old
-                if jnp.issubdtype(
-                    old.dtype, jnp.complexfloating
-                ) and not jnp.issubdtype(canonical.dtype, jnp.complexfloating):
-                    return jnp.real(old).astype(canonical.dtype)
-                return old.astype(canonical.dtype)
-
-            preserved_state = jax.tree.map(
-                preserve_state_leaf,
-                state.inner_state,
-                canonical_state,
-            )
-            return jax.tree.map(
-                lambda leaf: None if leaf is None else jnp.zeros_like(leaf),
-                canonical_updates,
-                is_leaf=lambda leaf: leaf is None,
-            ), preserved_state
-
-        guarded_updates, inner_state = jax.lax.cond(
-            finite,
-            accept,
-            reject,
-            operand=None,
+        # Select per leaf instead of branching. A lax.cond around the inner
+        # transform costs ~390 ms per update on H100 GPUs when the inner
+        # transform splits a PRNG key, and it copies donated state buffers.
+        # Zeros keep nonfinite values out of the inner transform's numerics.
+        new_updates, new_inner_state = inner.update(
+            _zero_unless(finite, updates),
+            state.inner_state,
+            params,
+            **extra_args,
+        )
+        guarded_updates = _zero_unless(finite, new_updates)
+        inner_state = jax.tree.map(
+            lambda old, new: jnp.where(finite, new, _preserved_state_leaf(old, new)),
+            state.inner_state,
+            new_inner_state,
         )
         consecutive_nonfinite = jnp.where(
             finite,
@@ -125,6 +96,30 @@ def always_skip_nonfinite(
         )
 
     return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def _zero_unless(condition, tree):
+    return jax.tree.map(
+        lambda leaf: (
+            None
+            if leaf is None
+            else jnp.where(condition, leaf, zeros_like_preserving_sharding(leaf))
+        ),
+        tree,
+        is_leaf=lambda x: x is None,
+    )
+
+
+def _preserved_state_leaf(old, new):
+    """Return ``old`` in the dtype the inner transform gave its state leaf."""
+
+    if not hasattr(old, "dtype") or not hasattr(new, "dtype"):
+        return old
+    if jnp.issubdtype(old.dtype, jnp.complexfloating) and not jnp.issubdtype(
+        new.dtype, jnp.complexfloating
+    ):
+        return astype_preserving_sharding(jnp.real(old), new.dtype, old)
+    return astype_preserving_sharding(old, new.dtype)
 
 
 def clear_completed_accumulation(

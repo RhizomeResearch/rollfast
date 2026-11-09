@@ -7,7 +7,7 @@ import optax
 import pytest
 
 import rollfast.finetune as rfft
-from rollfast import apply_updates
+from rollfast import adamw, apply_updates
 from rollfast.finetune.transforms import (
     AlwaysSkipNonFiniteState,
     always_skip_nonfinite,
@@ -139,6 +139,97 @@ def test_nonfinite_guard_forwards_extra_arguments_on_finite_updates():
 
     assert jnp.array_equal(updates["w"], jnp.full((1,), 2.0))
     assert int(state.inner_state) == 1
+
+
+@pytest.mark.parametrize("use_jit", (False, True))
+@pytest.mark.parametrize("dtype", (jnp.float32, jnp.bfloat16))
+def test_nonfinite_guard_passes_finite_updates_and_rejects_nonfinite(use_jit, dtype):
+    params = {"w": jnp.ones((3,), dtype=dtype), "frozen": None}
+    finite_grads = {"w": jnp.asarray([1e-3, -2e-3, 3e-3], dtype=dtype), "frozen": None}
+    nan_grads = {"w": jnp.asarray([1e-3, jnp.nan, 3e-3], dtype=dtype), "frozen": None}
+    inner = adamw(learning_rate=1e-3, mu_dtype=dtype, key=jax.random.PRNGKey(3))
+    guard = always_skip_nonfinite(inner, alert_threshold=2)
+    guard_update = jax.jit(guard.update) if use_jit else guard.update
+    inner_update = jax.jit(inner.update) if use_jit else inner.update
+
+    inner_updates, inner_state = inner_update(finite_grads, inner.init(params), params)
+    updates, state = guard_update(finite_grads, guard.init(params), params)
+
+    _assert_trees_equal(updates, inner_updates)
+    _assert_trees_equal(state.inner_state, inner_state)
+    assert updates["frozen"] is None
+    assert bool(state.last_finite) and int(state.total_nonfinite) == 0
+
+    expected_counters = ((1, 1, False), (2, 2, True))
+    for consecutive, total, threshold_reached in expected_counters:
+        updates, state = guard_update(nan_grads, state, params)
+
+        assert updates["w"].dtype == inner_updates["w"].dtype
+        assert jnp.array_equal(updates["w"], jnp.zeros_like(updates["w"]))
+        _assert_trees_equal(state.inner_state, inner_state)
+        assert not bool(state.last_finite)
+        assert int(state.consecutive_nonfinite) == consecutive
+        assert int(state.total_nonfinite) == total
+        assert bool(state.threshold_reached) is threshold_reached
+
+    _, state = guard_update(finite_grads, state, params)
+
+    assert int(state.consecutive_nonfinite) == 0
+    assert int(state.total_nonfinite) == 2
+    assert bool(state.last_finite)
+    assert not bool(state.threshold_reached)
+
+
+def test_nonfinite_guard_hides_nonfinite_gradients_from_inner_transform():
+    saw_finite_input = []
+
+    def update_fn(updates, state, params=None):
+        del params
+        jax.debug.callback(
+            saw_finite_input.append,
+            jnp.all(jnp.isfinite(updates["w"])),
+        )
+        return updates, state
+
+    inner = optax.GradientTransformation(lambda _: jnp.zeros([]), update_fn)
+    tx = always_skip_nonfinite(inner, alert_threshold=1)
+    tree = {"w": jnp.array([jnp.nan, 1.0])}
+
+    jax.block_until_ready(jax.jit(tx.update)(tree, tx.init(tree), tree))
+
+    assert [bool(flag) for flag in saw_finite_input] == [True]
+
+
+@pytest.mark.parametrize("use_jit", (False, True))
+def test_nonfinite_guard_rejection_casts_complex_state_to_inner_real_dtype(use_jit):
+    def init_fn(params):
+        del params
+        return jnp.array(2.0 + 3.0j, dtype=jnp.complex64)
+
+    def update_fn(updates, state, params=None):
+        del params
+        return updates, jnp.real(state) + 1.0
+
+    tx = always_skip_nonfinite(
+        optax.GradientTransformation(init_fn, update_fn),
+        alert_threshold=1,
+    )
+    update = jax.jit(tx.update) if use_jit else tx.update
+    tree = {"w": jnp.array([jnp.nan], dtype=jnp.float32)}
+
+    _, state = update(tree, tx.init(tree), tree)
+
+    assert state.inner_state.dtype == jnp.float32
+    assert float(state.inner_state) == 2.0
+
+
+def test_nonfinite_guard_does_not_branch_around_inner_transform():
+    tx = always_skip_nonfinite(adamw(learning_rate=1e-3), alert_threshold=1)
+    params = {"w": jnp.ones((2,), dtype=jnp.float32)}
+
+    graph = jax.make_jaxpr(tx.update)(params, tx.init(params), params).jaxpr
+
+    assert not any(eqn.primitive.name == "cond" for eqn in graph.eqns)
 
 
 @pytest.mark.parametrize(

@@ -210,7 +210,7 @@ def test_loss_bundle_scan_preserves_all_totals_and_last_model_state():
 
 
 @pytest.mark.parametrize("state_dtype", [jnp.float32, jnp.bfloat16])
-def test_rejected_scaled_steps_bypass_optimizer_and_preserve_promoted_state(
+def test_rejected_scaled_steps_commit_without_branching_and_preserve_promoted_state(
     state_dtype,
 ):
     def update(grads, state, params=None):
@@ -237,10 +237,7 @@ def test_rejected_scaled_steps_bypass_optimizer_and_preserve_promoted_state(
         return commit.visible, commit.master, commit.opt_state, commit.accepted
 
     graph = jax.make_jaxpr(apply)({"w": jnp.array(2.0)}, jnp.array(1.0)).jaxpr
-    conditional = next(eqn for eqn in graph.eqns if eqn.primitive.name == "cond")
-    rejected, accepted = conditional.params["branches"]
-    assert any(eqn.primitive.name == "sin" for eqn in accepted.jaxpr.eqns)
-    assert not any(eqn.primitive.name == "sin" for eqn in rejected.jaxpr.eqns)
+    assert not any(eqn.primitive.name == "cond" for eqn in graph.eqns)
     apply = jax.jit(apply)
     for value, loss in ((float("nan"), 1.0), (float("inf"), 1.0), (2.0, float("nan"))):
         result = jax.block_until_ready(apply({"w": jnp.array(value)}, jnp.array(loss)))
