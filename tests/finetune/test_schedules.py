@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import rollfast.finetune as rfft
+from rollfast.schedules.wsd import wsd_schedule
 
 
 @pytest.mark.parametrize("kind", ["warmup_cosine", "linear", "polynomial"])
@@ -62,6 +63,71 @@ def test_constant_schedule_does_not_require_total_steps():
 
     assert float(schedule(0)) == pytest.approx(0.2)
     assert float(schedule(10_000)) == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    "shapes",
+    (
+        {},
+        {"warmup_shape": "cosine", "decay_shape": "cosine"},
+        {
+            "warmup_shape": "power",
+            "warmup_power": 2.0,
+            "decay_shape": "power",
+            "decay_power": 3.0,
+        },
+        {"warmup_shape": "exponential", "exponential_rate": 2.5},
+        {"decay_shape": "exponential", "exponential_rate": -2.5},
+    ),
+    ids=("defaults", "cosine", "power", "exponential_warmup", "exponential_decay"),
+)
+def test_wsd_schedule_config_matches_wsd_schedule_at_every_slot(shapes):
+    peak, total = 0.4, 40
+    config = rfft.ScheduleConfig(
+        kind="wsd",
+        total_steps=total,
+        warmup_steps=6,
+        decay_steps=9,
+        end_lr_ratio=0.05,
+        **shapes,
+    )
+    schedule = rfft.build_schedule(config, peak_lr=peak)
+    reference = wsd_schedule(
+        peak,
+        total,
+        warmup_steps=6,
+        decay_steps=9,
+        final_lr_ratio=0.05,
+        **shapes,
+    )
+    steps = jnp.arange(-1, total + 2)
+
+    for evaluate in (jax.vmap, lambda fn: jax.jit(jax.vmap(fn))):
+        np.testing.assert_array_equal(
+            evaluate(schedule)(steps),
+            evaluate(reference)(steps),
+        )
+
+
+def test_wsd_schedule_config_expresses_decay_below_peak_on_first_slot():
+    peak, floor, slots, warmup, decay = 0.8, 0.08, 50, 5, 12
+    schedule = rfft.build_schedule(
+        rfft.ScheduleConfig(
+            kind="wsd",
+            total_steps=slots,
+            warmup_steps=warmup - 1,
+            decay_steps=decay + 1,
+            decay_shape="cosine",
+            end_lr_ratio=floor / peak,
+        ),
+        peak_lr=peak,
+    )
+
+    assert float(schedule(warmup - 1)) == pytest.approx(peak)
+    for slot in range(slots - decay, slots):
+        progress = (slot - (slots - decay) + 1) / decay
+        expected = floor + (peak - floor) / 2 * (1 + math.cos(math.pi * progress))
+        assert float(schedule(slot)) == pytest.approx(expected, rel=1e-6)
 
 
 def test_wsd_schedule_config_explicit_steps_override_fractions():

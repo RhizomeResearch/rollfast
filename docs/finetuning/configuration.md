@@ -45,3 +45,16 @@ precision modes, the remaining `PrecisionConfig` validation, and which step help
 
 `schedule_free_adam_from_plan` defaults to a WSD schedule. When a caller supplies any supported `ScheduleConfig`
 explicitly, the builder uses and reports that schedule without replacing it.
+
+`ScheduleConfig(kind="wsd")` accepts `warmup_shape` and `decay_shape` (`linear`, `cosine`, `power`, or `exponential`),
+with `warmup_power`, `decay_power`, and `exponential_rate`. They default to linear and are ignored by other schedule
+kinds. Checkpoints written before these fields existed restore under strict validation as linear WSD schedules.
+
+WSD slot counts follow `wsd_schedule`:
+
+- Warmup covers counts `0` through `warmup_steps`, which is `warmup_steps + 1` slots at
+  `(count + 1) / (warmup_steps + 1)`. A ramp of `w` slots that reaches the peak at count `w - 1` needs
+  `warmup_steps=w - 1`.
+- The first decay slot, count `total_steps - decay_steps`, is still at the peak, and the last slot reaches the floor. So
+  `decay_steps=d` gives `d - 1` slots below the peak.
+- A decay whose first slot is already below the peak needs `decay_steps=d + 1`.

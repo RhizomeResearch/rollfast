@@ -98,8 +98,8 @@ most focused relevant test, then the full applicable checks above. Report any ch
   that is later registered as a PyTree must be listed in `_FIELD_SCHEMA_DATACLASSES` in
   `src/rollfast/finetune/_checkpoint_tree.py` to keep its `"dataclass"` schema kind.
 - Strict restore compares manifest config dictionaries. A field added to a config's `to_dict` within schema version 1
-  needs a default in the restore compatibility view (see `_PRECISION_FIELDS_ADDED_IN_1_3` and
-  `serialization._compatibility_view`) so older manifests still match.
+  needs a default in the restore compatibility view (see `_PRECISION_FIELDS_ADDED_IN_1_3`,
+  `_SCHEDULE_FIELDS_ADDED_AFTER_1_4`, and `serialization._compatibility_view`) so older manifests still match.
 - Do not silently change optimizer defaults, state-tree structure, counter ownership, serialization formats, or
   checkpoint compatibility. Such changes require explicit tests and matching documentation.
 - If the package version changes, keep `pyproject.toml` and `src/rollfast/__init__.py` synchronized; CI checks them for

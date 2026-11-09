@@ -51,9 +51,18 @@ def wsd_schedule(
     """Creates a Warmup-Stable-Decay schedule.
 
     It consists of:
-    1. Linear warmup.
+    1. Configurable warmup phase.
     2. Constant (stable) phase.
     3. Configurable decay (cooldown) phase.
+
+    Warmup covers counts ``0..warmup_steps``, which is ``warmup_steps + 1``
+    slots at ``(count + 1) / (warmup_steps + 1)``, so a ramp of ``w`` slots that
+    reaches the peak at count ``w - 1`` needs ``warmup_steps=w - 1``.
+
+    The first decay slot, count ``total_steps - decay_steps``, is still at the
+    peak because its progress is 0, and the last slot reaches the floor. So
+    ``decay_steps=d`` gives ``d - 1`` slots below the peak; a decay whose first
+    slot is already below the peak needs ``decay_steps=d + 1``.
 
     Args:
         peak_lr: The constant learning rate during the stable phase.

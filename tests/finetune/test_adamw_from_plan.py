@@ -1,3 +1,4 @@
+import math
 from typing import Any
 
 import equinox as eqx
@@ -273,6 +274,36 @@ def test_finetune_builders_share_fail_closed_nonfinite_dispatch(build_bundle):
         jnp.array_equal(leaf, jnp.zeros_like(leaf)) for leaf in jax.tree.leaves(updates)
     )
     _assert_trees_equal(next_state.inner_state, state.inner_state)
+
+
+def test_adamw_from_plan_applies_wsd_decay_shape_from_schedule_config():
+    plan = _one_leaf_plan()
+    grads = jax.tree.map(jnp.ones_like, plan.trainable)
+
+    def second_update(decay_shape):
+        bundle = rfft.adamw_from_plan(
+            plan,
+            total_steps=5,
+            weight_decay=0.0,
+            clip_global_norm=None,
+            schedule=rfft.ScheduleConfig(
+                kind="wsd",
+                total_steps=5,
+                warmup_steps=0,
+                decay_steps=5,
+                end_lr_ratio=0.0,
+                decay_shape=decay_shape,
+            ),
+        )
+        _, state = bundle.update(grads, bundle.init(plan.trainable), plan.trainable)
+        updates, _ = bundle.update(grads, state, plan.trainable)
+        return float(updates["w"][0])
+
+    # Slot 1 of 5 is 0.75 of peak under linear and cos^2(pi / 8) under cosine.
+    assert second_update("cosine") / second_update("linear") == pytest.approx(
+        math.cos(math.pi / 8) ** 2 / 0.75,
+        rel=1e-5,
+    )
 
 
 def test_adamw_from_plan_reports_effective_group_lrs():

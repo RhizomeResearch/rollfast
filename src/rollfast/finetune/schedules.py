@@ -36,6 +36,11 @@ def build_schedule(
             warmup_steps=config.warmup_steps,
             decay_steps=config.decay_steps,
             end_lr_ratio=config.end_lr_ratio,
+            warmup_shape=config.warmup_shape,
+            decay_shape=config.decay_shape,
+            warmup_power=config.warmup_power,
+            decay_power=config.decay_power,
+            exponential_rate=config.exponential_rate,
         )
     raise ValueError(f"Unsupported schedule kind: {config.kind!r}.")
 

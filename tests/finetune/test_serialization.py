@@ -786,3 +786,48 @@ def test_restore_accepts_manifests_written_before_newer_precision_fields():
         rfft.restore_state_checkpoint(
             bundle, changed, model_checkpoint_id="model-step-1"
         )
+
+
+def test_restore_accepts_manifests_written_before_wsd_shape_fields():
+    plan = tiny_plan()
+    bundle = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule=rfft.ScheduleConfig(kind="wsd", total_steps=10),
+    )
+    checkpoint = rfft.make_state_checkpoint(
+        bundle, bundle.init(plan.trainable), model_checkpoint_id="model-step-1"
+    )
+    added = (
+        "warmup_shape",
+        "decay_shape",
+        "warmup_power",
+        "decay_power",
+        "exponential_rate",
+    )
+    schedule = {
+        key: value
+        for key, value in checkpoint.manifest["schedule_config"].items()
+        if key not in added
+    }
+    older = replace(
+        checkpoint,
+        manifest={
+            **checkpoint.manifest,
+            "schedule_config": schedule,
+            "schedule": schedule,
+        },
+    )
+
+    restored = rfft.restore_state_checkpoint(
+        bundle, older, model_checkpoint_id="model-step-1"
+    )
+
+    assert restored is checkpoint.state
+    cosine = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        schedule=rfft.ScheduleConfig(kind="wsd", total_steps=10, decay_shape="cosine"),
+    )
+    with pytest.raises(rfft.OptimizerStateRestoreError, match="schedule_config"):
+        rfft.restore_state_checkpoint(cosine, older, model_checkpoint_id="model-step-1")

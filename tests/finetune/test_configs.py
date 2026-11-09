@@ -14,6 +14,48 @@ def test_supported_schedule_kinds_round_trip(kind):
     assert rfft.ScheduleConfig.from_dict(config.to_dict()) == config
 
 
+def test_wsd_shape_fields_round_trip_and_default_when_absent():
+    config = rfft.ScheduleConfig(
+        kind="wsd",
+        total_steps=100,
+        warmup_shape="power",
+        decay_shape="exponential",
+        warmup_power=2.0,
+        decay_power=3.0,
+        exponential_rate=-1.5,
+    )
+    older = {
+        key: value
+        for key, value in rfft.ScheduleConfig(kind="wsd").to_dict().items()
+        if key
+        not in {
+            "warmup_shape",
+            "decay_shape",
+            "warmup_power",
+            "decay_power",
+            "exponential_rate",
+        }
+    }
+
+    assert rfft.ScheduleConfig.from_dict(config.to_dict()) == config
+    assert rfft.ScheduleConfig.from_dict(older) == rfft.ScheduleConfig(kind="wsd")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("warmup_shape", "step", "warmup_shape"),
+        ("decay_shape", "step", "decay_shape"),
+        ("warmup_power", 0.0, "warmup_power"),
+        ("decay_power", -1.0, "decay_power"),
+        ("exponential_rate", 0.0, "exponential_rate"),
+    ),
+)
+def test_invalid_wsd_shape_fields_are_rejected(field, value, message):
+    with pytest.raises(ValueError, match=message):
+        rfft.ScheduleConfig(kind="wsd", **{field: value})
+
+
 @pytest.mark.parametrize("kind", ("custom", "typo"))
 def test_unsupported_schedule_kinds_are_rejected(kind):
     with pytest.raises(NotImplementedError, match="ScheduleConfig.kind"):

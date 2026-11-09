@@ -18,6 +18,7 @@ from rollfast.optim.adam8 import (
 from rollfast.optim.adam8 import (
     DYNAMIC_UNSIGNED_CODEBOOK_ID as ADAM8_SECOND_MOMENT_CODEBOOK_ID,
 )
+from rollfast.schedules.wsd import ScheduleShape, _validate_shape
 from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
 from ._fingerprint import FINGERPRINT_VERSION
@@ -66,7 +67,12 @@ ProfileFidelity = Literal[
 
 @dataclass(frozen=True)
 class ScheduleConfig:
-    """Serializable learning-rate schedule configuration."""
+    """Serializable learning-rate schedule configuration.
+
+    ``warmup_shape``, ``decay_shape``, ``warmup_power``, ``decay_power``, and
+    ``exponential_rate`` apply only to ``kind="wsd"``; see
+    :func:`rollfast.schedules.wsd.wsd_schedule` for their slot semantics.
+    """
 
     kind: ScheduleKind = "warmup_cosine"
     total_steps: int | None = None
@@ -77,6 +83,11 @@ class ScheduleConfig:
     end_lr_ratio: float = 0.01
     power: float = 1.0
     step_counter: StepCounter = "optimizer"
+    warmup_shape: ScheduleShape = "linear"
+    decay_shape: ScheduleShape = "linear"
+    warmup_power: float = 1.0
+    decay_power: float = 1.0
+    exponential_rate: float = 5.0
 
     def __post_init__(self) -> None:
         supported_kinds = (
@@ -109,6 +120,14 @@ class ScheduleConfig:
             raise ValueError("end_lr_ratio must be non-negative.")
         if self.power <= 0.0:
             raise ValueError("power must be positive.")
+        _validate_shape("warmup_shape", self.warmup_shape)
+        _validate_shape("decay_shape", self.decay_shape)
+        if self.warmup_power <= 0.0:
+            raise ValueError("warmup_power must be positive.")
+        if self.decay_power <= 0.0:
+            raise ValueError("decay_power must be positive.")
+        if self.exponential_rate == 0.0:
+            raise ValueError("exponential_rate must be nonzero.")
 
     def resolved(self, total_steps: int | None = None) -> ScheduleConfig:
         """Return a copy with ``total_steps`` filled in if supplied."""
@@ -155,6 +174,11 @@ class ScheduleConfig:
             "end_lr_ratio": self.end_lr_ratio,
             "power": self.power,
             "step_counter": self.step_counter,
+            "warmup_shape": self.warmup_shape,
+            "decay_shape": self.decay_shape,
+            "warmup_power": self.warmup_power,
+            "decay_power": self.decay_power,
+            "exponential_rate": self.exponential_rate,
         }
 
     @classmethod
@@ -169,7 +193,23 @@ class ScheduleConfig:
             end_lr_ratio=data.get("end_lr_ratio", 0.01),
             power=data.get("power", 1.0),
             step_counter=data.get("step_counter", "optimizer"),
+            warmup_shape=data.get("warmup_shape", "linear"),
+            decay_shape=data.get("decay_shape", "linear"),
+            warmup_power=data.get("warmup_power", 1.0),
+            decay_power=data.get("decay_power", 1.0),
+            exponential_rate=data.get("exponential_rate", 5.0),
         )
+
+
+# Fields added to ``ScheduleConfig.to_dict`` after 1.4.0, within schema version 1.
+# Restores compare older manifests as if they held these defaults.
+_SCHEDULE_FIELDS_ADDED_AFTER_1_4 = {
+    "warmup_shape": "linear",
+    "decay_shape": "linear",
+    "warmup_power": 1.0,
+    "decay_power": 1.0,
+    "exponential_rate": 5.0,
+}
 
 
 @dataclass(frozen=True)

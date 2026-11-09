@@ -23,6 +23,7 @@ from ._checkpoint_tree import (
 from ._fingerprint import FINGERPRINT_VERSION
 from .config import (
     _PRECISION_FIELDS_ADDED_IN_1_3,
+    _SCHEDULE_FIELDS_ADDED_AFTER_1_4,
     SCHEMA_VERSION,
     FineTuneStepState,
     OptimizerBundle,
@@ -523,6 +524,10 @@ def _compatibility_view(manifest: Mapping[str, Any]) -> dict[str, Any]:
     view["precision_config"] = {
         **_PRECISION_FIELDS_ADDED_IN_1_3,
         **view["precision_config"],
+    }
+    view["schedule_config"] = {
+        **_SCHEDULE_FIELDS_ADDED_AFTER_1_4,
+        **view["schedule_config"],
     }
     return view
 

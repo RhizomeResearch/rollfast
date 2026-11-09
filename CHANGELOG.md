@@ -9,6 +9,8 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 - `galore_adamw` and `apollo_adamw` accept `weight_decay_mask`, a boolean tree or a callable returning one, like the
   other AdamW variants.
+- `ScheduleConfig` accepts `warmup_shape`, `decay_shape`, `warmup_power`, `decay_power`, and `exponential_rate` for WSD
+  schedules. Existing configurations and checkpoints keep linear WSD schedules.
 
 ### Changed
 
