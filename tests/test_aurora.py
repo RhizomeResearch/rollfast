@@ -5,6 +5,7 @@ import jax.numpy as jnp
 
 from rollfast.optim.aurora import (
     ScaleByAuroraState,
+    _riemannian_balanced_polar_matrix,
     aurora,
     scale_by_aurora,
     scale_by_riemannian_aurora,
@@ -53,6 +54,20 @@ def test_scale_by_aurora_bf16_momentum_state():
     mu = cast(dict[str, jax.Array], state.mu)
 
     assert mu["w"].dtype == jnp.bfloat16
+
+
+def test_riemannian_aurora_program_size_is_independent_of_loop_counts():
+    grad = jnp.ones((6, 3), dtype=jnp.float32)
+
+    def program_size(**loop_counts):
+        program = jax.make_jaxpr(
+            lambda g: _riemannian_balanced_polar_matrix(g, **loop_counts)
+        )(grad)
+        return len(program.jaxpr.eqns)
+
+    assert program_size(outer_steps=1, cg_steps=2, polar_ns_iters=2) == program_size(
+        outer_steps=6, cg_steps=40, polar_ns_iters=24
+    )
 
 
 def test_scale_by_riemannian_aurora_magma_bf16_raw_clip():

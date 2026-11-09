@@ -8,7 +8,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from rollfast.optim.adam import scale_by_adam
 from rollfast.optim.adam8 import _init_moment_leaf, quantize_blocks, scale_by_adam8
+from rollfast.optim.apollo import apollo_adamw
+from rollfast.optim.galore import galore_adamw
+from rollfast.optim.hyperball import apply_hyperball
 from rollfast.optim.psgd import _init_Q_exprs, _precond_grad, scale_by_kron
 
 
@@ -17,6 +21,50 @@ def _assert_exact(actual, expected):
     for a, b in zip(jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True):
         assert a.dtype == b.dtype
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def _direct_conds(jaxpr):
+    return [eqn for eqn in jaxpr.eqns if eqn.primitive.name == "cond"]
+
+
+def test_kron_branches_only_around_the_preconditioner_update():
+    params = jnp.ones((2, 3), dtype=jnp.float32)
+    tx = scale_by_kron(preconditioner_update_probability=0.5)
+
+    graph = jax.make_jaxpr(tx.update)(params, tx.init(params), params).jaxpr
+
+    conds = _direct_conds(graph)
+    assert len(conds) == 1
+    _, update_branch = conds[0].params["branches"]
+    assert not _direct_conds(update_branch.jaxpr)
+
+
+@pytest.mark.parametrize("use_jit", [False, True])
+@pytest.mark.parametrize(
+    "build_tx",
+    [
+        lambda: scale_by_adam(weight_decay=0.0),
+        lambda: galore_adamw(0.01, rank=1, weight_decay=0.0, min_matrix_size=0),
+        lambda: apollo_adamw(0.01, rank=1, weight_decay=0.0),
+        lambda: apply_hyperball(
+            0.01,
+            weight_decay=0.0,
+            hyperball_mask={"w": False},
+            fallback_weight_decay=True,
+        ),
+    ],
+    ids=["adam", "galore", "apollo", "hyperball"],
+)
+def test_static_zero_weight_decay_skips_parameter_work(build_tx, use_jit):
+    params = {"w": jnp.ones((4, 2), dtype=jnp.float32)}
+    grads = {"w": jnp.full((4, 2), 1e-3, dtype=jnp.float32)}
+    nan_params = {"w": jnp.full((4, 2), jnp.nan, dtype=jnp.float32)}
+    tx = build_tx()
+    update = jax.jit(tx.update) if use_jit else tx.update
+
+    updates, _ = update(grads, tx.init(params), nan_params)
+
+    assert bool(jnp.all(jnp.isfinite(updates["w"])))
 
 
 @pytest.mark.parametrize("projection", ["left", "right", "two_sided"])

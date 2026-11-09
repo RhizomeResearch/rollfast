@@ -135,13 +135,13 @@ def galore_adamw(
         _reject_complex_tree(updates, "GaLore")
         if params is not None:
             _reject_complex_tree(params, "GaLore")
-        if params is None:
-            if decay_requires_params:
-                raise ValueError(
-                    "`params` must be provided to `galore_adamw` when weight_decay "
-                    "is nonzero or scheduled."
-                )
+        if not decay_requires_params:
             params = jax.tree.map(lambda _: None, updates)
+        elif params is None:
+            raise ValueError(
+                "`params` must be provided to `galore_adamw` when weight_decay "
+                "is nonzero or scheduled."
+            )
         elif weight_decay_mask is not None:
             # Leaves without params are not decayed.
             params = jax.tree.map(

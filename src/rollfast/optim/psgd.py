@@ -13,11 +13,13 @@ from optax import tree_utils as otu
 from optax._src import numerics
 from optax._src.utils import canonicalize_dtype
 
+from rollfast.optim._matrix_runtime import _tree_where_scalar
 from rollfast.optim.magma import apply_magma_internal, validate_magma_args
 from rollfast.utils import (
     _apply_weight_decay_tree,
     _fresh_prng_key,
     _has_nonzero_or_scheduled,
+    _is_aux_leaf,
     _resolve_mask,
     _resolve_scalar,
     _tree_stochastic_cast,
@@ -238,7 +240,12 @@ def _norm_lower_bound(A: jax.Array) -> jax.Array:
 
 
 def _norm_lower_bound_spd(
-    A: jax.Array, key: jax.Array, k: int = 32, half_iters: int = 2
+    A: jax.Array,
+    key: jax.Array | None = None,
+    k: int = 32,
+    half_iters: int = 2,
+    *,
+    seed: jax.Array | None = None,
 ) -> jax.Array:
     """Returns a cheap lower bound for spectral norm of SPD matrix A.
 
@@ -250,12 +257,17 @@ def _norm_lower_bound_spd(
     A = A / normalizing_factor
 
     return normalizing_factor * _subspace_norm_lower_bound(
-        A, key, k, half_iters, smallest_normal
+        A, key, k, half_iters, smallest_normal, seed
     )
 
 
 def _norm_lower_bound_skh(
-    A: jax.Array, key: jax.Array, k: int = 32, half_iters: int = 2
+    A: jax.Array,
+    key: jax.Array | None = None,
+    k: int = 32,
+    half_iters: int = 2,
+    *,
+    seed: jax.Array | None = None,
 ) -> jax.Array:
     """Returns a cheap lower bound for spectral norm of Skew-Hermitian matrix A."""
     smallest_normal = jnp.finfo(A.dtype).smallest_normal
@@ -263,16 +275,17 @@ def _norm_lower_bound_skh(
     A = A / normalizing_factor
 
     return normalizing_factor * _subspace_norm_lower_bound(
-        A, key, k, half_iters, smallest_normal
+        A, key, k, half_iters, smallest_normal, seed
     )
 
 
 def _subspace_norm_lower_bound(
     A: jax.Array,
-    key: jax.Array,
+    key: jax.Array | None,
     k: int,
     half_iters: int,
     smallest_normal: jax.typing.ArrayLike,
+    seed: jax.Array | None = None,
 ) -> jax.Array:
     """Estimate the spectral norm of a normalized matrix by seeded iteration."""
     # Heuristic initialization: pick row with max norm
@@ -281,7 +294,11 @@ def _subspace_norm_lower_bound(
     Aj = A[j]
 
     # Combine heuristic with random noise
-    V = jax.random.normal(key, shape=(k, A.shape[1]), dtype=A.dtype)
+    if seed is None:
+        seed = jax.random.normal(
+            cast(jax.Array, key), shape=(k, A.shape[1]), dtype=A.dtype
+        )
+    V = seed
     dots = jnp.sum(Aj * jnp.conj(V), axis=1, keepdims=True)
     V = Aj + jnp.sign(jnp.real(dots)) * V
 
@@ -297,7 +314,7 @@ def _subspace_norm_lower_bound(
 
 
 def _procrustes_step2(
-    Q: jax.Array, key: jax.Array, max_step_size: float = 1 / 8
+    Q: jax.Array, seed: jax.Array, max_step_size: float = 1 / 8
 ) -> jax.Array:
     """Online solver for the orthogonal Procrustes problem via rotation.
 
@@ -305,7 +322,7 @@ def _procrustes_step2(
     expensive inversions.
     """
     R = jnp.conj(Q.T) - Q
-    R_norm = _norm_lower_bound_skh(R, key) + jnp.finfo(R.dtype).smallest_normal
+    R_norm = _norm_lower_bound_skh(R, seed=seed) + jnp.finfo(R.dtype).smallest_normal
     R = R / R_norm
 
     RQ = R @ Q
@@ -322,7 +339,7 @@ def _procrustes_step2(
 
 
 def _newton_schulz_spd(
-    Q: jax.Array, key: jax.Array, n_iters: int = 5, axis_name: str | None = None
+    Q: jax.Array, seed: jax.Array, n_iters: int = 5, axis_name: str | None = None
 ) -> jax.Array:
     """Projects matrix Q onto SPD manifold via Newton-Schultz polar decomposition.
 
@@ -336,7 +353,7 @@ def _newton_schulz_spd(
     dtype = jnp.float32
 
     # top eigenvalue of Q^H Q (sigma_max(Q)^2)
-    norm_sq = _norm_lower_bound_spd(jnp.conj(Q.T) @ Q, key, half_iters=2)
+    norm_sq = _norm_lower_bound_spd(jnp.conj(Q.T) @ Q, half_iters=2, seed=seed)
     norm_est = jnp.sqrt(norm_sq)
     norm_est = dist_reduce(norm_est, axis_name, "max")
 
@@ -535,6 +552,91 @@ def _conjB(Q: list[jax.Array], G: jax.Array, V: jax.Array) -> jax.Array:
     return conjB
 
 
+class _FactorSeeds(NamedTuple):
+    """Pre-drawn subspace-iteration noise for one preconditioner factor."""
+
+    lipschitz: jax.Array
+    geometry: jax.Array | None
+
+
+def _batched_factor_seeds(
+    layer_keys: jax.Array,
+    Qs: list[Any],
+    scanned_layers: list[bool],
+    mode: str,
+    k: int = 32,
+) -> list[list[_FactorSeeds | None] | None]:
+    """Draw every factor's norm-estimator noise with shared RNG programs.
+
+    Threefry dominates XLA compile time when it is expanded separately for each
+    factor. Vmapping over keys returns exactly the values of separate draws, so
+    each stage is batched: factor keys by factor count, then noise by matrix
+    dimension and dtype. Compile time then follows distinct shapes, not leaves.
+    """
+    leaf_keys: dict[int, list[jax.Array]] = {}
+    by_factor_count: dict[int, list[int]] = {}
+    for index, Q in enumerate(Qs):
+        if not _is_aux_leaf(Q):
+            by_factor_count.setdefault(len(Q), []).append(index)
+    for count, indices in by_factor_count.items():
+        split_keys = vmap(partial(jax.random.split, num=count))(
+            layer_keys[jnp.asarray(indices)]
+        )
+        for position, index in enumerate(indices):
+            leaf_keys[index] = list(split_keys[position])
+
+    # One (key, dim, dtype) request per seed, addressed by leaf, factor and role.
+    matrix_factors: list[tuple[int, int, int, Any]] = []
+    for index in leaf_keys:
+        offset = 1 if scanned_layers[index] else 0
+        for factor, q in enumerate(Qs[index]):
+            if q.ndim - offset >= 2:
+                matrix_factors.append((index, factor, q.shape[offset], q.dtype))
+
+    requests: dict[tuple[int, Any], list[tuple[int, int, str, jax.Array]]] = {}
+
+    def request(index, factor, role, key, dim, dtype):
+        requests.setdefault((dim, dtype), []).append((index, factor, role, key))
+
+    if mode == "EQ":
+        for index, factor, dim, _ in matrix_factors:
+            key = leaf_keys[index][factor]
+            request(index, factor, "lipschitz", key, dim, jnp.float32)
+    elif matrix_factors:
+        pairs = vmap(jax.random.split)(
+            jnp.stack([leaf_keys[i][f] for i, f, _, _ in matrix_factors])
+        )
+        for pair, (index, factor, dim, q_dtype) in zip(pairs, matrix_factors):
+            request(index, factor, "lipschitz", pair[0], dim, jnp.float32)
+            if mode == "NS":
+                request(index, factor, "geometry", pair[1], dim, jnp.float32)
+            elif mode not in ("QUAD", "EXP", "TAYLOR2", "HYPER"):
+                geometry_dtype = jnp.promote_types(q_dtype, jnp.float32)
+                request(index, factor, "geometry", pair[1], dim, geometry_dtype)
+
+    drawn: dict[tuple[int, int, str], jax.Array] = {}
+    for (dim, dtype), group in requests.items():
+        noise = vmap(partial(jax.random.normal, shape=(k, dim), dtype=dtype))(
+            jnp.stack([key for _, _, _, key in group])
+        )
+        for position, (index, factor, role, _) in enumerate(group):
+            drawn[(index, factor, role)] = noise[position]
+
+    seeds: list[list[_FactorSeeds | None] | None] = [None] * len(Qs)
+    for index in leaf_keys:
+        offset = 1 if scanned_layers[index] else 0
+        seeds[index] = [
+            _FactorSeeds(
+                drawn[(index, factor, "lipschitz")],
+                drawn.get((index, factor, "geometry")),
+            )
+            if q.ndim - offset >= 2
+            else None
+            for factor, q in enumerate(Qs[index])
+        ]
+    return seeds
+
+
 def _update_precond_generic(
     Q: list[jax.Array],
     L: list[jax.Array] | None,
@@ -543,7 +645,7 @@ def _update_precond_generic(
     total_numel: int,
     exprs: tuple[str, tuple[str, ...], str],
     precond_lr: float,
-    key: jax.Array,
+    seeds: list[_FactorSeeds | None],
     mode: str,
     conjB: jax.Array | None = None,
     beta_l: float = 0.9,
@@ -574,7 +676,6 @@ def _update_precond_generic(
 
     new_Qs = []
     new_Ls = [] if L is not None else None
-    keys = jax.random.split(key, len(Q))
 
     for i, q in enumerate(Q):
         l = L[i] if L is not None else None
@@ -625,14 +726,19 @@ def _update_precond_generic(
 
         else:
             d = q.shape[0]
+            factor_seeds = cast(_FactorSeeds, seeds[i])
 
             # Lipschitz Estimation
             if mode == "EQ":
-                ell_local = _norm_lower_bound_spd(term1 + term2, keys[i])
+                ell_local = _norm_lower_bound_spd(
+                    term1 + term2, seed=factor_seeds.lipschitz
+                )
             else:
                 # Spectral Norm: Precise O(k*N^2)
-                norm_key, geom_key = jax.random.split(keys[i])
-                ell_local = _norm_lower_bound_spd(term1_reg, norm_key) + term2
+                ell_local = (
+                    _norm_lower_bound_spd(term1_reg, seed=factor_seeds.lipschitz)
+                    + term2
+                )
 
             ell = dist_reduce(ell_local, axis_name, "max")
 
@@ -656,7 +762,10 @@ def _update_precond_generic(
                     # SPD Projection
                     new_q = q - step
                     new_q = _newton_schulz_spd(
-                        new_q, geom_key, n_iters=ns_iters, axis_name=axis_name
+                        new_q,
+                        cast(jax.Array, factor_seeds.geometry),
+                        n_iters=ns_iters,
+                        axis_name=axis_name,
                     )
                 elif mode == "QUAD":
                     # Quadratic form update
@@ -694,7 +803,9 @@ def _update_precond_generic(
                     new_q = (new_q + jnp.conj(new_q.T)) / 2.0
                 else:  # Q0.5EQ1.5
                     new_q = q - step
-                    new_q = _procrustes_step2(new_q, geom_key)
+                    new_q = _procrustes_step2(
+                        new_q, cast(jax.Array, factor_seeds.geometry)
+                    )
 
         new_Qs.append(new_q)
 
@@ -1139,8 +1250,10 @@ def scale_by_kron(
                 for q, g, s in zip(Qs_in, updates_flat, scanned_layers_flat)
             ]
 
-        Qs_flat = jax.lax.cond(
-            state.needs_scale_init, apply_init_scale, lambda x: x, Qs_flat
+        # Select instead of branching: a lax.cond here costs ~390 ms per update on
+        # H100 GPUs, far more than one reduction over the gradients.
+        Qs_flat = _tree_where_scalar(
+            state.needs_scale_init, apply_init_scale(Qs_flat), Qs_flat
         )
         needs_scale_init = jnp.array(False, dtype=jnp.bool_)
 
@@ -1237,7 +1350,9 @@ def scale_by_kron(
                     else preconditioner_mode
                 )
 
-                def _update_wrapper(Q, L, Vector, conjB, total_numel, exprs, layer_key):
+                def _update_wrapper(
+                    Q, L, Vector, conjB, total_numel, exprs, factor_seeds
+                ):
                     if _is_psgd_leaf(Q):
                         return Q, L
                     return _update_precond_generic(
@@ -1248,13 +1363,17 @@ def scale_by_kron(
                         total_numel,
                         exprs,
                         preconditioner_lr,
-                        layer_key,
+                        factor_seeds,
                         mode=mode_str,
                         beta_l=beta_lipschitz,
                         axis_name=axis_name,
                         damping=damping,
                         ns_iters=newton_schulz_iters,
                     )
+
+                leaf_seeds = _batched_factor_seeds(
+                    layer_keys, Qs, scanned_layers_flat, mode_str
+                )
 
                 results = [
                     map_fn(
@@ -1265,14 +1384,14 @@ def scale_by_kron(
                             # The 0 sentinel is safe as _update_wrapper returns early for _is_psgd_leaf.
                             total_numel=g.size if not _is_psgd_leaf(g) else 0,
                             exprs=exprs,
-                            layer_key=lk,
+                            factor_seeds=seeds,
                         ),
                         Q,
                         L if Ls is not None else None,
                         Vector,
                         conjB,
                     )
-                    for s, exprs, Q, L, g, Vector, conjB, lk in zip(
+                    for s, exprs, Q, L, g, Vector, conjB, seeds in zip(
                         scanned_layers_flat,
                         expressions,
                         Qs,
@@ -1280,7 +1399,7 @@ def scale_by_kron(
                         precond_updates_in,
                         Vectors,
                         conjBs,
-                        layer_keys,
+                        leaf_seeds,
                     )
                 ]
 
@@ -1307,7 +1426,8 @@ def scale_by_kron(
                     ]
 
                 do_balances = jax.random.uniform(key_balance) < 0.01
-                new_Qs = jax.lax.cond(do_balances, balance_Qs, lambda qs: qs, new_Qs)
+                # Select instead of branching, for the same H100 cost as above.
+                new_Qs = _tree_where_scalar(do_balances, balance_Qs(new_Qs), new_Qs)
 
                 return new_Qs, new_Ls
 

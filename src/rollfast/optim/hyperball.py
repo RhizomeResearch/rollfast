@@ -48,6 +48,7 @@ from rollfast.optim.rmnp import _build_unscaled_rmnp_branch
 from rollfast.utils import (
     MomentumAccumulator,
     _fresh_prng_key,
+    _has_nonzero_or_scheduled,
     _is_aux_leaf,
     _reject_complex_tree,
     _resolve_mask,
@@ -147,13 +148,16 @@ def _caution_update(
 def _add_decay_to_direction(
     direction: jax.Array,
     param: jax.Array,
-    weight_decay: jax.Array,
+    weight_decay: jax.typing.ArrayLike,
     apply_decay: jax.Array,
     *,
     cautious_weight_decay: bool,
 ) -> jax.Array:
-    p32 = param.astype(jnp.float32)
     d32 = direction.astype(jnp.float32)
+    # XLA cannot fold `0.0 * param` away, so skip a static zero explicitly.
+    if not _has_nonzero_or_scheduled(cast(optax.ScalarOrSchedule, weight_decay)):
+        return d32
+    p32 = param.astype(jnp.float32)
     wd32 = jnp.asarray(weight_decay, dtype=jnp.float32)
 
     if cautious_weight_decay:
@@ -193,12 +197,11 @@ def _hyperball_leaf_update(
     decay_on = _mask_leaf_value(decay_leaf)
     lr32 = jnp.asarray(learning_rate, dtype=jnp.float32)
     fallback_lr32 = jnp.asarray(fallback_learning_rate, dtype=jnp.float32)
-    wd32 = jnp.asarray(weight_decay, dtype=jnp.float32)
 
     hyperball_direction = _add_decay_to_direction(
         u32,
         p32,
-        wd32,
+        weight_decay,
         decay_on,
         cautious_weight_decay=cautious_weight_decay,
     )
@@ -220,7 +223,7 @@ def _hyperball_leaf_update(
         fallback_direction = _add_decay_to_direction(
             fallback_direction,
             p32,
-            wd32,
+            weight_decay,
             decay_on,
             cautious_weight_decay=cautious_weight_decay,
         )

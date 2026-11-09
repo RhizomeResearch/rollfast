@@ -140,6 +140,7 @@ def _simple_quintic_polar(
     compute_dtype: jax.typing.DTypeLike = jnp.bfloat16,
     output_dtype: jax.typing.DTypeLike = jnp.float32,
     precision: jax.lax.PrecisionLike = jax.lax.Precision.DEFAULT,
+    unroll: bool = True,
 ) -> jax.Array:
     """Reference simple-quintic Newton-Schulz polar factor.
 
@@ -165,7 +166,7 @@ def _simple_quintic_polar(
         B = b * A + c * jnp.matmul(A, A, precision=precision)
         return a * x + jnp.matmul(B, x, precision=precision)
 
-    X = jax.lax.fori_loop(0, iters, body_fn, X, unroll=True)
+    X = jax.lax.fori_loop(0, iters, body_fn, X, unroll=unroll)
 
     if transposed:
         X = jnp.swapaxes(X, -1, -2)
@@ -295,7 +296,7 @@ def _solve_row_norm_multipliers(
         return jax.lax.cond(state[4], lambda: state, lambda: active_body(state))
 
     x, _, _, _, _ = jax.lax.fori_loop(
-        0, max_iter, body_fn, (x0, res0, p0, rs0, done0), unroll=True
+        0, max_iter, body_fn, (x0, res0, p0, rs0, done0), unroll=False
     )
     return jnp.where(jnp.all(jnp.isfinite(x)), x, jnp.zeros_like(b))
 
@@ -314,6 +315,8 @@ def _riemannian_balanced_polar_matrix(
     precision: jax.lax.PrecisionLike = jax.lax.Precision.DEFAULT,
 ) -> jax.Array:
     """Riemannian-Aurora balanced Stiefel update for one matrix."""
+    # Loops stay rolled: unrolling the nested retraction and CG iterations made one
+    # update take ~48 s and 90 s to compile on H100 GPUs, against 26 ms and 2.5 s.
     if G.ndim != 2:
         raise ValueError(
             f"Riemannian-Aurora matrix update expects rank-2 leaves, got {G.ndim=}"
@@ -324,6 +327,7 @@ def _riemannian_balanced_polar_matrix(
         U = _simple_quintic_polar(
             G,
             iters=polar_ns_iters,
+            unroll=False,
             eps=eps,
             compute_dtype=polar_compute_dtype,
             output_dtype=polar_output_dtype,
@@ -341,6 +345,7 @@ def _riemannian_balanced_polar_matrix(
     U0 = _simple_quintic_polar(
         G32,
         iters=polar_ns_iters,
+        unroll=False,
         eps=eps,
         compute_dtype=polar_compute_dtype,
         output_dtype=polar_output_dtype,
@@ -354,6 +359,7 @@ def _riemannian_balanced_polar_matrix(
             Y = _simple_quintic_polar(
                 Y,
                 iters=polar_ns_iters,
+                unroll=False,
                 eps=eps,
                 compute_dtype=polar_compute_dtype,
                 output_dtype=polar_output_dtype,
@@ -376,7 +382,7 @@ def _riemannian_balanced_polar_matrix(
         Y = retract(U + riemannian_eta * Z)
         return jnp.where(finite, Y, U)
 
-    U = jax.lax.fori_loop(0, outer_steps, outer_body, U0, unroll=True)
+    U = jax.lax.fori_loop(0, outer_steps, outer_body, U0, unroll=False)
     if transposed:
         U = jnp.swapaxes(U, -1, -2)
     return U.astype(jnp.float32) * _aspect_scale_for_matrix(G)

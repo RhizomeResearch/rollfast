@@ -24,6 +24,15 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 - The non-finite guard and fine-tuning update commit no longer branch around the optimizer. On H100 GPUs this removes
   about 390 ms per update, and with donated buffers it avoids copying parameters and optimizer state. A rejected
   fine-tuning update now runs one optimizer pass on zero gradients and discards it.
+- `scale_by_adam`, `galore_adamw`, `apollo_adamw`, and `apply_hyperball` no longer read parameters for a static zero
+  weight decay. Default AdamW saves one multiply and add over all parameters per update.
+- Kron no longer branches around its lazy scale initialization and factor balancing, which takes one update from about
+  800 ms to 5 ms on an H100 GPU for 30 256x128 matrices. The preconditioner update itself remains conditional.
+- Kron shares its per-factor key splits and norm-estimator noise across leaves, which shortens XLA compile time without
+  changing the drawn values. Compile time now follows the number of distinct factor shapes rather than the number of
+  leaves.
+- Riemannian Aurora keeps its loops rolled, which takes one update from about 48 s to 26 ms on an H100 GPU for 8 256x128
+  matrices and compile time from 90 s to 2.5 s.
 
 ## [1.4.0] - 2026-10-21
 

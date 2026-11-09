@@ -72,7 +72,12 @@ most focused relevant test, then the full applicable checks above. Report any ch
   Optax compatibility tests; stochastic rounding requires explicit PRNG ownership.
 - Do not wrap a whole optimizer update in `jax.lax.cond`; run it and select per leaf. A branch around a key-splitting
   update measured about 390 ms per update on H100 80GB (JAX 0.11.0) but under 1 ms on an RTX 4080, and it copies donated
-  buffers. The slowdown does not show on CPU or RTX, so check performance claims about branches on the target GPU.
+  buffers. The slowdown does not show on CPU or RTX, so check performance claims about branches on the target GPU. Small
+  branches cost the same without any key split (Kron's scale-init and balance branches); keep a branch only around
+  expensive work that is usually skipped, such as Kron's preconditioner update.
+- XLA compile time on GPU grows with each separately expanded Threefry call (about 0.2 s per site on H100). Vmapping
+  `jax.random.split` or `normal` over a batch of keys returns exactly the same values from one program; see Kron's
+  `_batched_factor_seeds`. Avoid this for gradient-sized noise, where stacking doubles transient memory.
 - Validate static user-facing arguments at construction time where practical. Keep update paths compatible with
   `jax.jit`; do not convert traced values to Python scalars or booleans.
 - Maintain Optax-compatible behavior for transformation `init` and `update` functions, including the handling of

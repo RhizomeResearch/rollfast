@@ -177,13 +177,14 @@ def scale_by_adam(
             is_leaf=_is_aux_leaf,
         )
 
-        if _has_nonzero_or_scheduled(weight_decay) and params is None:
-            raise ValueError(
-                "`params` must be provided to `scale_by_adam.update` when "
-                "`weight_decay` is nonzero or scheduled."
-            )
-
-        if params is not None:
+        # Skipped for a static zero: XLA cannot fold `0.0 * param` away, so
+        # applying it would read and scale every parameter on each update.
+        if _has_nonzero_or_scheduled(weight_decay):
+            if params is None:
+                raise ValueError(
+                    "`params` must be provided to `scale_by_adam.update` when "
+                    "`weight_decay` is nonzero or scheduled."
+                )
             wd_step = _resolve_scalar(weight_decay, state.count)
             resolved_mask = _resolve_mask(weight_decay_mask, params)
             if resolved_mask is None:

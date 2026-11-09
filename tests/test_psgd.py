@@ -6,6 +6,8 @@ import pytest
 
 from rollfast.optim.psgd import (
     KronState,
+    _batched_factor_seeds,
+    _FactorSeeds,
     _norm_lower_bound_skh,
     _norm_lower_bound_spd,
     kron,
@@ -30,6 +32,73 @@ def test_subspace_norm_estimates_match_spectral_reference(dtype, kind):
         assert actual <= reference * (1 + 1e-6)
         assert actual == pytest.approx(reference, rel=1e-3)
         assert float(fn(jnp.zeros_like(matrix), jax.random.PRNGKey(2))) == 0.0
+
+
+@pytest.mark.parametrize("mode", ["Q0P5EQ1P5", "EQ", "NS", "QUAD"])
+def test_batched_factor_seeds_equal_separate_draws(mode):
+    def expected_seeds(layer_key, Q):
+        seeds = []
+        for key, q in zip(jax.random.split(layer_key, len(Q)), Q, strict=True):
+            if q.ndim < 2:
+                seeds.append(None)
+                continue
+            shape = (32, q.shape[0])
+            if mode == "EQ":
+                seeds.append(
+                    _FactorSeeds(jax.random.normal(key, shape, jnp.float32), None)
+                )
+                continue
+            norm_key, geometry_key = jax.random.split(key)
+            geometry = None
+            if mode != "QUAD":
+                dtype = (
+                    jnp.float32
+                    if mode == "NS"
+                    else jnp.promote_types(q.dtype, jnp.float32)
+                )
+                geometry = jax.random.normal(geometry_key, shape, dtype)
+            seeds.append(
+                _FactorSeeds(jax.random.normal(norm_key, shape, jnp.float32), geometry)
+            )
+        return seeds
+
+    Qs = [
+        [jnp.eye(4, dtype=jnp.float32), jnp.eye(3, dtype=jnp.float32)],
+        None,
+        [jnp.eye(5, dtype=jnp.float32), jnp.eye(3, dtype=jnp.float32)],
+        [jnp.ones((5,), dtype=jnp.float32)],
+        [jnp.eye(4, dtype=jnp.bfloat16), jnp.ones((3,), dtype=jnp.float32)],
+    ]
+    layer_keys = jax.random.split(jax.random.PRNGKey(3), len(Qs))
+
+    batched = _batched_factor_seeds(layer_keys, Qs, [False] * len(Qs), mode)
+
+    for key, Q, seeds in zip(layer_keys, Qs, batched, strict=True):
+        if Q is None:
+            assert seeds is None
+            continue
+        _assert_tree_exactly_equal(seeds, expected_seeds(key, Q))
+
+
+def _count_rng_ops(jaxpr):
+    count = 0
+    for eqn in jaxpr.eqns:
+        count += eqn.primitive.name in ("random_bits", "random_split")
+        for value in jax.tree.leaves(eqn.params, is_leaf=lambda v: hasattr(v, "jaxpr")):
+            nested = getattr(value, "jaxpr", value)
+            if hasattr(nested, "eqns"):
+                count += _count_rng_ops(nested)
+    return count
+
+
+def test_kron_rng_program_grows_only_with_gradient_noise():
+    def rng_ops(leaf_count):
+        params = {f"w{i}": jnp.ones((4, 3)) for i in range(leaf_count)}
+        tx = scale_by_kron(preconditioner_update_probability=1.0)
+        graph = jax.make_jaxpr(tx.update)(params, tx.init(params), params).jaxpr
+        return _count_rng_ops(graph)
+
+    assert rng_ops(8) - rng_ops(2) == 6
 
 
 def _assert_tree_exactly_equal(actual, expected):
