@@ -5,6 +5,11 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+## [1.5.0] - 2026-11-09
+
+Non-finite rejection no longer branches around the optimizer, which removes about 390 ms per update on H100 GPUs. Kron
+and Riemannian Aurora update and compile faster, and `ScheduleConfig` can select WSD warmup and decay shapes.
+
 ### Added
 
 - `galore_adamw` and `apollo_adamw` accept `weight_decay_mask`, a boolean tree or a callable returning one, like the
