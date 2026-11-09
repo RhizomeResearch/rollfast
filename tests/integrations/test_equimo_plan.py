@@ -6,7 +6,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from equimo.core.parameters import DEFAULT_NO_DECAY_TAGS as EQUIMO_NO_DECAY_TAGS
 
 import rollfast.finetune as rfft
 from rollfast import apply_updates
@@ -16,7 +15,10 @@ from tests.finetune.helpers import ARRAY_LIMITS, fingerprint_process, tiny_plan
 
 @pytest.mark.integration
 def test_default_no_decay_tags_mirror_equimo():
-    assert rfft.DEFAULT_NO_DECAY_TAGS == EQUIMO_NO_DECAY_TAGS
+    # equimo.core.parameters first ships in Equimo 2.8.
+    parameters = pytest.importorskip("equimo.core.parameters")
+
+    assert rfft.DEFAULT_NO_DECAY_TAGS == parameters.DEFAULT_NO_DECAY_TAGS
 
 
 @pytest.mark.integration
