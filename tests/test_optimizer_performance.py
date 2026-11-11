@@ -4,7 +4,6 @@ import importlib
 from dataclasses import replace
 
 import jax
-import jax.extend
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -28,6 +27,20 @@ def _direct_eqns(jaxpr, primitive):
     return [eqn for eqn in jaxpr.eqns if eqn.primitive.name == primitive]
 
 
+def _nested_jaxprs(params):
+    """Yield the jaxprs in an equation's params, closed or open.
+
+    ``jax.extend.core.jaxprs_in_params`` is missing from the oldest supported
+    JAX and ``jax.core.jaxprs_in_params`` is deprecated in newer releases.
+    """
+
+    for value in params.values():
+        for item in value if isinstance(value, tuple | list) else (value,):
+            item = getattr(item, "jaxpr", item)
+            if hasattr(item, "eqns"):
+                yield item
+
+
 def _conds_outside_loops(jaxpr):
     """Return cond equations that XLA may capture into a CUDA graph.
 
@@ -42,7 +55,7 @@ def _conds_outside_loops(jaxpr):
             found.append(eqn)
         if name == "while" or (name == "scan" and eqn.params.get("unroll", 1) == 1):
             continue
-        for sub in jax.extend.core.jaxprs_in_params(eqn.params):
+        for sub in _nested_jaxprs(eqn.params):
             found.extend(_conds_outside_loops(sub))
     return found
 
