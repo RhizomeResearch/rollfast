@@ -62,6 +62,13 @@ def test_unsupported_schedule_kinds_are_rejected(kind):
         rfft.ScheduleConfig(kind=kind)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("step_counter", ("optimizer", "attempt"))
+def test_supported_schedule_step_counters_round_trip(step_counter):
+    config = rfft.ScheduleConfig(kind="wsd", total_steps=8, step_counter=step_counter)
+
+    assert rfft.ScheduleConfig.from_dict(config.to_dict()) == config
+
+
 @pytest.mark.parametrize("step_counter", ("micro", "typo"))
 def test_unsupported_schedule_step_counters_are_rejected(step_counter):
     with pytest.raises(NotImplementedError, match="ScheduleConfig.step_counter"):

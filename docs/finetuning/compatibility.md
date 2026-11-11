@@ -17,8 +17,8 @@ Choose an evaluation view explicitly. Ordinary training parameters use `view="op
 `schedule_free` require their corresponding state. `bind_evaluation_view` associates the view with the model checkpoint,
 optimizer checkpoint, model-state snapshot, and applied-update count. Changing the view changes the evaluated parameter
 set. For accumulation, `bundle.update_with_status` distinguishes accumulating microsteps, applied updates, and discarded
-windows. A skipped batch requires the caller to omit the optimizer update. See [configuration](configuration.md) and
-[averaging](averaging.md) for the supported policies.
+windows. Record a batch without training targets with `make_skip_attempt_step` instead of an update. See
+[configuration](configuration.md) and [averaging](averaging.md) for the supported policies.
 
 ## Choosing a checkpoint reader
 

@@ -100,6 +100,11 @@ most focused relevant test, then the full applicable checks above. Report any ch
 - Strict restore compares manifest config dictionaries. A field added to a config's `to_dict` within schema version 1
   needs a default in the restore compatibility view (see `_PRECISION_FIELDS_ADDED_IN_1_3`,
   `_SCHEDULE_FIELDS_ADDED_AFTER_1_4`, and `serialization._compatibility_view`) so older manifests still match.
+- Under `ScheduleConfig(step_counter="attempt")` the attempt clock is the `count` of every `optax.ScaleByScheduleState`
+  and `_FactorizedAdamWState` in the optimizer state (`_SCHEDULE_CLOCK_STATES` in `finetune/builders.py`); rejected and
+  skipped attempts advance only those counts. A builder whose learning rate reads a count that other state shares (bias
+  correction, projection refresh, Schedule-Free averaging) must reject `"attempt"` with
+  `_require_optimizer_schedule_clock`.
 - Do not silently change optimizer defaults, state-tree structure, counter ownership, serialization formats, or
   checkpoint compatibility. Such changes require explicit tests and matching documentation.
 - If the package version changes, keep `pyproject.toml` and `src/rollfast/__init__.py` synchronized; CI checks them for

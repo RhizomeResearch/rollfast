@@ -21,6 +21,7 @@ from rollfast.utils import (
 
 from ._precision import master_leaf_dtype, uses_master_params
 from ._protocols import CombinableFineTunePlanProtocol, FineTunePlanProtocol
+from .builders import _advance_schedule_clocks
 from .config import (
     AccumulationConfig,
     AccumulationState,
@@ -32,6 +33,7 @@ from .config import (
     PrecisionConfig,
     RNGStreams,
     SAMConfig,
+    StepCounter,
     StepCounters,
 )
 from .update_status import UpdateStatus, _pending_microsteps, _update_status
@@ -401,6 +403,11 @@ def _commit_update(
         (visible_params, master_params, opt_state),
         optimizer,
     )
+    if optimizer.schedule_config.step_counter == "attempt":
+        # A rejected candidate restores the old state; a completed attempt still
+        # consumes its schedule slot. An accepted candidate already advanced.
+        consumed = jnp.logical_not(jnp.logical_or(accepted, status.accumulating))
+        state = _advance_schedule_clocks(state, consumed)
     applied = jnp.logical_and(accepted, status.update_applied)
     status = UpdateStatus(
         accumulating=status.accumulating,
@@ -726,6 +733,54 @@ def make_finetune_update_step(
     return step
 
 
+def make_skip_attempt_step(
+    optimizer: OptimizerBundle,
+) -> Callable[[FineTuneStepState], FineTuneStepState]:
+    """Return a step that records an attempt without applying an update.
+
+    Use it for a batch that carries no supervision: the step computes no loss
+    or gradient. Parameters, optimizer moments and bias-correction counts,
+    model state, loss scale, and RNG streams are unchanged.
+    ``counters.microstep`` and ``counters.attempted_update`` advance;
+    ``counters.successful_update`` does not. Under
+    ``ScheduleConfig(step_counter="attempt")`` the skipped attempt consumes its
+    schedule slot, so the next applied update uses the next slot's learning
+    rate; under ``"optimizer"`` the schedule does not move. The step runs
+    under ``jax.jit``.
+    """
+
+    if optimizer.accumulation_config.steps > 1:
+        raise NotImplementedError(
+            "make_skip_attempt_step requires accumulation steps=1; with "
+            "accumulation an attempt is a whole optimizer window."
+        )
+    attempt_clock = optimizer.schedule_config.step_counter == "attempt"
+
+    def step(step_state: FineTuneStepState) -> FineTuneStepState:
+        skipped = UpdateStatus(
+            accumulating=jnp.asarray(False),
+            update_applied=jnp.asarray(False),
+            window_discarded=jnp.asarray(True),
+            microsteps_in_window=jnp.asarray(0, dtype=jnp.int32),
+        )
+        optimizer_state = step_state.optimizer_state
+        if attempt_clock:
+            optimizer_state = _advance_schedule_clocks(optimizer_state, 1)
+        return replace(
+            step_state,
+            optimizer_state=optimizer_state,
+            counters=_advance_step_counters(
+                step_state.counters,
+                status=skipped,
+                committed=False,
+                schedule_counter=optimizer.schedule_config.step_counter,
+                dynamic_loss_scale=optimizer.precision_config.loss_scale == "dynamic",
+            ),
+        )
+
+    return step
+
+
 def make_plan_loss_scaled_master_update_step(
     plan: CombinableFineTunePlanProtocol,
     loss_fn: Callable[..., Any],
@@ -887,6 +942,12 @@ def make_accumulating_loss_bundle_update_step(
             lambda operand: (*operand, jnp.asarray(False)),
             (trainable, opt_state),
         )
+        if optimizer.schedule_config.step_counter == "attempt":
+            # An empty or nonfinite window never reaches the optimizer but
+            # still consumes its schedule slot.
+            opt_state = _advance_schedule_clocks(
+                opt_state, jnp.logical_and(boundary, jnp.logical_not(attempt_update))
+            )
         reset_accumulation = init_accumulation_state(trainable, accumulation)
         accumulation_state = _select_accumulation_state(
             boundary,
@@ -1817,13 +1878,18 @@ def _advance_step_counters(
     *,
     status: UpdateStatus,
     committed: Any,
-    schedule_counter: Literal["optimizer", "micro"],
+    schedule_counter: StepCounter,
     dynamic_loss_scale: bool,
 ) -> StepCounters:
     one = jnp.asarray(1, dtype=jnp.int32)
     applied = jnp.asarray(status.update_applied, dtype=jnp.int32)
     attempted = jnp.asarray(jnp.logical_not(status.accumulating), dtype=jnp.int32)
-    schedule_inc = one if schedule_counter == "micro" else applied
+    if schedule_counter == "attempt":
+        schedule_inc = attempted
+    elif schedule_counter == "micro":
+        schedule_inc = one
+    else:
+        schedule_inc = applied
     loss_scale_inc = (
         jnp.asarray(committed, dtype=jnp.int32)
         if dynamic_loss_scale
@@ -2448,6 +2514,7 @@ __all__ = (
     "make_plan_master_update_step",
     "make_plan_update_step",
     "make_sam_step",
+    "make_skip_attempt_step",
     "make_stateful_loss_scaled_master_update_step",
     "make_stateful_sam_step",
     "make_update_step",

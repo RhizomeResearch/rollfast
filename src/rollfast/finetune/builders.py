@@ -53,6 +53,7 @@ from .groups import compile_groups, unmatched_rule_warnings
 from .schedules import build_schedule, preview_schedule
 from .state_estimation import estimate_adamw8_moment_leaves, quantize_group_state
 from .transforms import (
+    AlwaysSkipNonFiniteState,
     always_skip_nonfinite,
     clear_completed_accumulation,
     clip_by_global_norm,
@@ -63,6 +64,60 @@ from .validation import validate_plan
 class _FactorizedAdamWState(NamedTuple):
     count: jax.Array
     inner_state: optax.OptState
+
+
+# State types whose ``count`` indexes only a learning-rate schedule. Under
+# ScheduleConfig(step_counter="attempt") these counts are the attempt clock.
+_SCHEDULE_CLOCK_STATES = (optax.ScaleByScheduleState, _FactorizedAdamWState)
+
+
+def _advance_schedule_clocks(state: Any, increment: Any) -> Any:
+    """Add ``increment`` to every learning-rate schedule count in ``state``.
+
+    Moments, bias-correction counts, and all other state are left unchanged.
+    """
+
+    def advance(node):
+        if not isinstance(node, _SCHEDULE_CLOCK_STATES):
+            return node
+        count = node.count
+        return node._replace(count=count + jnp.asarray(increment, dtype=count.dtype))
+
+    return jax.tree.map(
+        advance,
+        state,
+        is_leaf=lambda node: isinstance(node, _SCHEDULE_CLOCK_STATES),
+    )
+
+
+def _consume_rejected_attempts(
+    guard: optax.GradientTransformationExtraArgs,
+) -> optax.GradientTransformationExtraArgs:
+    """Advance the schedule clocks of a finite guard's rejected updates.
+
+    The guard keeps its inner state for a rejected update; advancing only the
+    schedule counts afterwards lets the rejection consume its schedule slot.
+    The state structure is the guard's own.
+    """
+
+    def update_fn(updates, state, params=None, **extra_args):
+        updates, next_state = guard.update(updates, state, params, **extra_args)
+        state = cast(AlwaysSkipNonFiniteState, next_state)
+        rejected = jnp.logical_not(state.last_finite)
+        return updates, state._replace(
+            inner_state=_advance_schedule_clocks(state.inner_state, rejected)
+        )
+
+    return optax.GradientTransformationExtraArgs(guard.init, update_fn)
+
+
+def _require_optimizer_schedule_clock(schedule: ScheduleConfig, family: str) -> None:
+    if schedule.step_counter == "attempt":
+        raise NotImplementedError(
+            f"{family} reads its learning rate from a count that other optimizer "
+            "state shares, so it supports only ScheduleConfig(step_counter="
+            "'optimizer')."
+        )
 
 
 def _validate_complex_plan_compatibility(trainable: Any, *, family: str) -> None:
@@ -318,8 +373,11 @@ def _with_guard_and_accumulation(
     tx: optax.GradientTransformation,
     gradient_policy: GradientPolicy,
     accumulation: AccumulationConfig,
+    schedule: ScheduleConfig,
 ) -> optax.GradientTransformation:
     tx = _apply_gradient_policy(tx, gradient_policy)
+    if schedule.step_counter == "attempt" and gradient_policy.nonfinite == "skip":
+        tx = _consume_rejected_attempts(cast(optax.GradientTransformationExtraArgs, tx))
     if accumulation.steps > 1:
         return cast(
             optax.GradientTransformation,
@@ -1337,7 +1395,7 @@ def _build_grouped_hybrid_transform(
         )
 
     tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
-    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation, schedule)
 
 
 def _hybrid_group_transform(
@@ -1444,6 +1502,7 @@ def _build_grouped_schedule_free_transform(
     polyak_f_star: float,
     polyak_axis_name: str | tuple[str, ...] | None,
 ) -> optax.GradientTransformation:
+    _require_optimizer_schedule_clock(schedule, "schedule_free_adam")
     root_key = _fresh_prng_key(key)
     polyak_enabled = _resolve_sf_bool(schedule_free_plus, polyak)
     use_adamc_enabled = _resolve_sf_bool(schedule_free_plus, use_adamc)
@@ -1513,7 +1572,7 @@ def _build_grouped_schedule_free_transform(
         adamc_weight_decay=adamc_weight_decay,
         adamc_weight_decay_mask=decay_mask,
     )
-    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation, schedule)
 
 
 def _build_grouped_galore_transform(
@@ -1527,6 +1586,7 @@ def _build_grouped_galore_transform(
     precision: PrecisionConfig,
     galore: GaLoreConfig,
 ) -> optax.GradientTransformation:
+    _require_optimizer_schedule_clock(schedule, "galore_adamw")
     transforms = {}
     for group in groups:
         lr_schedule = build_schedule(
@@ -1573,7 +1633,7 @@ def _build_grouped_galore_transform(
             )
 
     tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
-    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation, schedule)
 
 
 def _build_factorized_adamw_transform(
@@ -1642,7 +1702,7 @@ def _build_factorized_adamw_transform(
 
     tx = optax.GradientTransformation(init_fn, update_fn)
     tx = _chain_with_clipping(tx, gradient_policy)
-    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation, schedule)
 
 
 def _scale_factorized_adamw_leaf(
@@ -1737,7 +1797,7 @@ def _build_grouped_transform(
             )
 
     tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
-    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation, schedule)
 
 
 def _build_grouped_apollo_transform(
@@ -1751,6 +1811,7 @@ def _build_grouped_apollo_transform(
     precision: PrecisionConfig,
     apollo: APOLLOConfig,
 ) -> optax.GradientTransformation:
+    _require_optimizer_schedule_clock(schedule, "apollo_adamw")
     transforms = {}
     for group in groups:
         lr_schedule = build_schedule(
@@ -1798,7 +1859,7 @@ def _build_grouped_apollo_transform(
             )
 
     tx = _chain_with_clipping(_multi_transform(transforms, labels), gradient_policy)
-    return _with_guard_and_accumulation(tx, gradient_policy, accumulation)
+    return _with_guard_and_accumulation(tx, gradient_policy, accumulation, schedule)
 
 
 def _schedule_free_eval_params(

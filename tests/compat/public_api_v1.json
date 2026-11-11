@@ -220,6 +220,7 @@
     "make_plan_master_update_step",
     "make_plan_update_step",
     "make_sam_step",
+    "make_skip_attempt_step",
     "make_state_checkpoint",
     "make_stateful_loss_scaled_master_update_step",
     "make_stateful_sam_step",

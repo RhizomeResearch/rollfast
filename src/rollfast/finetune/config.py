@@ -34,7 +34,7 @@ ScheduleKind = Literal[
     "polynomial",
     "custom",
 ]
-StepCounter = Literal["optimizer", "micro"]
+StepCounter = Literal["optimizer", "attempt", "micro"]
 NonFinitePolicy = Literal["skip", "none", "raise"]
 Normalization = Literal["examples", "tokens", "pairs", "pixels", "custom", "none"]
 SAMNorm = Literal["global_l2"]
@@ -72,6 +72,13 @@ class ScheduleConfig:
     ``warmup_shape``, ``decay_shape``, ``warmup_power``, ``decay_power``, and
     ``exponential_rate`` apply only to ``kind="wsd"``; see
     :func:`rollfast.schedules.wsd.wsd_schedule` for their slot semantics.
+
+    ``step_counter`` selects the clock that indexes the schedule.
+    ``"optimizer"`` counts applied updates. ``"attempt"`` counts update
+    attempts: a rejected update, a discarded accumulation window, or an
+    explicitly skipped attempt still consumes its schedule slot, while the
+    optimizer's moments and bias-correction count follow applied updates only.
+    With accumulation, one attempt is one optimizer window.
     """
 
     kind: ScheduleKind = "warmup_cosine"
@@ -103,10 +110,10 @@ class ScheduleConfig:
                 f"{', '.join(repr(kind) for kind in supported_kinds)}; "
                 f"got {self.kind!r}."
             )
-        if self.step_counter != "optimizer":
+        if self.step_counter not in ("optimizer", "attempt"):
             raise NotImplementedError(
-                "ScheduleConfig.step_counter supports only 'optimizer'; "
-                f"got {self.step_counter!r}."
+                "ScheduleConfig.step_counter supports only 'optimizer' and "
+                f"'attempt'; got {self.step_counter!r}."
             )
         if self.total_steps is not None and self.total_steps <= 0:
             raise ValueError("total_steps must be positive when provided.")
