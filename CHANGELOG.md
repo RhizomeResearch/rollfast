@@ -5,6 +5,33 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+## [1.6.0] - 2026-11-11
+
+Optimizer and fine-tuning updates no longer stall on H100 GPUs with NVIDIA driver 595, and `ScheduleConfig` can index
+the learning-rate schedule by update attempts.
+
+### Added
+
+- `ScheduleConfig(step_counter="attempt")` advances the schedule on every update attempt, including rejected updates,
+  discarded accumulation windows, and skipped batches, while Adam moments, bias correction, and weight decay still
+  follow applied updates. `apollo_adamw_from_plan`, `galore_adamw_from_plan`, and `schedule_free_adam_from_plan` accept
+  only `"optimizer"`.
+- `make_skip_attempt_step(bundle)` records a batch without training targets as a skipped attempt without computing a
+  loss or touching parameters, optimizer moments, model state, loss scale, or RNG streams.
+
+### Fixed
+
+- Update paths no longer contain a `lax.cond` that XLA captures into a CUDA graph. On H100 GPUs with driver 595.91 each
+  such conditional cost about 390 ms per execution, taken or not. Cheap branches now compute and select; expensive,
+  usually skipped work runs in a zero-or-one-trip loop shared by all leaves. On an H100 with eight 2048x2048 layers, one
+  step went from about 400 ms to 14 ms for hybrid Kron fine-tuning, 389 ms to 1.5 ms for APOLLO, 156 ms to 1.6 ms with
+  EMA and SWA, 148 ms to 1.1 ms for an accumulating loss-bundle step, 116 ms to 15 ms for Pion, and 367 ms to 0.05 ms
+  for the AdaLoRA controller. Other GPUs did not stall; there the skip loops add about 0.1 to 0.2 ms per step, and EMA
+  and SWA updates are about 23% faster.
+- `make_accumulating_loss_bundle_update_step` with a declared collective axis skips a window on every partition when any
+  partition saw a nonfinite microbatch. Previously only that partition skipped, leaving the others in the optimizer's
+  collectives.
+
 ## [1.5.0] - 2026-11-09
 
 Non-finite rejection no longer branches around the optimizer, which removes about 390 ms per update on H100 GPUs. Kron
