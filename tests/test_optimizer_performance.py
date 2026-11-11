@@ -4,6 +4,7 @@ import importlib
 from dataclasses import replace
 
 import jax
+import jax.extend
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -23,20 +24,120 @@ def _assert_exact(actual, expected):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
-def _direct_conds(jaxpr):
-    return [eqn for eqn in jaxpr.eqns if eqn.primitive.name == "cond"]
+def _direct_eqns(jaxpr, primitive):
+    return [eqn for eqn in jaxpr.eqns if eqn.primitive.name == primitive]
 
 
-def test_kron_branches_only_around_the_preconditioner_update():
+def _conds_outside_loops(jaxpr):
+    """Return cond equations that XLA may capture into a CUDA graph.
+
+    Loops stay outside CUDA graphs under default XLA flags, so a cond inside a
+    while body or a non-unrolled scan body is not captured.
+    """
+
+    found = []
+    for eqn in jaxpr.eqns:
+        name = eqn.primitive.name
+        if name == "cond":
+            found.append(eqn)
+        if name == "while" or (name == "scan" and eqn.params.get("unroll", 1) == 1):
+            continue
+        for sub in jax.extend.core.jaxprs_in_params(eqn.params):
+            found.extend(_conds_outside_loops(sub))
+    return found
+
+
+def _optimizers():
+    import rollfast as r
+
+    sf = {"learning_rate": 0.01, "total_steps": 10}
+    return {
+        "adamw": lambda: r.adamw(0.01),
+        "adamw8": lambda: r.adamw8(0.01),
+        "aurora": lambda: r.aurora(0.01),
+        "riemannian_aurora": lambda: r.riemannian_aurora(0.01),
+        "contramuon": lambda: r.contramuon(0.01),
+        "kron": lambda: r.kron(learning_rate=0.01),
+        "muon_aol": lambda: r.muon(0.01, preconditioning="aol"),
+        "muon_schatten": lambda: r.muon(0.01, preconditioning="schatten"),
+        "normuon": lambda: r.normuon(0.01),
+        "pion": lambda: r.pion(0.01),
+        "prism": lambda: r.prism(0.01),
+        "rmnp": lambda: r.rmnp(0.01),
+        "trasmuon": lambda: r.trasmuon(0.01),
+        "apollo": lambda: apollo_adamw(0.01, rank=2, projection_refresh_interval=3),
+        "galore": lambda: galore_adamw(0.01, rank=2, min_matrix_size=0),
+        "schedule_free_kron": lambda: r.schedule_free_kron(**sf),
+        "soda_muon": lambda: r.soda_muon(**sf),
+    }
+
+
+@pytest.mark.parametrize("name", list(_optimizers()))
+def test_optimizer_updates_keep_conds_out_of_cuda_graphs(name):
+    params = {"w": jnp.ones((8, 6)), "b": jnp.ones(6)}
+    tx = _optimizers()[name]()
+
+    graph = jax.make_jaxpr(tx.update)(params, tx.init(params), params).jaxpr
+
+    assert not _conds_outside_loops(graph)
+
+
+def test_finetune_update_paths_keep_conds_out_of_cuda_graphs():
+    import rollfast.finetune as rfft
+    from tests.finetune.helpers import tiny_plan
+
+    plan = tiny_plan()
+    averaged = rfft.adamw_from_plan(
+        plan,
+        total_steps=10,
+        ema=rfft.EMAConfig(enabled=True),
+        swa=rfft.SWAConfig(enabled=True, start_step=0),
+    )
+
+    def bundle_loss(params, value):
+        loss = sum(jnp.sum((leaf - value) ** 2) for leaf in jax.tree.leaves(params))
+        return rfft.LossBundle(
+            loss_sum=loss,
+            normalizer=jnp.asarray(1.0),
+            metrics_sums={},
+            metric_normalizers={},
+            new_model_state=None,
+        )
+
+    accumulation = rfft.AccumulationConfig(steps=2)
+    accumulate = rfft.make_accumulating_loss_bundle_update_step(
+        bundle_loss, averaged, accumulation=accumulation
+    )
+    controller = rfft.make_adalora_controller({"a": 4, "b": 4}, total_steps=10)
+    params = plan.trainable
+
+    graphs = [
+        jax.make_jaxpr(averaged.update)(params, averaged.init(params), params),
+        jax.make_jaxpr(accumulate)(
+            params,
+            averaged.init(params),
+            rfft.init_accumulation_state(params, accumulation),
+            jnp.asarray(0.5),
+        ),
+        jax.make_jaxpr(controller.update)(controller.init(), jnp.ones((2, 4))),
+    ]
+
+    for graph in graphs:
+        assert not _conds_outside_loops(graph.jaxpr)
+
+
+def test_kron_skips_only_the_preconditioner_update_without_a_cond():
     params = jnp.ones((2, 3), dtype=jnp.float32)
     tx = scale_by_kron(preconditioner_update_probability=0.5)
 
     graph = jax.make_jaxpr(tx.update)(params, tx.init(params), params).jaxpr
 
-    conds = _direct_conds(graph)
-    assert len(conds) == 1
-    _, update_branch = conds[0].params["branches"]
-    assert not _direct_conds(update_branch.jaxpr)
+    assert not _direct_eqns(graph, "cond")
+    loops = _direct_eqns(graph, "while")
+    assert len(loops) == 1
+    update_body = loops[0].params["body_jaxpr"].jaxpr
+    assert not _direct_eqns(update_body, "cond")
+    assert not _direct_eqns(update_body, "while")
 
 
 @pytest.mark.parametrize("use_jit", [False, True])
@@ -90,11 +191,14 @@ def test_galore_only_computes_basis_on_refresh(monkeypatch, projection, dtype):
         return original(*args)
 
     monkeypatch.setattr(module, "_basis_from_grad", observed)
-    refresh = jax.jit(
-        lambda g, s, flag: module._refresh_basis(
-            g, s, should_refresh=flag, basis_dtype=dtype
+
+    def refresh_basis(grad, state, flag):
+        state = module._refresh_projected_leaves(
+            grad, state, should_refresh=flag, transport=False, basis_dtype=dtype
         )
-    )
+        return state.basis_left, state.basis_right
+
+    refresh = jax.jit(refresh_basis)
     _assert_exact(jax.block_until_ready(refresh(grad, state, False)), expected)
     assert not calls
     _assert_exact(jax.block_until_ready(refresh(grad, state, True)), expected)
@@ -121,14 +225,20 @@ def test_galore_transport_matches_reconstructed_first_moment(projection):
     )
     full_moment = module._reconstruct(state.mu, *old_basis, state.orientation)
     expected = module._project(full_moment, *new_basis, state.orientation)
-    for update in (
-        module._transport_projected_moments,
-        jax.jit(module._transport_projected_moments),
-    ):
-        _assert_exact(
-            update(state, *new_basis, should_refresh=False), (state.mu, state.nu)
+
+    def transport(flag):
+        refreshed = module._refresh_projected_leaves(
+            grad[::-1],
+            state,
+            should_refresh=flag,
+            transport=True,
+            basis_dtype=jnp.float32,
         )
-        mu, nu = update(state, *new_basis, should_refresh=True)
+        return refreshed.mu, refreshed.nu
+
+    for update in (transport, jax.jit(transport)):
+        _assert_exact(update(False), (state.mu, state.nu))
+        mu, nu = update(True)
         np.testing.assert_allclose(mu, expected, rtol=1e-5, atol=1e-6)
         assert jnp.all(nu >= 0)
 
@@ -145,8 +255,10 @@ def test_apollo_projection_refresh_retains_seed_and_cadence(monkeypatch):
 
     monkeypatch.setattr(module, "_make_projection", observed)
     refresh = jax.jit(
-        lambda s, count: module._refresh_projection(
-            s, count=count, rank=2, projection_seed=0, projection_refresh_interval=3
+        lambda s, count: (
+            module._refresh_projections(
+                s, count=count, projection_seed=0, projection_refresh_interval=3
+            ).projection
         )
     )
     reference = jax.jit(

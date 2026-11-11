@@ -286,20 +286,24 @@ def _update_ema(
     cadence = (step - config.start_step) % config.update_every == 0
     should_update = applied & (step >= config.start_step) & cadence
 
-    def update():
+    def update(current):
         cast_params = _cast_tree(params, config.state_dtype)
         next_ema = jax.tree.map(
             lambda old, new: (
                 None if old is None else config.decay * old + (1.0 - config.decay) * new
             ),
-            ema_params,
+            current,
             cast_params,
             is_leaf=lambda x: x is None,
         )
         return _where_mask_tree(mask, next_ema, cast_params)
 
+    # Select instead of skipping. A lax.cond captured into a CUDA graph stalls
+    # H100 GPUs (driver 595) for ~390 ms per step, and any skip copies the
+    # averaged state that the step's commit select still reads. The elementwise
+    # update costs less than that copy, even at update_every=4.
     return (
-        jax.lax.cond(should_update, update, lambda: ema_params),
+        _where_tree(should_update, update(ema_params), ema_params),
         ema_count + should_update.astype(jnp.int32),
     )
 
@@ -320,7 +324,7 @@ def _update_swa(
     cadence = (step - swa_start_step) % config.frequency == 0
     should_update = applied & (step >= swa_start_step) & cadence
 
-    def update():
+    def update(current):
         cast_params = _cast_tree(params, config.state_dtype)
         next_count = swa_count + jnp.asarray(1, dtype=jnp.int32)
         return jax.tree.map(
@@ -329,13 +333,13 @@ def _update_swa(
                 if old is None
                 else old + (new - old) / next_count.astype(new.dtype)
             ),
-            swa_params,
+            current,
             cast_params,
             is_leaf=lambda x: x is None,
         )
 
     return (
-        jax.lax.cond(should_update, update, lambda: swa_params),
+        _where_tree(should_update, update(swa_params), swa_params),
         swa_count + should_update.astype(jnp.int32),
     )
 

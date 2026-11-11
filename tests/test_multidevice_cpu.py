@@ -256,6 +256,52 @@ def test_rejected_master_steps_keep_collective_participation(declared_axis):
     np.testing.assert_array_equal(accepted, [False] + [True] * (count - 1))
 
 
+def test_accumulated_loss_bundle_window_is_skipped_on_every_partition():
+    plan = TinyPlan(
+        trainable={"w": jnp.ones(2)},
+        labels={"w": "head"},
+        group_specs={"head": TinyGroup("head", "head", None, 1.0, False)},
+    )
+    bundle = rfft.adamw_from_plan(
+        plan, total_steps=8, schedule="constant", clip_global_norm=None
+    )
+    bundle = replace(
+        bundle, gradient_policy=replace(bundle.gradient_policy, axis_name="devices")
+    )
+    accumulation = rfft.AccumulationConfig(steps=2)
+
+    def loss(params, value):
+        return rfft.LossBundle(
+            loss_sum=jnp.sum((params["w"] - value) ** 2),
+            normalizer=jnp.asarray(1.0),
+            metrics_sums={},
+            metric_normalizers={},
+            new_model_state=None,
+        )
+
+    step = jax.pmap(
+        rfft.make_accumulating_loss_bundle_update_step(
+            loss, bundle, accumulation=accumulation
+        ),
+        axis_name="devices",
+    )
+    count = jax.local_device_count()
+
+    def replicate(tree):
+        return jax.tree.map(lambda leaf: jnp.stack([leaf] * count), tree)
+
+    params = replicate(plan.trainable)
+    state = replicate(bundle.init(plan.trainable))
+    window = replicate(rfft.init_accumulation_state(plan.trainable, accumulation))
+    # Only the first partition sees a nonfinite microbatch.
+    values = jnp.zeros(count).at[0].set(jnp.nan)
+    for microbatch in (values, jnp.zeros(count)):
+        params, state, window, info = step(params, state, window, microbatch)
+
+    np.testing.assert_array_equal(info.update_applied, [False] * count)
+    np.testing.assert_array_equal(params["w"], np.ones((count, 2)))
+
+
 def test_eager_bundle_init_places_parameter_state_like_parameters():
     mesh = Mesh(np.asarray(jax.devices()), ("data",))
     sharding = NamedSharding(mesh, P("data", None))

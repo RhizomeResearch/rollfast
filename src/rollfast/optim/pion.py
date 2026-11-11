@@ -22,6 +22,7 @@ input/output axes.
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, NamedTuple, cast
 
 import jax
@@ -44,6 +45,7 @@ from rollfast.utils import (
     _fresh_prng_key,
     _momentum_grad_scale,
     _resolve_scalar,
+    _run_if,
     _tree_stochastic_cast,
     _unzip_leaf_tuple_tree,
     _validate_beta_static_scalar,
@@ -96,6 +98,44 @@ def _e2(
     eye = jnp.eye(size, dtype=A.dtype)
     X = eta_alpha[..., None, None] * A
     return eye + X + 0.5 * jnp.matmul(X, X, precision=precision)
+
+
+@dataclass(frozen=True)
+class _AlternatingStep:
+    """One leaf's two Pion sides, run for all leaves by ``_alternate_sides``.
+
+    Not a PyTree, so tree utilities keep it whole as a leaf.
+    """
+
+    weight: jax.Array
+    out_step: Callable[[], jax.Array]
+    in_step: Callable[[], jax.Array]
+    finish: Callable[[jax.Array], Any]
+
+
+def _alternate_sides(steps: Any, count: jax.Array) -> Any:
+    """Apply the out side on even counts and the in side on odd counts.
+
+    Each side runs once for all leaves. A lax.cond stalls H100 GPUs (driver
+    595) when XLA captures it into a CUDA graph, a select would double the
+    matmuls, and each _run_if is a while loop that splits the CUDA graph, so
+    the sides share two.
+    """
+
+    is_step = lambda x: isinstance(x, _AlternatingStep)
+    flat, treedef = jax.tree.flatten(steps, is_leaf=is_step)
+    indices = [index for index, leaf in enumerate(flat) if is_step(leaf)]
+    if not indices:
+        return steps
+    even = count % 2 == 0
+    weights = [flat[index].weight for index in indices]
+    weights = _run_if(even, lambda _: [flat[i].out_step() for i in indices], weights)
+    weights = _run_if(
+        jnp.logical_not(even), lambda _: [flat[i].in_step() for i in indices], weights
+    )
+    for index, weight in zip(indices, weights, strict=True):
+        flat[index] = flat[index].finish(weight)
+    return jax.tree.unflatten(treedef, flat)
 
 
 def _pion_matrix_update(
@@ -167,13 +207,14 @@ def _pion_matrix_update(
             jnp.matmul(E_out, W, precision=precision), E_in, precision=precision
         )
 
-    if alternating:
-        W_new = jax.lax.cond(count % 2 == 0, out_step, in_step)
-    else:
-        W_new = bilateral_step()
+    def finish(W_new):
+        return inverse_fn(W_new - W).astype(param.dtype)
 
-    update = inverse_fn(W_new - W).astype(param.dtype)
-    return update, m_in, v_in, m_out, v_out
+    if alternating:
+        # The update is completed for all leaves at once by _alternate_sides.
+        step = _AlternatingStep(W, out_step, in_step, finish)
+        return step, m_in, v_in, m_out, v_out
+    return finish(bilateral_step()), m_in, v_in, m_out, v_out
 
 
 def scale_by_pion(
@@ -279,6 +320,8 @@ def scale_by_pion(
         )
 
         new_updates, m_in, v_in, m_out, v_out = _unzip_leaf_tuple_tree(out, 5)
+        if alternating:
+            new_updates = _alternate_sides(new_updates, state.count)
 
         if canonical_mu_dtype == jnp.bfloat16:
             key, sr_in, sr_vin, sr_out, sr_vout = jax.random.split(

@@ -70,11 +70,19 @@ most focused relevant test, then the full applicable checks above. Report any ch
 - Apply parameter updates with Rollfast's `apply_updates`, explicitly passing `stochastic=False` for deterministic
   paths. Use `apply_updates_prefix` for prefix update trees. Keep `optax.apply_updates` only in independent reference or
   Optax compatibility tests; stochastic rounding requires explicit PRNG ownership.
-- Do not wrap a whole optimizer update in `jax.lax.cond`; run it and select per leaf. A branch around a key-splitting
-  update measured about 390 ms per update on H100 80GB (JAX 0.11.0) but under 1 ms on an RTX 4080, and it copies donated
-  buffers. The slowdown does not show on CPU or RTX, so check performance claims about branches on the target GPU. Small
-  branches cost the same without any key split (Kron's scale-init and balance branches); keep a branch only around
-  expensive work that is usually skipped, such as Kron's preconditioner update.
+- Keep `jax.lax.cond` out of update paths except inside loop bodies. XLA captures a conditional into a CUDA graph by
+  default, and on H100 80GB with NVIDIA driver 595.91 (JAX 0.11.0 and 0.12.0.1) each execution then costs about 390 ms
+  whether or not the branch runs. H100 on driver 580.173, B200, RTX PRO 6000, A100, RTX 4080 and CPU do not stall, so
+  check performance claims about branches on the affected setup. Compute cheap branches and select per leaf with
+  `jnp.where`. Skip expensive, usually idle work (Kron's preconditioner update, GaLore and APOLLO refreshes, Pion's
+  alternating sides) with `_run_if` from `src/rollfast/utils.py`, a zero-or-one-trip `while_loop`: XLA does not capture
+  loops, or conds inside loop bodies such as Aurora's CG early exit, into CUDA graphs by default. Each loop splits the
+  surrounding CUDA graph (about 20 us per loop on A100), so skip all leaves in one `_run_if` rather than one per leaf. A
+  skip, whether cond or `_run_if`, copies any operand that is still read afterwards; the step's commit select keeps the
+  old state live, so elementwise EMA/SWA updates are cheaper selected than skipped even at `update_every=4` (5.7 vs 7.3
+  ms on an RTX 4080). `tests/test_optimizer_performance.py` guards this structurally. To confirm a suspected stall, time
+  `benchmarks/finetuning/update_paths.py` with default flags and with the diagnostic
+  `XLA_FLAGS=--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN`; don't ship the flag as a fix.
 - XLA compile time on GPU grows with each separately expanded Threefry call (about 0.2 s per site on H100). Vmapping
   `jax.random.split` or `normal` over a batch of keys returns exactly the same values from one program; see Kron's
   `_batched_factor_seeds`. Avoid this for gradient-sized noise, where stacking doubles transient memory.

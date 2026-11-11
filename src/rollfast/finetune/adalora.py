@@ -9,6 +9,8 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 
+from rollfast.utils import _run_if
+
 from .config import SCHEMA_VERSION, AdaLoRAControllerConfig
 
 _DEFAULT_CONFIG = AdaLoRAControllerConfig()
@@ -172,15 +174,17 @@ class AdaLoRAController:
         else:
             should_allocate = jnp.logical_and(applied, periodic_allocate)
         scores = sensitivity * (uncertainty + self.config.score_eps)
-        support = jax.lax.cond(
+        # Allocate only at cadence boundaries without a lax.cond, which stalls
+        # H100 GPUs (driver 595) when XLA captures it into a CUDA graph.
+        support = _run_if(
             should_allocate,
-            lambda: allocate_rank_mask(
+            lambda _: allocate_rank_mask(
                 scores,
                 max_ranks=self.max_ranks,
                 budget=budget,
                 min_rank=self.config.min_rank,
             ),
-            lambda: state.current_support,
+            state.current_support,
         )
         current_budget = jnp.where(should_allocate, budget, state.current_budget)
         return AdaLoRAState(

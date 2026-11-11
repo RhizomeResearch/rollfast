@@ -178,29 +178,6 @@ def _base_newton_schulz_iteration(x: jax.Array, coeffs: jax.Array) -> jax.Array:
     return coeffs[0] * x + b @ x
 
 
-def _aol_ns_iterator(i, x, coeffs):
-    return jax.lax.cond(
-        i == 0,
-        lambda x_: _aol_first_newton_schulz_iteration(x_, coeffs),
-        lambda x_: _base_newton_schulz_iteration(x_, coeffs),
-        x,
-    )
-
-
-def _schatten_ns_iterator(i, x, coeffs):
-    return jax.lax.cond(
-        i == 0,
-        lambda x_: _schatten_first_newton_schulz_iteration(x_, coeffs),
-        lambda x_: _base_newton_schulz_iteration(x_, coeffs),
-        x,
-    )
-
-
-def _base_ns_iterator(i, x, coeffs):
-    del i
-    return _base_newton_schulz_iteration(x, coeffs)
-
-
 def quintic_newton_schulz(
     x: jax.Array,
     ns_coeffs: jax.Array,
@@ -223,15 +200,18 @@ def quintic_newton_schulz(
         matrix = jnp.swapaxes(matrix, -1, -2)
         transposed = True
 
-    ns_iterators = {
-        "frobenius": _base_ns_iterator,
-        "spectral": _base_ns_iterator,
-        "aol": _aol_ns_iterator,
-        "schatten": _schatten_ns_iterator,
+    # AOL and Schatten rescale inside the first iteration. Running that
+    # iteration before the loop keeps a per-iteration lax.cond out of the
+    # update, which can stall CUDA graphs on H100 GPUs (driver 595).
+    first_iterations = {
+        "frobenius": _base_newton_schulz_iteration,
+        "spectral": _base_newton_schulz_iteration,
+        "aol": _aol_first_newton_schulz_iteration,
+        "schatten": _schatten_first_newton_schulz_iteration,
     }
     if preconditioning not in _PRECONDITIONINGS:
         raise ValueError(f"Unknown preconditioning {preconditioning!r}.")
-    ns_iterator = ns_iterators[preconditioning]
+    first_iteration = first_iterations[preconditioning]
 
     if preconditioning == "frobenius":
         matrix = matrix / (
@@ -244,21 +224,26 @@ def quintic_newton_schulz(
 
     coeffs = ns_coeffs.astype(matrix.dtype)
     if coeffs.ndim == 1:
-        matrix = jax.lax.fori_loop(
-            0,
-            ns_steps,
-            lambda i, matrix_: ns_iterator(i, matrix_, coeffs),
+        # The unrolled loop already requires a concrete step count.
+        steps = int(cast(int, ns_steps))
+        if steps > 0:
+            matrix = first_iteration(matrix, coeffs)
+            matrix = jax.lax.fori_loop(
+                1,
+                steps,
+                lambda _, matrix_: _base_newton_schulz_iteration(matrix_, coeffs),
+                matrix,
+                unroll=True,
+            )
+    elif coeffs.shape[0] > 0:
+        matrix = first_iteration(matrix, coeffs[0])
+        matrix, _ = jax.lax.scan(
+            lambda matrix_, coeffs_step: (
+                _base_newton_schulz_iteration(matrix_, coeffs_step),
+                None,
+            ),
             matrix,
-            unroll=True,
-        )
-    else:
-
-        def scan_body(carry, coeffs_step):
-            i, matrix_ = carry
-            return (i + 1, ns_iterator(i, matrix_, coeffs_step)), None
-
-        (_, matrix), _ = jax.lax.scan(
-            scan_body, (jnp.asarray(0, dtype=jnp.int32), matrix), coeffs
+            coeffs[1:],
         )
 
     if transposed:

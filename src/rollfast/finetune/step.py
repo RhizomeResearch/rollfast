@@ -13,6 +13,7 @@ import optax
 
 from rollfast.optim.sam import add_perturbation, global_l2_norm, sam_perturbation
 from rollfast.utils import (
+    _run_if,
     apply_updates,
     astype_preserving_sharding,
     resolve_partition_norm_axis_name,
@@ -920,6 +921,9 @@ def make_accumulating_loss_bundle_update_step(
             ),
         )
         window_finite = jnp.logical_and(window_finite, next_accumulation.normalizer > 0)
+        # Every partition must take the same decision; a partition that skips
+        # would leave the others waiting in the optimizer's collectives.
+        window_finite = _agree_across_axes(window_finite, optimizer)
         attempt_update = jnp.logical_and(boundary, window_finite)
 
         def apply_accumulated_update(operand):
@@ -929,18 +933,20 @@ def make_accumulating_loss_bundle_update_step(
                 current_opt_state,
                 current_trainable,
             )
-            applied = _update_status(current_opt_state, next_opt_state).update_applied
             return (
                 apply_updates(current_trainable, updates, stochastic=False),
                 next_opt_state,
-                applied,
             )
 
-        trainable, opt_state, update_applied = jax.lax.cond(
+        # Skip the optimizer on mid-window microsteps without a lax.cond, which
+        # stalls H100 GPUs (driver 595) when XLA captures it into a CUDA graph.
+        previous_opt_state = opt_state
+        trainable, opt_state = _run_if(
+            attempt_update, apply_accumulated_update, (trainable, opt_state)
+        )
+        update_applied = jnp.logical_and(
             attempt_update,
-            apply_accumulated_update,
-            lambda operand: (*operand, jnp.asarray(False)),
-            (trainable, opt_state),
+            _update_status(previous_opt_state, opt_state).update_applied,
         )
         if optimizer.schedule_config.step_counter == "attempt":
             # An empty or nonfinite window never reaches the optimizer but
@@ -2043,10 +2049,10 @@ def _commit_optimizer_result(
 
     ``propose`` returns ``(candidate, candidate_finite, status)`` and always
     runs. A lax.cond here copies donated parameters and optimizer state, and
-    keeps the ~390 ms per-update cost seen on H100 GPUs. Selecting also keeps
-    replica-local flags from changing participation in collectives, and
-    retains where's dtype promotion for transforms that canonicalize state on
-    their first update.
+    when XLA captures it into a CUDA graph it costs ~390 ms per update on H100
+    GPUs (driver 595). Selecting also keeps replica-local flags from changing
+    participation in collectives, and retains where's dtype promotion for
+    transforms that canonicalize state on their first update.
     """
 
     candidate, finite, status = propose()

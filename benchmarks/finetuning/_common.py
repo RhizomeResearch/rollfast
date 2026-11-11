@@ -137,6 +137,40 @@ def large_plan() -> TinyPlan:
     return _make_plan(trainable, labels, groups)
 
 
+def matrix_plan(layers: int, width: int) -> TinyPlan:
+    """Return an MLP-shaped plan: ``layers`` square matrices with biases."""
+
+    key = jax.random.PRNGKey(0)
+    trainable = {
+        f"layer_{index:02d}": {
+            "w": jax.random.normal(jax.random.fold_in(key, index), (width, width))
+            / width**0.5,
+            "b": jnp.zeros((width,), dtype=jnp.float32),
+        }
+        for index in range(layers)
+    }
+    labels = {name: {"w": "matrix_decay", "b": "bias_no_decay"} for name in trainable}
+    groups = {
+        "matrix_decay": TinyGroup(
+            "matrix_decay",
+            role="backbone",
+            depth=0,
+            lr_multiplier=1.0,
+            weight_decay=True,
+            tags=("matrix",),
+        ),
+        "bias_no_decay": TinyGroup(
+            "bias_no_decay",
+            role="bias",
+            depth=None,
+            lr_multiplier=1.0,
+            weight_decay=False,
+            tags=("bias",),
+        ),
+    }
+    return _make_plan(trainable, labels, groups)
+
+
 def _make_plan(
     trainable: Any,
     labels: Any,
@@ -227,6 +261,7 @@ __all__ = (
     "benchmark_step",
     "emit",
     "large_plan",
+    "matrix_plan",
     "metadata",
     "ones_like_trainable",
     "rfft",

@@ -22,6 +22,7 @@ from rollfast.utils import (
     _is_aux_leaf,
     _resolve_mask,
     _resolve_scalar,
+    _run_if,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     _validate_grad_clip_max_amps,
@@ -202,41 +203,31 @@ def _norm_lower_bound(A: jax.Array) -> jax.Array:
     Optimized to O(N) memory usage (avoids O(N^2) intermediate matrices).
     """
     max_abs = jnp.max(jnp.abs(A)) + jnp.finfo(A.dtype).tiny
+    A_normed = A / max_abs
+    A_conj = A_normed.conj()
 
-    def calc(A_in):
-        A_normed = A_in / max_abs
-        A_conj = A_normed.conj()
+    # Compute squared norms without full matrix multiply
+    aa_sum0 = jnp.sum(numerics.abs_sq(A_normed), axis=0)  # Col norms
+    aa_sum1 = jnp.sum(numerics.abs_sq(A_normed), axis=1)  # Row norms
 
-        # Compute squared norms without full matrix multiply
-        aa_sum0 = jnp.sum(numerics.abs_sq(A_normed), axis=0)  # Col norms
-        aa_sum1 = jnp.sum(numerics.abs_sq(A_normed), axis=1)  # Row norms
+    i = jnp.argmax(aa_sum0)
+    j = jnp.argmax(aa_sum1)
 
-        i = jnp.argmax(aa_sum0)
-        j = jnp.argmax(aa_sum1)
+    # Start from the heaviest column or row. Both matrix-vector paths are cheap,
+    # so compute both and select; a lax.cond here can stall CUDA graphs on H100
+    # GPUs (driver 595).
+    x_col = jax.lax.dynamic_index_in_dim(A_normed, i, 1, keepdims=False)
+    x_col = x_col.conj() @ A_normed
+    x_col = x_col / (jnp.linalg.norm(x_col) + jnp.finfo(x_col.dtype).tiny)
+    col_bound = max_abs * jnp.linalg.norm(x_col @ A_conj.T)
 
-        value0 = aa_sum0[i]
-        value1 = aa_sum1[j]
+    x_row = jax.lax.dynamic_index_in_dim(A_normed, j, 0, keepdims=False)
+    x_row = A_normed @ x_row.conj()
+    x_row = x_row / (jnp.linalg.norm(x_row) + jnp.finfo(x_row.dtype).tiny)
+    row_bound = max_abs * jnp.linalg.norm(A_conj.T @ x_row)
 
-        # Branch based on whether heaviest row or column dominates
-        def gt_branch(_):
-            x = jax.lax.dynamic_index_in_dim(A_normed, i, 1, keepdims=False)
-            x = x.conj() @ A_normed
-            norm_x = jnp.linalg.norm(x) + jnp.finfo(x.dtype).tiny
-            x_normalized = x / norm_x
-            final_vec = x_normalized @ A_conj.T
-            return max_abs * jnp.linalg.norm(final_vec)
-
-        def le_branch(_):
-            x = jax.lax.dynamic_index_in_dim(A_normed, j, 0, keepdims=False)
-            x = A_normed @ x.conj()
-            norm_x = jnp.linalg.norm(x) + jnp.finfo(x.dtype).tiny
-            x_normalized = x / norm_x
-            final_vec = A_conj.T @ x_normalized
-            return max_abs * jnp.linalg.norm(final_vec)
-
-        return jax.lax.cond(value0 > value1, gt_branch, le_branch, operand=None)
-
-    return jax.lax.cond(max_abs > jnp.finfo(A.dtype).tiny, calc, lambda _: max_abs, A)
+    bound = jnp.where(aa_sum0[i] > aa_sum1[j], col_bound, row_bound)
+    return jnp.where(max_abs > jnp.finfo(A.dtype).tiny, bound, max_abs)
 
 
 def _norm_lower_bound_spd(
@@ -1250,8 +1241,9 @@ def scale_by_kron(
                 for q, g, s in zip(Qs_in, updates_flat, scanned_layers_flat)
             ]
 
-        # Select instead of branching: a lax.cond here costs ~390 ms per update on
-        # H100 GPUs, far more than one reduction over the gradients.
+        # Select instead of branching: a lax.cond captured into a CUDA graph costs
+        # ~390 ms per update on H100 GPUs (driver 595), far more than one
+        # reduction over the gradients.
         Qs_flat = _tree_where_scalar(
             state.needs_scale_init, apply_init_scale(Qs_flat), Qs_flat
         )
@@ -1447,16 +1439,13 @@ def scale_by_kron(
         # Only update if we were going to update AND we shouldn't skip
         do_update = jnp.logical_and(do_update, jnp.logical_not(should_skip))
 
-        Qs_next, Ls_next = jax.lax.cond(
+        Qs_next, Ls_next = _run_if(
             do_update,
-            update_preconditioner,
-            lambda k, q, l: (q, l),
-            key_upd,
-            Qs_flat,
-            Ls_flat,
+            lambda factors: update_preconditioner(key_upd, *factors),
+            (Qs_flat, Ls_flat),
         )
 
-        # The conditional already returns Qs_flat when no update is performed.
+        # The skipped update already returns Qs_flat.
         Qs_for_grad = Qs_next if update_preconditioner_first else Qs_flat
 
         with jax.default_matmul_precision(precond_grads_precision):

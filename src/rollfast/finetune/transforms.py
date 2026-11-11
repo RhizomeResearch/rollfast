@@ -60,10 +60,10 @@ def always_skip_nonfinite(
             if leaf is not None:
                 finite = jnp.logical_and(finite, jnp.all(jnp.isfinite(leaf)))
 
-        # Select per leaf instead of branching. A lax.cond around the inner
-        # transform costs ~390 ms per update on H100 GPUs when the inner
-        # transform splits a PRNG key, and it copies donated state buffers.
-        # Zeros keep nonfinite values out of the inner transform's numerics.
+        # Select per leaf instead of branching. A lax.cond that XLA captures
+        # into a CUDA graph costs ~390 ms per update on H100 GPUs (driver
+        # 595), and it copies donated state buffers. Zeros keep nonfinite values out of the
+        # inner transform's numerics.
         new_updates, new_inner_state = inner.update(
             _zero_unless(finite, updates),
             state.inner_state,

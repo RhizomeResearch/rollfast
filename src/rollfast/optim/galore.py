@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, NamedTuple, cast
 
 import jax
@@ -11,7 +11,12 @@ import jax.numpy as jnp
 import optax
 from optax._src import utils
 
-from rollfast.utils import _reject_complex_tree, _resolve_mask, _safe_bias_correction
+from rollfast.utils import (
+    _reject_complex_tree,
+    _resolve_mask,
+    _run_if,
+    _safe_bias_correction,
+)
 
 Projection = Literal["auto", "left", "right", "two_sided"]
 StateOnRefresh = Literal["reuse_coordinates", "reset", "transport"]
@@ -163,6 +168,13 @@ def galore_adamw(
             else learning_rate
         )
 
+        leaves = _refresh_projected_leaves(
+            updates,
+            state.leaves,
+            should_refresh=should_refresh,
+            transport=state_on_basis_refresh == "transport",
+            basis_dtype=basis_dtype,
+        )
         results = jax.tree.map(
             lambda grad, leaf_state, param: _update_leaf(
                 grad,
@@ -178,11 +190,10 @@ def galore_adamw(
                 scale=scale,
                 weight_decay=wd_step,
                 learning_rate=lr,
-                basis_dtype=basis_dtype,
                 mu_dtype=mu_dtype,
             ),
             updates,
-            state.leaves,
+            leaves,
             params,
             is_leaf=_is_state_or_passthrough,
         )
@@ -291,9 +302,9 @@ def _update_leaf(
     scale: float,
     weight_decay,
     learning_rate,
-    basis_dtype,
     mu_dtype,
 ) -> _LeafUpdateResult:
+    """Update one leaf whose basis and moments ``_refresh_projected_leaves`` refreshed."""
     if _is_passthrough(grad) or _is_passthrough(state):
         return _LeafUpdateResult(grad, state)
     projected = isinstance(state, GaLoreLeafState) and state.projected
@@ -303,23 +314,10 @@ def _update_leaf(
     moment_grad = grad.astype(jnp.float32)
     mu_prev, nu_prev = state.mu, state.nu
     if projected:
-        basis_left, basis_right = _refresh_basis(
-            grad,
-            state,
-            should_refresh=should_refresh,
-            basis_dtype=basis_dtype,
-        )
         moment_grad = _project(moment_grad, basis_left, basis_right, state.orientation)
         if state_on_basis_refresh == "reset":
             mu_prev = jnp.where(should_refresh, jnp.zeros_like(state.mu), state.mu)
             nu_prev = jnp.where(should_refresh, jnp.zeros_like(state.nu), state.nu)
-        elif state_on_basis_refresh == "transport":
-            mu_prev, nu_prev = _transport_projected_moments(
-                state,
-                basis_left,
-                basis_right,
-                should_refresh=should_refresh,
-            )
     mu = (b1 * mu_prev + (1.0 - b1) * moment_grad).astype(mu_dtype)
     nu = (b2 * nu_prev + (1.0 - b2) * jnp.square(moment_grad)).astype(mu_dtype)
     mu_hat = _safe_bias_correction(mu.astype(jnp.float32), 1.0 - b1**count_inc)
@@ -346,67 +344,103 @@ def _update_leaf(
     )
 
 
-def _refresh_basis(
-    grad: jax.Array,
-    state: GaLoreLeafState,
+def _refresh_projected_leaves(
+    grads: Any,
+    leaves: Any,
     *,
     should_refresh,
+    transport: bool,
     basis_dtype,
-) -> tuple[jax.Array, jax.Array]:
-    def refresh():
-        basis_left, basis_right = _basis_from_grad(
-            grad, state.orientation, state.mu.shape
-        )
-        return (
-            state.basis_left
-            if state.orientation == "right"
-            else basis_left.astype(basis_dtype),
-            state.basis_right
-            if state.orientation == "left"
-            else basis_right.astype(basis_dtype),
-        )
+) -> Any:
+    """Refresh every projected basis on refresh steps, transporting moments."""
 
-    return jax.lax.cond(
-        should_refresh, refresh, lambda: (state.basis_left, state.basis_right)
+    flat, treedef = jax.tree.flatten(leaves, is_leaf=_is_state_or_passthrough)
+    flat_grads = treedef.flatten_up_to(grads)
+    projected = [
+        index
+        for index, leaf in enumerate(flat)
+        if isinstance(leaf, GaLoreLeafState) and leaf.projected
+    ]
+    if not projected:
+        return leaves
+
+    def current(state):
+        moments = (state.mu, state.nu) if transport else ()
+        return (state.basis_left, state.basis_right, *moments)
+
+    def refresh(_):
+        refreshed = []
+        for index in projected:
+            state = flat[index]
+            bases = _fresh_basis(flat_grads[index], state, basis_dtype)
+            moments = _transported_moments(state, *bases) if transport else ()
+            refreshed.append((*bases, *moments))
+        return refreshed
+
+    # The SVDs run once per refresh interval. Skip them all in one _run_if:
+    # a lax.cond stalls H100 GPUs (driver 595) when XLA captures it into a
+    # CUDA graph, and each _run_if is a while loop that splits the update's
+    # CUDA graph.
+    refreshed = _run_if(
+        should_refresh, refresh, [current(flat[index]) for index in projected]
+    )
+    for index, (basis_left, basis_right, *moments) in zip(
+        projected, refreshed, strict=True
+    ):
+        state = replace(flat[index], basis_left=basis_left, basis_right=basis_right)
+        if transport:
+            state = replace(state, mu=moments[0], nu=moments[1])
+        flat[index] = state
+    return jax.tree.unflatten(treedef, flat)
+
+
+def _fresh_basis(
+    grad: jax.Array, state: GaLoreLeafState, basis_dtype
+) -> tuple[jax.Array, jax.Array]:
+    basis_left, basis_right = _basis_from_grad(grad, state.orientation, state.mu.shape)
+    return (
+        state.basis_left
+        if state.orientation == "right"
+        else basis_left.astype(basis_dtype),
+        state.basis_right
+        if state.orientation == "left"
+        else basis_right.astype(basis_dtype),
     )
 
 
-def _transport_projected_moments(
+def _transported_moments(
     state: GaLoreLeafState,
     basis_left: jax.Array,
     basis_right: jax.Array,
-    *,
-    should_refresh,
 ) -> tuple[jax.Array, jax.Array]:
-    def transport():
-        if state.orientation == "left":
-            overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
-                jnp.float32
-            )
-            mu = overlap @ state.mu.astype(jnp.float32)
-            nu = jnp.square(overlap) @ state.nu.astype(jnp.float32)
-        elif state.orientation == "right":
-            overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
-                jnp.float32
-            )
-            mu = state.mu.astype(jnp.float32) @ overlap
-            nu = state.nu.astype(jnp.float32) @ jnp.square(overlap)
-        else:
-            left_overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
-                jnp.float32
-            )
-            right_overlap = state.basis_right.T.astype(
-                jnp.float32
-            ) @ basis_right.astype(jnp.float32)
-            mu = left_overlap @ state.mu.astype(jnp.float32) @ right_overlap
-            nu = (
-                jnp.square(left_overlap)
-                @ state.nu.astype(jnp.float32)
-                @ jnp.square(right_overlap)
-            )
-        return mu.astype(state.mu.dtype), nu.astype(state.nu.dtype)
+    """Express ``state``'s moments in the new bases."""
 
-    return jax.lax.cond(should_refresh, transport, lambda: (state.mu, state.nu))
+    if state.orientation == "left":
+        overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
+            jnp.float32
+        )
+        mu = overlap @ state.mu.astype(jnp.float32)
+        nu = jnp.square(overlap) @ state.nu.astype(jnp.float32)
+    elif state.orientation == "right":
+        overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
+            jnp.float32
+        )
+        mu = state.mu.astype(jnp.float32) @ overlap
+        nu = state.nu.astype(jnp.float32) @ jnp.square(overlap)
+    else:
+        left_overlap = basis_left.T.astype(jnp.float32) @ state.basis_left.astype(
+            jnp.float32
+        )
+        right_overlap = state.basis_right.T.astype(jnp.float32) @ basis_right.astype(
+            jnp.float32
+        )
+        mu = left_overlap @ state.mu.astype(jnp.float32) @ right_overlap
+        nu = (
+            jnp.square(left_overlap)
+            @ state.nu.astype(jnp.float32)
+            @ jnp.square(right_overlap)
+        )
+    return mu.astype(state.mu.dtype), nu.astype(state.nu.dtype)
 
 
 def _basis_from_grad(

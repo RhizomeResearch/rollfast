@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, NamedTuple, cast
 
 import jax
@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import optax
 from optax._src import utils
 
-from rollfast.utils import _reject_complex_tree, _resolve_mask
+from rollfast.utils import _reject_complex_tree, _resolve_mask, _run_if
 
 Scaling = Literal["channel", "tensor"]
 Orientation = Literal["left", "right", "full"]
@@ -159,6 +159,12 @@ def apollo_adamw(
             else learning_rate
         )
 
+        leaves = _refresh_projections(
+            state.leaves,
+            count=state.count,
+            projection_seed=projection_seed,
+            projection_refresh_interval=projection_refresh_interval,
+        )
         results = jax.tree.map(
             lambda grad, leaf_state, param: _update_leaf(
                 grad,
@@ -166,9 +172,6 @@ def apollo_adamw(
                 param,
                 count=state.count,
                 count_inc=count_inc,
-                rank=resolved_rank,
-                projection_seed=projection_seed,
-                projection_refresh_interval=projection_refresh_interval,
                 scaling=resolved_scaling,
                 scale=scale,
                 scale_front=scale_front,
@@ -183,7 +186,7 @@ def apollo_adamw(
                 mu_dtype=mu_dtype,
             ),
             updates,
-            state.leaves,
+            leaves,
             params,
             is_leaf=_is_state_or_passthrough,
         )
@@ -287,9 +290,6 @@ def _update_leaf(
     *,
     count,
     count_inc,
-    rank: int,
-    projection_seed: int,
-    projection_refresh_interval: int | None,
     scaling: Scaling,
     scale: float,
     scale_front: bool,
@@ -311,13 +311,6 @@ def _update_leaf(
     # the small gradient components the moments accumulate.
     moment_grad = grad.astype(jnp.float32)
     if projected:
-        projection = _refresh_projection(
-            state,
-            count=count,
-            rank=rank,
-            projection_seed=projection_seed,
-            projection_refresh_interval=projection_refresh_interval,
-        )
         moment_grad = _project(moment_grad, projection, state.orientation)
     mu = (b1 * state.mu + (1.0 - b1) * moment_grad).astype(mu_dtype)
     nu = (b2 * state.nu + (1.0 - b2) * jnp.square(moment_grad)).astype(mu_dtype)
@@ -367,30 +360,48 @@ def _reference_step_size(learning_rate, count_inc, b1, b2):
     return learning_rate * jnp.sqrt(bias_correction2) / bias_correction1
 
 
-def _refresh_projection(
-    state: APOLLOLeafState,
+def _refresh_projections(
+    leaves: Any,
     *,
     count,
-    rank: int,
     projection_seed: int,
     projection_refresh_interval: int | None,
-) -> jax.Array:
+) -> Any:
+    """Redraw every projected leaf's projection on refresh steps."""
+
     if projection_refresh_interval is None:
-        return state.projection
-    projected_dim = state.projection.shape[1]
-    resolved_rank = min(rank, projected_dim)
-    should_refresh = (count % projection_refresh_interval) == 0
-    return jax.lax.cond(
-        should_refresh,
-        lambda: _make_projection(
-            projection_seed=projection_seed,
-            leaf_index=state.leaf_index,
-            step=count,
-            shape=(resolved_rank, projected_dim),
-            dtype=state.projection.dtype,
-        ),
-        lambda: state.projection,
+        return leaves
+    flat, treedef = jax.tree.flatten(leaves, is_leaf=_is_state_or_passthrough)
+    projected = [
+        index
+        for index, leaf in enumerate(flat)
+        if isinstance(leaf, APOLLOLeafState) and leaf.projected
+    ]
+    if not projected:
+        return leaves
+
+    def redraw(_):
+        return [
+            _make_projection(
+                projection_seed=projection_seed,
+                leaf_index=flat[index].leaf_index,
+                step=count,
+                shape=flat[index].projection.shape,
+                dtype=flat[index].projection.dtype,
+            )
+            for index in projected
+        ]
+
+    # One skip for all leaves: each _run_if is a while loop that splits the
+    # update's CUDA graph, which costs ~20 us per loop on A100 GPUs.
+    projections = _run_if(
+        (count % projection_refresh_interval) == 0,
+        redraw,
+        [flat[index].projection for index in projected],
     )
+    for index, projection in zip(projected, projections, strict=True):
+        flat[index] = replace(flat[index], projection=projection)
+    return jax.tree.unflatten(treedef, flat)
 
 
 def _make_projection(

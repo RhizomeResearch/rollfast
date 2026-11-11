@@ -207,6 +207,31 @@ def _apply_weight_decay_tree(
     )
 
 
+def _run_if(pred: jax.Array, fn: Callable[[Any], Any], operand: Any) -> Any:
+    """Return ``fn(operand)`` when ``pred`` holds and ``operand`` otherwise.
+
+    Use it to skip expensive, usually-idle work such as a preconditioner
+    refresh. A ``lax.cond`` that XLA captures into a CUDA graph costs about
+    390 ms per execution on H100 GPUs with NVIDIA driver 595.91 (JAX 0.11 and
+    0.12), even when its branch is not taken; driver 580.173 and A100, B200 and
+    RTX GPUs do not stall. XLA does not capture while loops into CUDA graphs
+    by default, so this zero-or-one-trip loop skips the work without that
+    stall. Each loop still splits the surrounding CUDA graph, so skip related
+    work in one call rather than one per leaf. ``fn`` must return a tree with
+    ``operand``'s structure and dtypes. For cheap work, compute it and select
+    with ``jnp.where`` instead.
+    """
+
+    def run(carry):
+        _, value = carry
+        return jnp.zeros([], dtype=jnp.bool_), fn(value)
+
+    _, result = jax.lax.while_loop(
+        lambda carry: carry[0], run, (jnp.asarray(pred, dtype=jnp.bool_), operand)
+    )
+    return result
+
+
 def add_tiny(x):
     """Add smallest normal number to avoid division by zero."""
     return x + jnp.finfo(x.dtype).tiny
