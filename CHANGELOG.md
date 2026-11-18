@@ -5,6 +5,12 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+## [1.7.0] - 2026-11-18
+
+`ScheduleConfig` can hold any schedule for a fixed number of updates, such as once per epoch, and adds PyTorch's
+`CosineAnnealingLR` as `kind="cosine_annealing"`. Every fine-tuning builder accepts a `GradientPolicy`. Detailed release
+notes are available in [`docs/releases/1.7.0.md`](./docs/releases/1.7.0.md).
+
 ### Added
 
 - `ScheduleConfig(steps_per_interval=k)` holds the learning rate of every schedule kind for `k` updates, so a schedule
@@ -32,7 +38,8 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 ## [1.6.0] - 2026-11-11
 
 Optimizer and fine-tuning updates no longer stall on H100 GPUs with NVIDIA driver 595, and `ScheduleConfig` can index
-the learning-rate schedule by update attempts.
+the learning-rate schedule by update attempts. Detailed release notes are available in
+[`docs/releases/1.6.0.md`](./docs/releases/1.6.0.md).
 
 ### Added
 
@@ -59,7 +66,8 @@ the learning-rate schedule by update attempts.
 ## [1.5.0] - 2026-11-09
 
 Non-finite rejection no longer branches around the optimizer, which removes about 390 ms per update on H100 GPUs. Kron
-and Riemannian Aurora update and compile faster, and `ScheduleConfig` can select WSD warmup and decay shapes.
+and Riemannian Aurora update and compile faster, and `ScheduleConfig` can select WSD warmup and decay shapes. Detailed
+release notes are available in [`docs/releases/1.5.0.md`](./docs/releases/1.5.0.md).
 
 ### Added
 
@@ -267,6 +275,12 @@ The first stable API release. Detailed release notes are available in
 - Pickle checkpoint loading is fail-closed unless callers explicitly pass `trusted=True`; non-executable backend-native
   formats remain recommended across trust boundaries.
 
-[1.0.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/releases/v1.0.0
-[1.1.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/releases/v1.1.0
-[1.2.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/releases/v1.2.0
+[1.0.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.0.0
+[1.1.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.1.0
+[1.2.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.2.0
+[1.2.1]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.2.1
+[1.3.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.3.0
+[1.4.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/commit/56a1d2bb4e2246771b67434be8e42d09ad886e62
+[1.5.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.5.0
+[1.6.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.6.0
+[1.7.0]: https://gitlab.com/rhizome-labs/public/rollfast/-/tags/v1.7.0
