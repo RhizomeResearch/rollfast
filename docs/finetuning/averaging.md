@@ -14,6 +14,9 @@ optim = rfft.adamw_from_plan(
 )
 ```
 
+`start_fraction` is a fraction of the run's updates, `ScheduleConfig.total_updates`; it equals `total_steps` unless the
+schedule holds each value for `steps_per_interval` updates. `start_step` and `frequency` also count updates.
+
 Use named views when validating or checkpointing:
 
 ```python

@@ -18,6 +18,7 @@ from rollfast.optim.adam8 import (
 from rollfast.optim.adam8 import (
     DYNAMIC_UNSIGNED_CODEBOOK_ID as ADAM8_SECOND_MOMENT_CODEBOOK_ID,
 )
+from rollfast.schedules.cosine_annealing import AfterEnd
 from rollfast.schedules.wsd import ScheduleShape, _validate_shape
 from rollfast.utils import AxisName, resolve_partition_norm_axis_name
 
@@ -29,10 +30,10 @@ SCHEMA_VERSION = 1
 ScheduleKind = Literal[
     "constant",
     "warmup_cosine",
+    "cosine_annealing",
     "wsd",
     "linear",
     "polynomial",
-    "custom",
 ]
 StepCounter = Literal["optimizer", "attempt", "micro"]
 NonFinitePolicy = Literal["skip", "none", "raise"]
@@ -79,6 +80,21 @@ class ScheduleConfig:
     explicitly skipped attempt still consumes its schedule slot, while the
     optimizer's moments and bias-correction count follow applied updates only.
     With accumulation, one attempt is one optimizer window.
+
+    ``steps_per_interval`` holds the learning rate for that many counts of the
+    clock, so every kind can be stepped once per epoch as PyTorch schedulers
+    usually are: the schedule is indexed by ``count // steps_per_interval``, and
+    ``total_steps``, ``warmup_steps``, ``decay_steps`` and ``t_max`` count
+    intervals. ``total_updates`` is the run's length in clock counts.
+
+    ``kind="cosine_annealing"`` is PyTorch's ``CosineAnnealingLR`` after the
+    warmup (see :func:`rollfast.schedules.cosine_annealing_schedule`). It reaches
+    the floor at interval ``warmup + t_max``, where ``t_max`` defaults to
+    ``total_steps - warmup``, so the last interval of the run is still above
+    it. ``after_end`` selects what follows the floor. ``t_max`` and
+    ``after_end="cycle"`` apply only to this kind. PyTorch's parity needs
+    ``warmup_fraction=0.0`` and ``end_lr_ratio=0.0``, as the defaults are
+    shared by every kind.
     """
 
     kind: ScheduleKind = "warmup_cosine"
@@ -95,11 +111,15 @@ class ScheduleConfig:
     warmup_power: float = 1.0
     decay_power: float = 1.0
     exponential_rate: float = 5.0
+    steps_per_interval: int = 1
+    t_max: int | None = None
+    after_end: AfterEnd = "clamp"
 
     def __post_init__(self) -> None:
         supported_kinds = (
             "constant",
             "warmup_cosine",
+            "cosine_annealing",
             "wsd",
             "linear",
             "polynomial",
@@ -135,9 +155,36 @@ class ScheduleConfig:
             raise ValueError("decay_power must be positive.")
         if self.exponential_rate == 0.0:
             raise ValueError("exponential_rate must be nonzero.")
+        if (
+            not isinstance(self.steps_per_interval, int)
+            or isinstance(self.steps_per_interval, bool)
+            or self.steps_per_interval < 1
+        ):
+            raise ValueError("steps_per_interval must be a positive integer.")
+        if self.after_end not in ("clamp", "cycle"):
+            raise ValueError(
+                f"after_end must be 'clamp' or 'cycle'; got {self.after_end!r}."
+            )
+        if self.kind != "cosine_annealing":
+            if self.t_max is not None:
+                raise ValueError("t_max applies only to kind='cosine_annealing'.")
+            if self.after_end != "clamp":
+                raise ValueError(
+                    "after_end='cycle' applies only to kind='cosine_annealing'."
+                )
+        if self.t_max is not None and self.t_max <= 0:
+            raise ValueError("t_max must be positive when provided.")
+
+    @property
+    def total_updates(self) -> int | None:
+        """Run length in schedule-clock counts: ``total_steps`` intervals."""
+
+        if self.total_steps is None:
+            return None
+        return self.total_steps * self.steps_per_interval
 
     def resolved(self, total_steps: int | None = None) -> ScheduleConfig:
-        """Return a copy with ``total_steps`` filled in if supplied."""
+        """Return a copy with ``total_steps`` (in intervals) filled in if supplied."""
 
         resolved_total = self.total_steps if total_steps is None else total_steps
         return replace(self, total_steps=resolved_total)
@@ -186,6 +233,9 @@ class ScheduleConfig:
             "warmup_power": self.warmup_power,
             "decay_power": self.decay_power,
             "exponential_rate": self.exponential_rate,
+            "steps_per_interval": self.steps_per_interval,
+            "t_max": self.t_max,
+            "after_end": self.after_end,
         }
 
     @classmethod
@@ -205,6 +255,9 @@ class ScheduleConfig:
             warmup_power=data.get("warmup_power", 1.0),
             decay_power=data.get("decay_power", 1.0),
             exponential_rate=data.get("exponential_rate", 5.0),
+            steps_per_interval=data.get("steps_per_interval", 1),
+            t_max=data.get("t_max"),
+            after_end=data.get("after_end", "clamp"),
         )
 
 
@@ -216,6 +269,9 @@ _SCHEDULE_FIELDS_ADDED_AFTER_1_4 = {
     "warmup_power": 1.0,
     "decay_power": 1.0,
     "exponential_rate": 5.0,
+    "steps_per_interval": 1,
+    "t_max": None,
+    "after_end": "clamp",
 }
 
 
@@ -1506,7 +1562,11 @@ class PrecisionReport:
 
 @dataclass(frozen=True)
 class OptimizerReport:
-    """Static report for a compiled plan-aware optimizer."""
+    """Static report for a compiled plan-aware optimizer.
+
+    ``total_steps`` is the schedule's ``total_updates``: the run length in
+    schedule-clock counts, not in intervals.
+    """
 
     fingerprint: str
     groups: tuple[CompiledGroup, ...]

@@ -276,6 +276,90 @@ def test_finetune_builders_share_fail_closed_nonfinite_dispatch(build_bundle):
     _assert_trees_equal(next_state.inner_state, state.inner_state)
 
 
+_BUILDER_FAMILIES = (
+    "adamw",
+    "adamw8",
+    "galore_adamw",
+    "apollo_adamw",
+    "schedule_free_adam",
+    "hybrid_aurora_adam",
+    "hybrid_prism_adam",
+    "hybrid_kron_adam",
+    "muon_adam",
+)
+
+
+def _build_family(family, plan, **kwargs):
+    if family == "galore_adamw":
+        kwargs["galore"] = rfft.GaLoreConfig(rank=1, min_matrix_size=0)
+    if family == "apollo_adamw":
+        kwargs["apollo"] = rfft.APOLLOConfig(rank=1)
+    return getattr(rfft, f"{family}_from_plan")(
+        plan, total_steps=8, schedule="constant", **kwargs
+    )
+
+
+@pytest.mark.parametrize("family", _BUILDER_FAMILIES)
+def test_builders_take_a_gradient_policy(family):
+    plan = tiny_plan()
+    policy = rfft.GradientPolicy(clip_global_norm=0.5, nonfinite="none")
+
+    bundle = _build_family(family, plan, gradient_policy=policy)
+    default = _build_family(family, plan)
+
+    assert bundle.gradient_policy == policy
+    assert not isinstance(bundle.init(plan.trainable), AlwaysSkipNonFiniteState)
+    assert default.gradient_policy == rfft.GradientPolicy()
+    assert isinstance(default.init(plan.trainable), AlwaysSkipNonFiniteState)
+
+
+@pytest.mark.parametrize("family", _BUILDER_FAMILIES)
+def test_builder_shorthands_must_match_an_explicit_gradient_policy(family):
+    plan = tiny_plan()
+    policy = rfft.GradientPolicy(clip_global_norm=0.5)
+
+    matching = _build_family(family, plan, gradient_policy=policy, clip_global_norm=0.5)
+    assert matching.gradient_policy == policy
+    with pytest.raises(ValueError, match="clip_global_norm conflicts"):
+        _build_family(family, plan, gradient_policy=policy, clip_global_norm=None)
+    with pytest.raises(ValueError, match="axis_name conflicts"):
+        _build_family(family, plan, gradient_policy=policy, axis_name="data")
+
+
+def test_adamw_from_plan_steps_cosine_annealing_once_per_epoch():
+    plan = _one_leaf_plan()
+    # b1 = b2 = 0 make each AdamW update -lr * g / (|g| + eps) = -lr / (1 + eps).
+    bundle = rfft.adamw_from_plan(
+        plan,
+        base_lr=1e-3,
+        weight_decay=0.0,
+        b1=0.0,
+        b2=0.0,
+        eps=1e-8,
+        clip_global_norm=None,
+        schedule=rfft.ScheduleConfig(
+            kind="cosine_annealing",
+            total_steps=4,
+            steps_per_interval=3,
+            warmup_fraction=0.0,
+            end_lr_ratio=0.0,
+        ),
+    )
+    grads = jax.tree.map(jnp.ones_like, plan.trainable)
+    state = bundle.init(plan.trainable)
+    update = jax.jit(bundle.update)
+    rates = []
+    for _ in range(12):
+        updates, state = update(grads, state, plan.trainable)
+        rates.append(-float(updates["w"][0]))
+
+    # torch 2.11.0 CosineAnnealingLR(T_max=4) stepped after each epoch of three.
+    measured = [1.0e-3, 8.535534e-4, 5.0e-4, 1.464466e-4]
+    assert rates == pytest.approx(
+        [rate for rate in measured for _ in range(3)], rel=1e-6
+    )
+
+
 def test_adamw_from_plan_applies_wsd_decay_shape_from_schedule_config():
     plan = _one_leaf_plan()
     grads = jax.tree.map(jnp.ones_like, plan.trainable)

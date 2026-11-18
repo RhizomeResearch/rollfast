@@ -153,6 +153,34 @@ def _resolve_builder_precision(
     return precision
 
 
+# The builders' ``clip_global_norm`` default. A shorthand left at it defers to an
+# explicit ``gradient_policy``.
+_BUILDER_CLIP_GLOBAL_NORM = 1.0
+
+
+def _resolve_builder_gradient_policy(
+    gradient_policy: GradientPolicy | None,
+    *,
+    clip_global_norm: float | None,
+    axis_name: str | tuple[str, ...] | None,
+) -> GradientPolicy:
+    if gradient_policy is None:
+        return GradientPolicy(clip_global_norm=clip_global_norm, axis_name=axis_name)
+    if (
+        clip_global_norm != _BUILDER_CLIP_GLOBAL_NORM
+        and clip_global_norm != gradient_policy.clip_global_norm
+    ):
+        raise ValueError(
+            "clip_global_norm conflicts with gradient_policy.clip_global_norm; "
+            "pass only one."
+        )
+    if axis_name is not None and axis_name != gradient_policy.axis_name:
+        raise ValueError(
+            "axis_name conflicts with gradient_policy.axis_name; pass only one."
+        )
+    return gradient_policy
+
+
 def _validate_builder_precision(
     trainable: Any,
     precision: PrecisionConfig,
@@ -258,7 +286,7 @@ def compile_optimizer(
         tx,
         ema=ema,
         swa=swa,
-        total_steps=schedule.total_steps,
+        total_steps=schedule.total_updates,
         labels=normalized.labels,
         groups=compiled_groups,
     )
@@ -430,6 +458,7 @@ def adamw_from_plan(
     b2: float = 0.999,
     eps: float = 1e-6,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     lora_b_lr_ratio: float | None = None,
@@ -448,6 +477,13 @@ def adamw_from_plan(
     ``precision`` sets master parameters, loss scaling, and parameter rounding.
     ``moment_dtype`` is shorthand for ``precision.moment_dtype``; the default
     stores float32 moments.
+    ``gradient_policy`` sets clipping, the nonfinite policy, and collective
+    axes; without it the builder clips at ``clip_global_norm`` and skips
+    nonfinite updates. ``clip_global_norm`` and ``axis_name`` are shorthands for
+    its fields: left at their defaults they defer to ``gradient_policy``, and
+    otherwise they must match it.
+    ``total_steps`` counts schedule intervals of
+    ``ScheduleConfig.steps_per_interval`` updates.
     """
 
     optimizer = OptimizerConfig(
@@ -465,10 +501,8 @@ def adamw_from_plan(
         plan,
         optimizer=optimizer,
         schedule=schedule_config,
-        gradient_policy=GradientPolicy(
-            clip_global_norm=clip_global_norm,
-            nonfinite="skip",
-            axis_name=axis_name,
+        gradient_policy=_resolve_builder_gradient_policy(
+            gradient_policy, clip_global_norm=clip_global_norm, axis_name=axis_name
         ),
         accumulation=AccumulationConfig(steps=accumulation_steps),
         precision=_resolve_builder_precision(precision, moment_dtype=moment_dtype),
@@ -492,6 +526,7 @@ def galore_adamw_from_plan(
     b2: float = 0.999,
     eps: float = 1e-6,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -504,8 +539,8 @@ def galore_adamw_from_plan(
 ) -> OptimizerBundle:
     """Build grouped GaLore AdamW from a fine-tuning plan.
 
-    ``b1``, ``b2``, ``eps``, ``precision``, and ``moment_dtype`` behave as in
-    ``adamw_from_plan``. Projected moments narrower than float32 are stored
+    ``b1``, ``b2``, ``eps``, ``precision``, ``moment_dtype``, and
+    ``gradient_policy`` behave as in ``adamw_from_plan``. Projected moments narrower than float32 are stored
     with round-to-nearest.
     """
 
@@ -520,10 +555,8 @@ def galore_adamw_from_plan(
         **kwargs,
     )
     schedule_config = _schedule_config(schedule, total_steps)
-    gradient_policy = GradientPolicy(
-        clip_global_norm=clip_global_norm,
-        nonfinite="skip",
-        axis_name=axis_name,
+    gradient_policy = _resolve_builder_gradient_policy(
+        gradient_policy, clip_global_norm=clip_global_norm, axis_name=axis_name
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
     precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
@@ -567,7 +600,7 @@ def galore_adamw_from_plan(
         tx,
         ema=ema,
         swa=swa,
-        total_steps=schedule_config.total_steps,
+        total_steps=schedule_config.total_updates,
         labels=normalized.labels,
         groups=compiled_groups,
     )
@@ -637,6 +670,7 @@ def apollo_adamw_from_plan(
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float | None = None,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -649,8 +683,8 @@ def apollo_adamw_from_plan(
 ) -> OptimizerBundle:
     """Build grouped APOLLO AdamW from a fine-tuning plan.
 
-    ``precision`` and ``moment_dtype`` behave as in ``adamw_from_plan``.
-    Moments narrower than float32 are stored with round-to-nearest.
+    ``precision``, ``moment_dtype``, and ``gradient_policy`` behave as in
+    ``adamw_from_plan``. Moments narrower than float32 are stored with round-to-nearest.
     """
 
     group_rules = tuple(group_rules)
@@ -666,10 +700,8 @@ def apollo_adamw_from_plan(
         **kwargs,
     )
     schedule_config = _schedule_config(schedule, total_steps)
-    gradient_policy = GradientPolicy(
-        clip_global_norm=clip_global_norm,
-        nonfinite="skip",
-        axis_name=axis_name,
+    gradient_policy = _resolve_builder_gradient_policy(
+        gradient_policy, clip_global_norm=clip_global_norm, axis_name=axis_name
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
     precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
@@ -704,7 +736,7 @@ def apollo_adamw_from_plan(
         tx,
         ema=ema,
         swa=swa,
-        total_steps=schedule_config.total_steps,
+        total_steps=schedule_config.total_updates,
         labels=normalized.labels,
         groups=compiled_groups,
     )
@@ -767,6 +799,7 @@ def schedule_free_adam_from_plan(
     schedule: ScheduleKind | ScheduleConfig = "wsd",
     weight_decay: float = 0.0,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     state_dtype: Any | None = None,
@@ -798,8 +831,8 @@ def schedule_free_adam_from_plan(
 ) -> OptimizerBundle:
     """Build grouped Schedule-Free Adam from a fine-tuning plan.
 
-    ``precision`` and ``moment_dtype`` behave as in ``adamw_from_plan``;
-    ``state_dtype`` separately sets the Schedule-Free averaging state.
+    ``precision``, ``moment_dtype``, and ``gradient_policy`` behave as in
+    ``adamw_from_plan``; ``state_dtype`` separately sets the Schedule-Free averaging state.
     """
 
     group_rules = tuple(group_rules)
@@ -822,10 +855,8 @@ def schedule_free_adam_from_plan(
     )
     schedule_config = _schedule_config(schedule, total_steps)
 
-    gradient_policy = GradientPolicy(
-        clip_global_norm=clip_global_norm,
-        nonfinite="skip",
-        axis_name=axis_name,
+    gradient_policy = _resolve_builder_gradient_policy(
+        gradient_policy, clip_global_norm=clip_global_norm, axis_name=axis_name
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
     precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
@@ -868,7 +899,7 @@ def schedule_free_adam_from_plan(
         tx,
         ema=ema,
         swa=swa,
-        total_steps=schedule_config.total_steps,
+        total_steps=schedule_config.total_updates,
         labels=normalized.labels,
         groups=compiled_groups,
         inner_eval_fn=_schedule_free_eval_params,
@@ -926,6 +957,7 @@ def adamw8_from_plan(
     b2: float = 0.999,
     eps: float = 1e-6,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     lora_b_lr_ratio: float | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -939,8 +971,8 @@ def adamw8_from_plan(
 ) -> OptimizerBundle:
     """Build grouped AdamW with blockwise 8-bit moment state.
 
-    ``b1``, ``b2``, and ``eps`` behave as in ``adamw_from_plan``.
-    ``precision.moment_dtype`` must match the quantization fallback dtype.
+    ``b1``, ``b2``, ``eps``, and ``gradient_policy`` behave as in
+    ``adamw_from_plan``. ``precision.moment_dtype`` must match the quantization fallback dtype.
     """
 
     quantization = (
@@ -965,10 +997,8 @@ def adamw8_from_plan(
         plan,
         optimizer=optimizer,
         schedule=schedule_config,
-        gradient_policy=GradientPolicy(
-            clip_global_norm=clip_global_norm,
-            nonfinite="skip",
-            axis_name=axis_name,
+        gradient_policy=_resolve_builder_gradient_policy(
+            gradient_policy, clip_global_norm=clip_global_norm, axis_name=axis_name
         ),
         accumulation=AccumulationConfig(steps=accumulation_steps),
         precision=PrecisionConfig(moment_dtype=quantization.fallback_dtype)
@@ -991,6 +1021,7 @@ def hybrid_aurora_adam_from_plan(
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -1016,6 +1047,7 @@ def hybrid_aurora_adam_from_plan(
         schedule=schedule,
         weight_decay=weight_decay,
         clip_global_norm=clip_global_norm,
+        gradient_policy=gradient_policy,
         accumulation_steps=accumulation_steps,
         moment_dtype=moment_dtype,
         precision=precision,
@@ -1040,6 +1072,7 @@ def hybrid_prism_adam_from_plan(
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -1065,6 +1098,7 @@ def hybrid_prism_adam_from_plan(
         schedule=schedule,
         weight_decay=weight_decay,
         clip_global_norm=clip_global_norm,
+        gradient_policy=gradient_policy,
         accumulation_steps=accumulation_steps,
         moment_dtype=moment_dtype,
         precision=precision,
@@ -1089,6 +1123,7 @@ def hybrid_kron_adam_from_plan(
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     preconditioner_dtype: Any | None = None,
@@ -1129,6 +1164,7 @@ def hybrid_kron_adam_from_plan(
         schedule=schedule,
         weight_decay=weight_decay,
         clip_global_norm=clip_global_norm,
+        gradient_policy=gradient_policy,
         accumulation_steps=accumulation_steps,
         moment_dtype=None,
         precision=resolved,
@@ -1157,6 +1193,7 @@ def muon_adam_from_plan(
     schedule: ScheduleKind | ScheduleConfig = "warmup_cosine",
     weight_decay: float = 0.05,
     clip_global_norm: float | None = 1.0,
+    gradient_policy: GradientPolicy | None = None,
     accumulation_steps: int = 1,
     moment_dtype: Any | None = None,
     axis_name: str | tuple[str, ...] | None = None,
@@ -1181,6 +1218,7 @@ def muon_adam_from_plan(
         schedule=schedule,
         weight_decay=weight_decay,
         clip_global_norm=clip_global_norm,
+        gradient_policy=gradient_policy,
         accumulation_steps=accumulation_steps,
         moment_dtype=moment_dtype,
         precision=precision,
@@ -1215,6 +1253,7 @@ def _hybrid_optimizer_from_plan(
     schedule: ScheduleKind | ScheduleConfig,
     weight_decay: float,
     clip_global_norm: float | None,
+    gradient_policy: GradientPolicy | None,
     accumulation_steps: int,
     moment_dtype: Any | None,
     precision: PrecisionConfig | None,
@@ -1246,10 +1285,8 @@ def _hybrid_optimizer_from_plan(
         eps=adam_eps,
     )
     schedule_config = _schedule_config(schedule, total_steps)
-    gradient_policy = GradientPolicy(
-        clip_global_norm=clip_global_norm,
-        nonfinite="skip",
-        axis_name=axis_name,
+    gradient_policy = _resolve_builder_gradient_policy(
+        gradient_policy, clip_global_norm=clip_global_norm, axis_name=axis_name
     )
     accumulation = AccumulationConfig(steps=accumulation_steps)
     precision = _resolve_builder_precision(precision, moment_dtype=moment_dtype)
@@ -1278,7 +1315,7 @@ def _hybrid_optimizer_from_plan(
         tx,
         ema=ema,
         swa=swa,
-        total_steps=schedule_config.total_steps,
+        total_steps=schedule_config.total_updates,
         labels=normalized.labels,
         groups=compiled_groups,
     )
@@ -1972,7 +2009,7 @@ def _make_report(
             trainable=trainable,
             labels=labels,
         ),
-        total_steps=schedule.total_steps,
+        total_steps=schedule.total_updates,
         logical_id_table_hash=logical_id_table_hash,
         model_state_structure_hash=model_state_structure_hash,
         accumulation_steps=accumulation.steps,

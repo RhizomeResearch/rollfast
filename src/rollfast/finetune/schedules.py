@@ -7,6 +7,8 @@ from typing import Any, cast
 import jax.numpy as jnp
 import optax
 
+from rollfast.schedules.cosine_annealing import cosine_annealing_schedule
+from rollfast.schedules.interval import interval_schedule
 from rollfast.schedules.wsd import wsd_schedule
 
 from .config import ScheduleConfig, SchedulePoint
@@ -18,15 +20,40 @@ def build_schedule(
     peak_lr: float,
     total_steps: int | None = None,
 ) -> optax.Schedule:
-    """Build an Optax schedule from a serializable config."""
+    """Build an Optax schedule from a serializable config.
+
+    ``total_steps`` overrides ``config.total_steps`` and, like it, counts
+    intervals of ``config.steps_per_interval`` clock counts. The returned
+    schedule takes the clock count and holds each value for one interval.
+    """
 
     config = config.resolved(total_steps)
+    return interval_schedule(
+        _interval_indexed_schedule(config, peak_lr), config.steps_per_interval
+    )
+
+
+def _interval_indexed_schedule(
+    config: ScheduleConfig, peak_lr: float
+) -> optax.Schedule:
     if config.kind == "constant":
         return _constant_schedule(peak_lr)
     if config.total_steps is None:
         raise ValueError(f"{config.kind!r} schedule requires total_steps.")
     if config.kind in {"warmup_cosine", "linear", "polynomial"}:
         return _warmup_decay_schedule(config, peak_lr)
+    if config.kind == "cosine_annealing":
+        warmup_steps = _resolve_warmup_steps(config, config.total_steps)
+        t_max = config.t_max
+        if t_max is None:
+            t_max = max(config.total_steps - warmup_steps, 1)
+        return cosine_annealing_schedule(
+            peak_lr,
+            t_max,
+            end_lr_ratio=config.end_lr_ratio,
+            warmup_steps=warmup_steps,
+            after_end=config.after_end,
+        )
     if config.kind == "wsd":
         return wsd_schedule(
             peak_lr=peak_lr,
@@ -52,7 +79,12 @@ def preview_schedule(
     total_steps: int | None = None,
     steps: tuple[int, ...] | None = None,
 ) -> tuple[SchedulePoint, ...]:
-    """Return numeric schedule values at representative steps."""
+    """Return numeric schedule values at representative steps.
+
+    Steps are schedule-clock counts. For a ``ScheduleConfig``, ``total_steps``
+    counts intervals as in :func:`build_schedule`, and the default steps span
+    the run's ``total_updates``; each value is the one held at its count.
+    """
 
     if isinstance(schedule_or_config, ScheduleConfig):
         if peak_lr is None:
@@ -62,7 +94,7 @@ def preview_schedule(
             peak_lr=peak_lr,
             total_steps=total_steps,
         )
-        resolved_total = schedule_or_config.resolved(total_steps).total_steps
+        resolved_total = schedule_or_config.resolved(total_steps).total_updates
     else:
         schedule = schedule_or_config
         resolved_total = total_steps

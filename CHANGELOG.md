@@ -5,6 +5,30 @@ supported public API defined in [`docs/stability.md`](./docs/stability.md).
 
 ## Unreleased
 
+### Added
+
+- `ScheduleConfig(steps_per_interval=k)` holds the learning rate of every schedule kind for `k` updates, so a schedule
+  can be stepped once per epoch as PyTorch schedulers usually are. `total_steps`, `warmup_steps`, `decay_steps`, and
+  `t_max` then count intervals, and `ScheduleConfig.total_updates` gives the run's length in updates. The default `k=1`
+  returns the same schedule function as before.
+- `ScheduleConfig(kind="cosine_annealing")` follows PyTorch's `CosineAnnealingLR` closed form after the shared warmup,
+  with `t_max` (the annealing period, by default the run after warmup) and `after_end` (`"clamp"` at the floor, or
+  PyTorch's `"cycle"`). With `warmup_fraction=0.0` and `end_lr_ratio=0.0` it matches PyTorch's scheduler stepped once
+  per epoch.
+- `rollfast.schedules.cosine_annealing_schedule` and `rollfast.schedules.interval_schedule` provide the same schedules
+  for optimizers used without a plan.
+- Every `*_from_plan` builder accepts `gradient_policy`, as `compile_optimizer` does, so the nonfinite policy and other
+  `GradientPolicy` fields no longer need `compile_optimizer`. `clip_global_norm` and `axis_name` remain shorthands and
+  raise if they conflict with an explicit policy.
+
+### Changed
+
+- The SWA start fraction, `OptimizerReport.total_steps`, and the default `preview_schedule` steps count updates
+  (`ScheduleConfig.total_updates`). They differ from before only when `steps_per_interval` is greater than 1.
+- `ScheduleKind` no longer lists `"custom"`, which `ScheduleConfig` always rejected.
+- Checkpoint manifests record `steps_per_interval`, `t_max`, and `after_end`. Manifests written before these fields
+  existed restore under strict validation with their defaults.
+
 ## [1.6.0] - 2026-11-11
 
 Optimizer and fine-tuning updates no longer stall on H100 GPUs with NVIDIA driver 595, and `ScheduleConfig` can index

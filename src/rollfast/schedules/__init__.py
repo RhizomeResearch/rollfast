@@ -6,6 +6,8 @@ from rollfast.optim.psgd import (
     precond_update_prob_schedule as precond_update_prob_schedule,
 )
 
+from .cosine_annealing import cosine_annealing_schedule as cosine_annealing_schedule
+from .interval import interval_schedule as interval_schedule
 from .schedulefree import WeightingMode as WeightingMode
 from .schedulefree import schedule_free as schedule_free
 from .schedulefree import schedule_free_adam as schedule_free_adam
@@ -20,6 +22,8 @@ __all__ = [
     "GradClipMode",
     "PreconditionerMode",
     "WeightingMode",
+    "cosine_annealing_schedule",
+    "interval_schedule",
     "power_decay_schedule",
     "precond_update_prob_schedule",
     "schedule_free",

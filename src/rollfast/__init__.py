@@ -114,6 +114,10 @@ from .optim.soda import (
 )
 from .optim.trasmuon import scale_by_trasmuon as scale_by_trasmuon
 from .optim.trasmuon import trasmuon as trasmuon
+from .schedules.cosine_annealing import (
+    cosine_annealing_schedule as cosine_annealing_schedule,
+)
+from .schedules.interval import interval_schedule as interval_schedule
 from .schedules.schedulefree import (
     WeightingMode as WeightingMode,
 )
@@ -169,10 +173,12 @@ __all__ = [
     "aurora_hyperball",
     "contramuon",
     "contranormuon",
+    "cosine_annealing_schedule",
     "get_equinox_aurora_spec",
     "get_equinox_prism_spec",
     "global_l2_norm",
     "hyperball_riemannian_aurora",
+    "interval_schedule",
     "kron",
     "kron_hyperball",
     "muon",

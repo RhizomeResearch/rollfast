@@ -788,7 +788,24 @@ def test_restore_accepts_manifests_written_before_newer_precision_fields():
         )
 
 
-def test_restore_accepts_manifests_written_before_wsd_shape_fields():
+@pytest.mark.parametrize(
+    ("added", "changed"),
+    (
+        (
+            (
+                "warmup_shape",
+                "decay_shape",
+                "warmup_power",
+                "decay_power",
+                "exponential_rate",
+            ),
+            {"decay_shape": "cosine"},
+        ),
+        (("steps_per_interval", "t_max", "after_end"), {"steps_per_interval": 2}),
+    ),
+    ids=("wsd_shape_fields", "interval_fields"),
+)
+def test_restore_accepts_manifests_written_before_newer_schedule_fields(added, changed):
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(
         plan,
@@ -797,13 +814,6 @@ def test_restore_accepts_manifests_written_before_wsd_shape_fields():
     )
     checkpoint = rfft.make_state_checkpoint(
         bundle, bundle.init(plan.trainable), model_checkpoint_id="model-step-1"
-    )
-    added = (
-        "warmup_shape",
-        "decay_shape",
-        "warmup_power",
-        "decay_power",
-        "exponential_rate",
     )
     schedule = {
         key: value
@@ -824,10 +834,12 @@ def test_restore_accepts_manifests_written_before_wsd_shape_fields():
     )
 
     assert restored is checkpoint.state
-    cosine = rfft.adamw_from_plan(
+    different = rfft.adamw_from_plan(
         plan,
         total_steps=10,
-        schedule=rfft.ScheduleConfig(kind="wsd", total_steps=10, decay_shape="cosine"),
+        schedule=rfft.ScheduleConfig(kind="wsd", total_steps=10, **changed),
     )
     with pytest.raises(rfft.OptimizerStateRestoreError, match="schedule_config"):
-        rfft.restore_state_checkpoint(cosine, older, model_checkpoint_id="model-step-1")
+        rfft.restore_state_checkpoint(
+            different, older, model_checkpoint_id="model-step-1"
+        )

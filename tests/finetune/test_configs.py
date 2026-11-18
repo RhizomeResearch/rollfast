@@ -6,12 +6,49 @@ import rollfast.finetune as rfft
 
 @pytest.mark.parametrize(
     "kind",
-    ("constant", "warmup_cosine", "wsd", "linear", "polynomial"),
+    ("constant", "warmup_cosine", "cosine_annealing", "wsd", "linear", "polynomial"),
 )
 def test_supported_schedule_kinds_round_trip(kind):
-    config = rfft.ScheduleConfig(kind=kind, total_steps=100)
+    config = rfft.ScheduleConfig(kind=kind, total_steps=100, steps_per_interval=7)
 
     assert rfft.ScheduleConfig.from_dict(config.to_dict()) == config
+    assert config.total_updates == 700
+
+
+def test_interval_fields_round_trip_and_default_when_absent():
+    config = rfft.ScheduleConfig(
+        kind="cosine_annealing",
+        total_steps=10,
+        steps_per_interval=3,
+        t_max=4,
+        after_end="cycle",
+    )
+    older = {
+        key: value
+        for key, value in rfft.ScheduleConfig(kind="wsd").to_dict().items()
+        if key not in {"steps_per_interval", "t_max", "after_end"}
+    }
+
+    assert rfft.ScheduleConfig.from_dict(config.to_dict()) == config
+    assert rfft.ScheduleConfig.from_dict(older) == rfft.ScheduleConfig(kind="wsd")
+    assert rfft.ScheduleConfig().total_updates is None
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    (
+        ({"steps_per_interval": 0}, "steps_per_interval"),
+        ({"steps_per_interval": 2.0}, "steps_per_interval"),
+        ({"steps_per_interval": True}, "steps_per_interval"),
+        ({"kind": "cosine_annealing", "t_max": 0}, "t_max"),
+        ({"kind": "warmup_cosine", "t_max": 5}, "t_max applies only"),
+        ({"kind": "wsd", "after_end": "cycle"}, "after_end='cycle' applies only"),
+        ({"kind": "cosine_annealing", "after_end": "wrap"}, "after_end"),
+    ),
+)
+def test_invalid_interval_fields_are_rejected(fields, message):
+    with pytest.raises(ValueError, match=message):
+        rfft.ScheduleConfig(**fields)
 
 
 def test_wsd_shape_fields_round_trip_and_default_when_absent():

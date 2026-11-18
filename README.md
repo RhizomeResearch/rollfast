@@ -292,8 +292,35 @@ builders. Rollfast's warmup schedules preserve the existing behavior that step 0
 warmup is enabled. AdamW fine-tuning defaults keep `eps=1e-6`; pass `eps=1e-8` when mirroring Optax/PyTorch-style AdamW
 settings exactly. `optim.manifest()` records the resolved optimizer, schedule, clipping and precision configs and
 representative schedule values. The schedule counter starts at zero for the first applied optimizer update; the final
-planned update uses index `total_steps - 1`. Preview a particular group with
-`preview_schedule(optim.schedule_config, peak_lr=group.effective_lr, steps=(0, optim.schedule_config.total_steps - 1))`.
+planned update uses index `total_updates - 1`, which is `total_steps - 1` unless `steps_per_interval` holds each value
+for several updates. Preview a particular group with
+`preview_schedule(optim.schedule_config, peak_lr=group.effective_lr, steps=(0, optim.schedule_config.total_updates - 1))`.
+
+`ScheduleConfig(steps_per_interval=k)` holds every schedule kind for `k` updates, the way PyTorch schedulers are usually
+stepped once per epoch; `total_steps`, `warmup_steps`, `decay_steps`, and `t_max` then count intervals.
+`kind="cosine_annealing"` is PyTorch's `CosineAnnealingLR` closed form, which stays above its floor until interval
+`t_max`. The warmup and floor defaults are shared by every kind, so matching PyTorch needs them set to zero:
+
+```python
+optim = rfft.adamw_from_plan(
+    plan,
+    base_lr=1e-3,
+    weight_decay=5e-4,
+    eps=1e-8,
+    clip_global_norm=None,
+    schedule=rfft.ScheduleConfig(
+        kind="cosine_annealing",
+        total_steps=epochs,  # PyTorch's T_max
+        steps_per_interval=updates_per_epoch,
+        warmup_fraction=0.0,
+        end_lr_ratio=0.0,  # PyTorch's eta_min / lr
+    ),
+)
+```
+
+Every `*_from_plan` builder takes `gradient_policy=rfft.GradientPolicy(...)`, as `compile_optimizer` does; for example,
+`nonfinite="none"` applies every update so that the caller can stop on a nonfinite loss. `clip_global_norm` and
+`axis_name` remain shorthands and must match an explicit policy.
 
 Fine-tuning docs are in [`docs/finetuning/`](./docs/finetuning), with compatibility and migration guidance in
 [`docs/finetuning/compatibility.md`](./docs/finetuning/compatibility.md), state and checkpoint guidance in

@@ -113,6 +113,9 @@ most focused relevant test, then the full applicable checks above. Report any ch
   skipped attempts advance only those counts. A builder whose learning rate reads a count that other state shares (bias
   correction, projection refresh, Schedule-Free averaging) must reject `"attempt"` with
   `_require_optimizer_schedule_clock`.
+- `ScheduleConfig.total_steps` (and a builder's `total_steps`) counts schedule intervals of `steps_per_interval`
+  updates. Anything that counts updates, such as the SWA start fraction, `OptimizerReport.total_steps`, or preview
+  steps, must use `ScheduleConfig.total_updates`.
 - Do not silently change optimizer defaults, state-tree structure, counter ownership, serialization formats, or
   checkpoint compatibility. Such changes require explicit tests and matching documentation.
 - If the package version changes, keep `pyproject.toml` and `src/rollfast/__init__.py` synchronized; CI checks them for

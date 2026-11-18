@@ -135,6 +135,49 @@ def test_swa_view_starts_at_resolved_fraction():
     assert not jnp.allclose(swa_params["head"]["w"], plan.trainable["head"]["w"])
 
 
+@pytest.mark.parametrize(
+    "family",
+    [
+        "adamw",
+        "adamw8",
+        "galore_adamw",
+        "apollo_adamw",
+        "schedule_free_adam",
+        "hybrid_aurora_adam",
+        "hybrid_prism_adam",
+        "hybrid_kron_adam",
+        "muon_adam",
+    ],
+)
+def test_swa_start_fraction_counts_updates_not_schedule_intervals(family):
+    plan = tiny_plan()
+    kwargs = {}
+    if family == "galore_adamw":
+        kwargs["galore"] = rfft.GaLoreConfig(rank=1, min_matrix_size=0)
+    if family == "apollo_adamw":
+        kwargs["apollo"] = rfft.APOLLOConfig(rank=1)
+    # Two intervals of three updates: half of the six-update run starts SWA at
+    # update 3, so updates 3 through 6 are averaged.
+    bundle = getattr(rfft, f"{family}_from_plan")(
+        plan,
+        total_steps=2,
+        schedule=rfft.ScheduleConfig(kind="constant", steps_per_interval=3),
+        clip_global_norm=None,
+        swa=rfft.SWAConfig(enabled=True, start_fraction=0.5),
+        **kwargs,
+    )
+    params = plan.trainable
+    state = bundle.init(params)
+    update = jax.jit(bundle.update)
+    grads = ones_like_trainable(params)
+    for _ in range(6):
+        updates, state = update(grads, state, params)
+        params = apply_updates(params, updates, stochastic=False)
+
+    assert bundle.report.total_steps == 6
+    assert int(state.swa_count) == 4
+
+
 def test_averaging_does_not_advance_on_withheld_accumulation_microstep():
     plan = tiny_plan()
     bundle = rfft.adamw_from_plan(

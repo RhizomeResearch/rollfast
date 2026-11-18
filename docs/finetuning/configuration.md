@@ -4,15 +4,15 @@ Rollfast rejects fine-tuning configuration values that do not have runtime seman
 `NotImplementedError` when their config object is constructed, including through `from_dict`. Serialized field names and
 schema version 1 remain unchanged.
 
-| Field                                          | Supported                                                  | Unsupported                          |
-| ---------------------------------------------- | ---------------------------------------------------------- | ------------------------------------ |
-| `ScheduleConfig.kind`                          | `constant`, `warmup_cosine`, `wsd`, `linear`, `polynomial` | `custom`                             |
-| `ScheduleConfig.step_counter`                  | `optimizer`, `attempt`                                     | `micro`                              |
-| `AccumulationConfig.remainder`                 | `error`                                                    | `drop`, `apply_with_true_normalizer` |
-| `AccumulationConfig.reduce_after_accumulation` | `True`                                                     | `False`                              |
-| `AccumulationConfig.finite_policy`             | `discard_window`                                           | `error`                              |
-| `PrecisionConfig.cast_back`                    | `nearest`                                                  | `stochastic`                         |
-| `PrecisionConfig.update_compute_dtype`         | `float32`                                                  | Other dtypes                         |
+| Field                                          | Supported                                                                      | Unsupported                          |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------ |
+| `ScheduleConfig.kind`                          | `constant`, `warmup_cosine`, `cosine_annealing`, `wsd`, `linear`, `polynomial` | Other kinds                          |
+| `ScheduleConfig.step_counter`                  | `optimizer`, `attempt`                                                         | `micro`                              |
+| `AccumulationConfig.remainder`                 | `error`                                                                        | `drop`, `apply_with_true_normalizer` |
+| `AccumulationConfig.reduce_after_accumulation` | `True`                                                                         | `False`                              |
+| `AccumulationConfig.finite_policy`             | `discard_window`                                                               | `error`                              |
+| `PrecisionConfig.cast_back`                    | `nearest`                                                                      | `stochastic`                         |
+| `PrecisionConfig.update_compute_dtype`         | `float32`                                                                      | Other dtypes                         |
 
 With `remainder="error"`, callers must finish training on a complete accumulation window. Rollfast does not currently
 expose a finalization API for flushing or dropping a partial window, so the caller owns that lifecycle.
@@ -61,6 +61,39 @@ WSD slot counts follow `wsd_schedule`:
   `decay_steps=d` gives `d - 1` slots below the peak.
 - A decay whose first slot is already below the peak needs `decay_steps=d + 1`.
 
+## Cosine annealing and per-interval schedules
+
+`ScheduleConfig(kind="cosine_annealing")` follows PyTorch's `CosineAnnealingLR` after the shared linear warmup:
+
+```text
+lr(i) = end_lr + (peak_lr - end_lr) * (1 + cos(pi * i / t_max)) / 2,   end_lr = end_lr_ratio * peak_lr
+```
+
+where `i` counts slots after warmup and `t_max` defaults to `total_steps - warmup_steps`. Unlike `warmup_cosine`, which
+reaches `end_lr` on the run's last slot, this kind reaches it only at slot `t_max`, so with `t_max = total_steps` the
+last slot is still at `(1 + cos(pi (t_max - 1) / t_max)) / 2` of the way from the floor to the peak. Warmup
+(`warmup_steps` or `warmup_fraction`, default 5%) and `end_lr_ratio` (default 0.01) mean the same as for every other
+kind; set `warmup_fraction=0.0` and `end_lr_ratio=0.0` to match PyTorch's defaults. Set `t_max` to anneal over a period
+other than the run. `after_end="clamp"` (the default) holds `end_lr` after `t_max`; `after_end="cycle"` keeps following
+the cosine back up, as PyTorch does. `t_max` and `after_end="cycle"` apply only to this kind.
+
+Rollfast evaluates PyTorch's closed form, which PyTorch's scheduler computes recursively, so values can differ from
+PyTorch's in the last float bits. The float32 evaluation uses the equivalent `sin(pi * (1 - i / t_max) / 2) ** 2` form,
+which keeps its relative accuracy in the last slots, where the factor is small.
+
+`steps_per_interval=k` (default 1) holds the learning rate for `k` counts of the schedule clock and applies to every
+kind: the schedule is indexed by `count // k`, and `total_steps`, `warmup_steps`, `decay_steps`, and `t_max` count
+intervals. Set `k` to the number of updates per epoch to step a schedule once per epoch, as PyTorch training loops
+usually do. `ScheduleConfig.total_updates` is `total_steps * k`; the SWA start fraction, `OptimizerReport.total_steps`,
+and the default `preview_schedule` steps use it. The builders' `total_steps` argument fills `ScheduleConfig.total_steps`
+and therefore also counts intervals. With a short last epoch (`drop_last=False`), pass the number of batches the loader
+yields per epoch, `ceil(examples / batch_size)`.
+
+The interval index divides whichever clock `step_counter` selects. Under `"attempt"`, a skipped or rejected attempt
+still moves toward the next interval; with accumulation, one count is one optimizer window. `rollfast.schedules` exposes
+the same building blocks for optimizers used without a plan: `cosine_annealing_schedule(...)` and
+`interval_schedule(schedule, steps_per_interval)`.
+
 ## Schedule clocks and skipped attempts
 
 `ScheduleConfig.step_counter` selects the clock that indexes the learning-rate schedule:
@@ -69,9 +102,9 @@ WSD slot counts follow `wsd_schedule`:
   the schedule where it was.
 - `"attempt"` counts update attempts. Every attempt consumes one schedule slot, whether its update is applied, rejected
   as nonfinite, or skipped, so fits that see empty batches at different attempts still share one learning rate per
-  attempt and reach the schedule's floor at attempt `total_steps - 1`. With accumulation, one attempt is one optimizer
-  window: microbatches inside a window do not move the clock, and a discarded window consumes one slot. Adam moments,
-  Adam's bias-correction count, and weight decay still follow applied updates only.
+  attempt and reach the schedule's last value at attempt `total_updates - 1`. With accumulation, one attempt is one
+  optimizer window: microbatches inside a window do not move the clock, and a discarded window consumes one slot. Adam
+  moments, Adam's bias-correction count, and weight decay still follow applied updates only.
 
 The attempt clock is the optimizer state's existing schedule count, so it needs no new state and is saved and restored
 with the optimizer state. `counters.schedule_step` reports it in `FineTuneStepState`. `apollo_adamw_from_plan`,

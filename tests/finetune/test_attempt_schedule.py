@@ -144,6 +144,62 @@ def test_applied_updates_use_the_learning_rate_of_their_attempt_slot(family):
     assert state.counters.successful_update == attempts.count("apply")
 
 
+def test_held_rate_follows_the_attempt_clock_across_skips():
+    per_interval = 3
+
+    def build(step_counter):
+        plan = tiny_plan()
+        schedule = rfft.ScheduleConfig(
+            kind="cosine_annealing",
+            total_steps=3,
+            steps_per_interval=per_interval,
+            warmup_fraction=0.0,
+            end_lr_ratio=0.0,
+            step_counter=step_counter,
+        )
+        bundle = rfft.adamw_from_plan(
+            plan,
+            base_lr=1e-2,
+            schedule=schedule,
+            weight_decay=0.1,
+            clip_global_norm=None,
+        )
+        return plan, bundle
+
+    plan, bundle = build("attempt")
+    _, reference = build("optimizer")
+    step = jax.jit(rfft.make_finetune_update_step(plan, _loss, bundle))
+    skip = jax.jit(rfft.make_skip_attempt_step(bundle))
+    reference_step = jax.jit(rfft.make_finetune_update_step(plan, _loss, reference))
+    params = reference_params = plan.trainable
+    state = rfft.init_finetune_step_state(bundle, params)
+    reference_state = rfft.init_finetune_step_state(reference, reference_params)
+    # Slot 1 skips mid-interval, so slot 2 stays on interval 0. Slot 5 skips the
+    # last slot of interval 1, so slot 6 starts interval 2.
+    attempts = ("apply", "skip", "apply", "apply", "apply", "skip", "apply")
+
+    for slot, attempt in enumerate(attempts):
+        if attempt == "skip":
+            state = skip(state)
+            continue
+        params, state, _ = step(params, state, jnp.asarray(1.0))
+        # Forcing the reference clock to the interval's first slot gives the
+        # update that interval's rate.
+        interval_start = slot // per_interval * per_interval
+        reference_state = replace(
+            reference_state,
+            optimizer_state=_with_clocks(
+                reference_state.optimizer_state, interval_start
+            ),
+        )
+        reference_params, reference_state, _ = reference_step(
+            reference_params, reference_state, jnp.asarray(1.0)
+        )
+        _assert_trees_equal(params, reference_params)
+
+    assert _clocks(state.optimizer_state) == {len(attempts)}
+
+
 @pytest.mark.parametrize("family", FAMILIES)
 def test_attempt_clock_without_skips_matches_optimizer_clock(family):
     plan, attempt_bundle = _build(family, "attempt")
