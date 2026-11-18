@@ -35,6 +35,7 @@ from rollfast.schedules.wsd import _make_wsd_schedule_pair, wsd_schedule
 from rollfast.utils import (
     _fresh_prng_key,
     _reject_complex_tree,
+    _safe_increment,
     _stochastic_round_bf16,
     _validate_nonnegative_static_scalar,
 )
@@ -604,7 +605,7 @@ def schedule_free(
         new_state = ScheduleFreeState(
             b1=b1_next,
             weight_sum=new_weight_sum,
-            step_count=cast(jax.Array, optax.safe_increment(state.step_count)),
+            step_count=_safe_increment(state.step_count),
             base_state=new_base_state,
             z=z_next,
             key=next_state_key,

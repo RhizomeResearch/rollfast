@@ -19,6 +19,7 @@ from rollfast.utils import (
     _resolve_mask,
     _resolve_scalar,
     _safe_bias_correction,
+    _safe_increment,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     _tree_update_moment_sq_f32,
@@ -133,7 +134,7 @@ def scale_by_adam(
 
         mu_f32 = _tree_update_moment_f32(updates, state.mu, b1)
         nu_f32 = _tree_update_moment_sq_f32(updates, state.nu, b2)
-        count_inc = cast(jax.Array, optax.safe_increment(state.count))
+        count_inc = _safe_increment(state.count)
 
         mu_bc_factor = 1.0 - b1**count_inc
         nu_bc_factor = 1.0 - b2**count_inc

@@ -19,6 +19,7 @@ from rollfast.utils import (
     _map_non_aux,
     _resolve_mask,
     _resolve_scalar,
+    _safe_increment,
     _tree_bias_correction_momentum,
     _tree_momentum_lookahead,
     _tree_stochastic_cast,
@@ -141,7 +142,7 @@ def prepare_matrix_runtime_step(
     """Prepare clipped gradients, momentum, and shaping targets for one step."""
     _validate_positive_static_scalar("raw_global_grad_clip", raw_global_grad_clip)
     next_key, sr_key, magma_key = _split_runtime_keys(key, use_magma)
-    count_inc = cast(jax.Array, optax.safe_increment(count))
+    count_inc = _safe_increment(count)
 
     if raw_global_grad_clip is not None:
         grad_norm = _tree_global_norm(updates, axis_name=axis_name)

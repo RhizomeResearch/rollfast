@@ -10,6 +10,16 @@ MomentumAccumulator = Literal["ema", "heavy_ball"]
 MaskOrFn = Any | Callable[[optax.Params], Any] | None
 
 
+def _safe_increment(count: jax.typing.ArrayLike) -> jax.Array:
+    """Return ``optax.safe_increment(count)`` typed as an array.
+
+    Optax 0.2.8 annotates the result as ``ArrayLike`` and 0.2.9 as ``Array``. A
+    cast is needed under the first and redundant under the second, while
+    ``jnp.asarray`` types both and traces to the same program.
+    """
+    return jnp.asarray(optax.safe_increment(count))
+
+
 def _reject_complex_tree(tree: Any, family: str) -> None:
     for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
         if hasattr(leaf, "dtype") and jnp.issubdtype(
@@ -634,7 +644,7 @@ def _prepare_first_moment_runtime(
     extra_key_count: int = 0,
 ) -> FirstMomentRuntime:
     """Update first moment, form the direction, store state, and advance keys."""
-    count_inc = cast(jax.Array, optax.safe_increment(count))
+    count_inc = _safe_increment(count)
     mu = _tree_update_moment_f32(
         updates,
         moments,
@@ -646,7 +656,7 @@ def _prepare_first_moment_runtime(
         moment_count = count_inc
         if nesterov:
             for _ in range(nesterov_moment_count_offset):
-                moment_count = cast(jax.Array, optax.safe_increment(moment_count))
+                moment_count = _safe_increment(moment_count)
         mu_target = _tree_bias_correction_momentum(
             mu,
             decay,

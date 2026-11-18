@@ -18,6 +18,7 @@ from rollfast.utils import (
     _fresh_prng_key,
     _reject_complex_tree,
     _safe_bias_correction,
+    _safe_increment,
     zeros_like_preserving_sharding,
 )
 
@@ -338,7 +339,7 @@ def scale_by_adam8(
             nu_prev,
             is_leaf=_is_passthrough_leaf,
         )
-        count_inc = cast(jax.Array, optax.safe_increment(state.count))
+        count_inc = _safe_increment(state.count)
 
         mu_bc_factor = 1.0 - b1**count_inc
         nu_bc_factor = 1.0 - b2**count_inc

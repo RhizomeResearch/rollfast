@@ -16,6 +16,7 @@ from rollfast.utils import (
     _resolve_mask,
     _run_if,
     _safe_bias_correction,
+    _safe_increment,
 )
 
 Projection = Literal["auto", "left", "right", "two_sided"]
@@ -155,7 +156,7 @@ def galore_adamw(
                 _resolve_mask(weight_decay_mask, params),
                 is_leaf=_is_passthrough,
             )
-        count_inc = cast(jax.Array, optax.safe_increment(state.count))
+        count_inc = _safe_increment(state.count)
         should_refresh = (state.count % update_interval) == 0
         wd_step = (
             cast(Callable[[jax.Array], Any], weight_decay)(state.count)

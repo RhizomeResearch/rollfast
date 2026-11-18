@@ -53,6 +53,7 @@ from rollfast.utils import (
     _reject_complex_tree,
     _resolve_mask,
     _resolve_scalar,
+    _safe_increment,
     _validate_nonnegative_static_scalar,
     dist_reduce,
 )
@@ -346,7 +347,7 @@ def apply_hyperball(
             resolved_weight_decay_mask,
             is_leaf=_is_aux_leaf,
         )
-        count_inc = cast(jax.Array, optax.safe_increment(hyperball_state.count))
+        count_inc = _safe_increment(hyperball_state.count)
         return new_updates, HyperballState(
             count=count_inc, init_norm=hyperball_state.init_norm
         )

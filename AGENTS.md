@@ -48,6 +48,12 @@ XLA_FLAGS=--xla_force_host_platform_device_count=4 uv run pytest tests/test_mult
 uv build
 ```
 
+`uv.lock` is gitignored, so CI resolves the newest allowed dependencies while a local run uses the lock. A dependency
+release can break `ty check` in CI only: Optax 0.2.9 retyped `safe_increment` from `ArrayLike` to `Array`, which made
+casts needed under 0.2.8 fail as redundant. Code must type-check under both the minimum and the newest versions; to
+reproduce CI, install the project with `--group pyproject.toml:dev` into a fresh venv outside the repository and run
+`ty check --python <venv>/bin/python`.
+
 `devenv shell` is an alternative bootstrap path and performs `uv sync` on entry. Before finishing a code change, run the
 most focused relevant test, then the full applicable checks above. Report any check that could not be run.
 

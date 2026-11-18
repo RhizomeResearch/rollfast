@@ -12,7 +12,12 @@ import jax.numpy as jnp
 import optax
 from optax._src import utils
 
-from rollfast.utils import _reject_complex_tree, _resolve_mask, _run_if
+from rollfast.utils import (
+    _reject_complex_tree,
+    _resolve_mask,
+    _run_if,
+    _safe_increment,
+)
 
 Scaling = Literal["channel", "tensor"]
 Orientation = Literal["left", "right", "full"]
@@ -147,7 +152,7 @@ def apollo_adamw(
                 _resolve_mask(weight_decay_mask, params),
                 is_leaf=_is_passthrough,
             )
-        count_inc = cast(jax.Array, optax.safe_increment(state.count))
+        count_inc = _safe_increment(state.count)
         wd_step = (
             cast(Callable[[jax.Array], Any], weight_decay)(state.count)
             if callable(weight_decay)

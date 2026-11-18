@@ -46,6 +46,7 @@ from rollfast.utils import (
     _momentum_grad_scale,
     _resolve_scalar,
     _run_if,
+    _safe_increment,
     _tree_stochastic_cast,
     _unzip_leaf_tuple_tree,
     _validate_beta_static_scalar,
@@ -270,7 +271,7 @@ def scale_by_pion(
         if params is None:
             raise ValueError("`params` must be provided to `scale_by_pion`.")
 
-        count_inc = optax.safe_increment(state.count)
+        count_inc = _safe_increment(state.count)
         dim_nums = _get_dimension_numbers(weight_dimension_numbers, params)
 
         unsupported = jax.tree.leaves(
@@ -339,7 +340,7 @@ def scale_by_pion(
             v_out = _cast_state_tree(v_out, canonical_mu_dtype)
 
         return new_updates, ScaleByPionState(
-            count=cast(jax.Array, count_inc),
+            count=count_inc,
             m_in=m_in,
             v_in=v_in,
             m_out=m_out,

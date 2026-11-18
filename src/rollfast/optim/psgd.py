@@ -23,6 +23,7 @@ from rollfast.utils import (
     _resolve_mask,
     _resolve_scalar,
     _run_if,
+    _safe_increment,
     _tree_stochastic_cast,
     _tree_update_moment_f32,
     _validate_grad_clip_max_amps,
@@ -1140,7 +1141,7 @@ def scale_by_kron(
     def update_fn(updates, state, params=None):
         raw_gradients = updates
 
-        count_inc = cast(jax.Array, optax.safe_int32_increment(state.count))
+        count_inc = _safe_increment(state.count)
 
         if use_magma:
             key, key_next, magma_key = jax.random.split(state.key, 3)
